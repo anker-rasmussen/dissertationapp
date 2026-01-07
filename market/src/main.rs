@@ -9,6 +9,10 @@ fn app() -> Element {
     let mut count = use_signal(|| 0);
 
     rsx! {
+    System.out.println(someFunc(4));
+}
+
+// 1. Wh
         div {
             h1 { "Counter: {count()}" }
 
@@ -20,6 +24,9 @@ fn app() -> Element {
                 onclick: move |_| count-=1,
                 "Or me:)"
             }
+        }
+        div{
+            h1{"This is another div!"}
         }
     }
 }
