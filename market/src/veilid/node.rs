@@ -289,6 +289,17 @@ impl VeilidNode {
     pub fn take_update_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<VeilidUpdate>> {
         self.update_rx.take()
     }
+
+    /// Create a DHT operations handle for this node
+    /// Returns None if the node hasn't been started yet
+    pub fn dht_operations(&self) -> Option<crate::veilid::dht::DHTOperations> {
+        self.api.as_ref().map(|api| {
+            // Use unsafe routing for devnet (no private routes)
+            // Use safe routing for public network
+            let use_unsafe_routing = self.devnet_config.is_some();
+            crate::veilid::dht::DHTOperations::new(api.clone(), use_unsafe_routing)
+        })
+    }
 }
 
 impl Drop for VeilidNode {
