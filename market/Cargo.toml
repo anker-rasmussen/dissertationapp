@@ -7,7 +7,7 @@ authors = ["Anker Rasmussen"]
 
 [dependencies]
 # UI Framework
-dioxus = { version = "0.7", features = ["desktop"] }
+dioxus = { version = "0.7.2", features = ["desktop"] }
 
 # Veilid P2P Network
 # footgun feature enables unsafe routing for devnet (no privacy routes)
