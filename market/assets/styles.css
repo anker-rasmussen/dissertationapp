@@ -1,0 +1,327 @@
+/* Main container */
+.container {
+    font-family: system-ui;
+    padding: 20px;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+/* Typography */
+h1 {
+    color: #333;
+}
+
+h2 {
+    margin-top: 0;
+    font-size: 1.2em;
+}
+
+h3 {
+    font-size: 1em;
+    margin-bottom: 10px;
+}
+
+h4 {
+    margin-top: 0;
+}
+
+/* Status card */
+.status-card {
+    background: #f5f5f5;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+
+.status-card .status-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+}
+
+.status-card .label {
+    font-weight: bold;
+}
+
+.status-card .connected {
+    color: green;
+}
+
+.status-card .connecting {
+    color: orange;
+}
+
+.status-card .node-id {
+    font-family: monospace;
+    font-size: 0.85em;
+    word-break: break-all;
+}
+
+/* Create listing section */
+.create-listing {
+    background: #e7f5e7;
+    padding: 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+
+.create-listing form {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.create-listing .form-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.create-listing label {
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.create-listing input,
+.create-listing textarea {
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+.create-listing textarea {
+    min-height: 100px;
+    resize: vertical;
+}
+
+.create-listing .form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+}
+
+.create-listing .submit-btn {
+    padding: 12px;
+    font-size: 1em;
+    font-weight: bold;
+    cursor: pointer;
+    background: #28a745;
+    color: white;
+    border: none;
+    border-radius: 4px;
+}
+
+.create-listing .submit-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.create-listing .result {
+    margin-top: 10px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+/* Listing browser section */
+.listing-browser {
+    background: #e7f0f5;
+    padding: 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+
+.listing-browser .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.listing-browser .header h2 {
+    margin: 0;
+}
+
+.listing-browser .refresh-btn {
+    padding: 8px 16px;
+    background: #6c757d;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.listing-browser .refresh-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.listing-browser .known-listings {
+    margin-bottom: 15px;
+}
+
+.listing-browser .listing-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.listing-browser .listing-btn {
+    text-align: left;
+    padding: 8px;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.listing-browser .manual-input {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.listing-browser .manual-input input {
+    flex: 1;
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.listing-browser .fetch-btn {
+    padding: 8px 16px;
+    background: #17a2b8;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.listing-browser .fetch-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.listing-browser .browse-result {
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.9em;
+    margin-bottom: 15px;
+}
+
+/* Current listing display */
+.current-listing {
+    background: white;
+    padding: 15px;
+    border-radius: 8px;
+    border: 2px solid #17a2b8;
+}
+
+.current-listing h3 {
+    margin-top: 0;
+    color: #17a2b8;
+}
+
+.current-listing .listing-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 8px;
+    margin-bottom: 15px;
+}
+
+.current-listing .listing-grid .label {
+    font-weight: bold;
+}
+
+.current-listing .listing-grid .active {
+    color: green;
+}
+
+.current-listing .listing-grid .inactive {
+    color: orange;
+}
+
+.current-listing .seller-id {
+    font-family: monospace;
+    font-size: 0.85em;
+    word-break: break-all;
+}
+
+/* Bidding form */
+.bidding-form {
+    border-top: 1px solid #ddd;
+    padding-top: 15px;
+}
+
+.bidding-form .bid-input-group {
+    display: flex;
+    gap: 10px;
+}
+
+.bidding-form .bid-input {
+    flex: 1;
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+.bidding-form .bid-btn {
+    padding: 8px 20px;
+    background: #dc3545;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.bidding-form .bid-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.bidding-form .bid-result {
+    margin-top: 10px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+/* DHT test section */
+.dht-test {
+    background: #fff3cd;
+    padding: 20px;
+    border-radius: 8px;
+    margin-top: 20px;
+}
+
+.dht-test .test-btn {
+    padding: 10px 20px;
+    font-size: 1em;
+    cursor: pointer;
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    margin-bottom: 10px;
+}
+
+.dht-test .test-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.dht-test .test-result {
+    margin-top: 10px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.9em;
+}
