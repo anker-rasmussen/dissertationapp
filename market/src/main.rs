@@ -524,39 +524,37 @@ fn app() -> Element {
     };
 
     rsx! {
+        document::Stylesheet { href: asset!("/assets/styles.css") }
+        
         div {
             class: "container",
-            style: "font-family: system-ui; padding: 20px; max-width: 800px; margin: 0 auto;",
 
             h1 {
-                style: "color: #333;",
                 "SMPC Sealed-Bid Auction"
             }
 
             div {
                 class: "status-card",
-                style: "background: #f5f5f5; padding: 15px; border-radius: 8px; margin-bottom: 20px;",
 
                 h2 {
-                    style: "margin-top: 0; font-size: 1.2em;",
                     "Network Status"
                 }
 
                 div {
-                    style: "display: grid; grid-template-columns: auto 1fr; gap: 10px;",
+                    class: "status-grid",
 
-                    span { style: "font-weight: bold;", "Status:" }
+                    span { class: "label", "Status:" }
                     span {
-                        style: if state.is_attached { "color: green;" } else { "color: orange;" },
+                        class: if state.is_attached { "connected" } else { "connecting" },
                         "{connection_status}"
                     }
 
-                    span { style: "font-weight: bold;", "Peers:" }
+                    span { class: "label", "Peers:" }
                     span { "{state.peer_count}" }
 
-                    span { style: "font-weight: bold;", "Node ID:" }
+                    span { class: "label", "Node ID:" }
                     span {
-                        style: "font-family: monospace; font-size: 0.85em; word-break: break-all;",
+                        class: "node-id",
                         "{node_id_display}"
                     }
                 }
@@ -564,93 +562,82 @@ fn app() -> Element {
 
             div {
                 class: "create-listing",
-                style: "background: #e7f5e7; padding: 20px; border-radius: 8px; margin-bottom: 20px;",
 
                 h2 {
-                    style: "margin-top: 0; font-size: 1.2em;",
                     "Create Auction Listing"
                 }
 
                 form {
-                    style: "display: flex; flex-direction: column; gap: 15px;",
                     onsubmit: move |e| {
                         e.prevent_default();
                         create_listing(());
                     },
 
                     div {
-                        style: "display: flex; flex-direction: column;",
+                        class: "form-group",
                         label {
-                            style: "font-weight: bold; margin-bottom: 5px;",
                             "Title (publicly visible):"
                         }
                         input {
                             r#type: "text",
                             value: "{listing_title}",
                             oninput: move |e| listing_title.set(e.value().clone()),
-                            placeholder: "e.g., Vintage Comic Book",
-                            style: "padding: 8px; border: 1px solid #ccc; border-radius: 4px;",
+                            placeholder: "e.g., Not confidential market making information",
                         }
                     }
 
                     div {
-                        style: "display: flex; flex-direction: column;",
+                        class: "form-group",
                         label {
-                            style: "font-weight: bold; margin-bottom: 5px;",
                             "Content (will be encrypted):"
                         }
                         textarea {
                             value: "{listing_content}",
                             oninput: move |e| listing_content.set(e.value().clone()),
-                            placeholder: "Secret details about the item (only winner can decrypt via MPC)...",
-                            style: "padding: 8px; border: 1px solid #ccc; border-radius: 4px; min-height: 100px; resize: vertical;",
+                            placeholder: "content (encrypted), will be decryptable via MPC",
                         }
                     }
 
                     div {
-                        style: "display: grid; grid-template-columns: 1fr 1fr; gap: 15px;",
+                        class: "form-row",
 
                         div {
-                            style: "display: flex; flex-direction: column;",
+                            class: "form-group",
                             label {
-                                style: "font-weight: bold; margin-bottom: 5px;",
                                 "Minimum Bid (atomic units):"
                             }
                             input {
                                 r#type: "number",
                                 value: "{listing_min_bid}",
                                 oninput: move |e| listing_min_bid.set(e.value().clone()),
-                                placeholder: "1000",
-                                style: "padding: 8px; border: 1px solid #ccc; border-radius: 4px;",
+                                placeholder: "10",
                             }
                         }
 
                         div {
-                            style: "display: flex; flex-direction: column;",
+                            class: "form-group",
                             label {
-                                style: "font-weight: bold; margin-bottom: 5px;",
                                 "Duration (seconds):"
                             }
                             input {
                                 r#type: "number",
                                 value: "{listing_duration}",
                                 oninput: move |e| listing_duration.set(e.value().clone()),
-                                placeholder: "3600",
-                                style: "padding: 8px; border: 1px solid #ccc; border-radius: 4px;",
+                                placeholder: "360",
                             }
                         }
                     }
 
                     button {
+                        class: "submit-btn",
                         r#type: "submit",
                         disabled: !state.is_attached,
-                        style: "padding: 12px; font-size: 1em; font-weight: bold; cursor: pointer; background: #28a745; color: white; border: none; border-radius: 4px;",
                         "Create & Publish Listing"
                     }
 
                     if !listing_result.read().is_empty() {
                         div {
-                            style: "margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px; font-family: monospace; font-size: 0.9em;",
+                            class: "result",
                             "{listing_result}"
                         }
                     }
@@ -660,18 +647,16 @@ fn app() -> Element {
             // Listing Browser Section
             div {
                 class: "listing-browser",
-                style: "background: #e7f0f5; padding: 20px; border-radius: 8px; margin-bottom: 20px;",
 
                 div {
-                    style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+                    class: "header",
                     h2 {
-                        style: "margin: 0; font-size: 1.2em;",
                         "Browse Listings"
                     }
                     button {
+                        class: "refresh-btn",
                         onclick: refresh_listings,
                         disabled: !state.is_attached,
-                        style: "padding: 8px 16px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer;",
                         "Refresh from Registry"
                     }
                 }
@@ -679,13 +664,13 @@ fn app() -> Element {
                 // Known listings list
                 if !known_listings.read().is_empty() {
                     div {
-                        style: "margin-bottom: 15px;",
-                        h3 { style: "font-size: 1em; margin-bottom: 10px;", "Known Listings:" }
+                        class: "known-listings",
+                        h3 { "Known Listings:" }
                         div {
-                            style: "display: flex; flex-direction: column; gap: 5px;",
+                            class: "listing-buttons",
                             for (key, title) in known_listings.read().iter() {
                                 button {
-                                    style: "text-align: left; padding: 8px; background: white; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;",
+                                    class: "listing-btn",
                                     onclick: {
                                         let key = key.clone();
                                         move |_| {
@@ -701,25 +686,24 @@ fn app() -> Element {
 
                 // Manual key input
                 div {
-                    style: "display: flex; gap: 10px; margin-bottom: 15px;",
+                    class: "manual-input",
                     input {
                         r#type: "text",
                         value: "{browse_key}",
                         oninput: move |e| browse_key.set(e.value().clone()),
                         placeholder: "Enter listing key (VLD0:...)",
-                        style: "flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace;",
                     }
                     button {
+                        class: "fetch-btn",
                         onclick: browse_listing,
                         disabled: !state.is_attached,
-                        style: "padding: 8px 16px; background: #17a2b8; color: white; border: none; border-radius: 4px; cursor: pointer;",
                         "Fetch"
                     }
                 }
 
                 if !browse_result.read().is_empty() {
                     div {
-                        style: "padding: 10px; background: #f8f9fa; border-radius: 4px; font-family: monospace; font-size: 0.9em; margin-bottom: 15px;",
+                        class: "browse-result",
                         "{browse_result}"
                     }
                 }
@@ -727,26 +711,25 @@ fn app() -> Element {
                 // Current listing display
                 if let Some(listing) = current_listing.read().as_ref() {
                     div {
-                        style: "background: white; padding: 15px; border-radius: 8px; border: 2px solid #17a2b8;",
+                        class: "current-listing",
 
                         h3 {
-                            style: "margin-top: 0; color: #17a2b8;",
                             "{listing.title}"
                         }
 
                         div {
-                            style: "display: grid; grid-template-columns: auto 1fr; gap: 8px; margin-bottom: 15px;",
+                            class: "listing-grid",
 
-                            span { style: "font-weight: bold;", "Status:" }
+                            span { class: "label", "Status:" }
                             span {
-                                style: if listing.status == "Active" { "color: green;" } else { "color: orange;" },
+                                class: if listing.status == "Active" { "active" } else { "inactive" },
                                 "{listing.status}"
                             }
 
-                            span { style: "font-weight: bold;", "Min Bid:" }
+                            span { class: "label", "Min Bid:" }
                             span { "{listing.min_bid} units" }
 
-                            span { style: "font-weight: bold;", "Time Left:" }
+                            span { class: "label", "Time Left:" }
                             span {
                                 if listing.time_remaining > 0 {
                                     "{listing.time_remaining} seconds"
@@ -755,12 +738,12 @@ fn app() -> Element {
                                 }
                             }
 
-                            span { style: "font-weight: bold;", "Bids:" }
+                            span { class: "label", "Bids:" }
                             span { "{listing.bid_count}" }
 
-                            span { style: "font-weight: bold;", "Seller:" }
+                            span { class: "label", "Seller:" }
                             span {
-                                style: "font-family: monospace; font-size: 0.85em; word-break: break-all;",
+                                class: "seller-id",
                                 "{listing.seller}"
                             }
                         }
@@ -768,30 +751,30 @@ fn app() -> Element {
                         // Bidding form
                         if listing.time_remaining > 0 {
                             div {
-                                style: "border-top: 1px solid #ddd; padding-top: 15px;",
+                                class: "bidding-form",
 
-                                h4 { style: "margin-top: 0;", "Place Your Bid" }
+                                h4 { "Place Your Bid" }
 
                                 div {
-                                    style: "display: flex; gap: 10px;",
+                                    class: "bid-input-group",
                                     input {
+                                        class: "bid-input",
                                         r#type: "number",
                                         value: "{bid_amount}",
                                         oninput: move |e| bid_amount.set(e.value().clone()),
                                         placeholder: "Bid amount",
-                                        style: "flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px;",
                                     }
                                     button {
+                                        class: "bid-btn",
                                         onclick: submit_bid_handler,
                                         disabled: !state.is_attached,
-                                        style: "padding: 8px 20px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;",
                                         "Submit Bid"
                                     }
                                 }
 
                                 if !bid_result.read().is_empty() {
                                     div {
-                                        style: "margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px; font-family: monospace; font-size: 0.9em;",
+                                        class: "bid-result",
                                         "{bid_result}"
                                     }
                                 }
@@ -803,22 +786,20 @@ fn app() -> Element {
 
             div {
                 class: "dht-test",
-                style: "background: #fff3cd; padding: 20px; border-radius: 8px; margin-top: 20px;",
 
                 h2 {
-                    style: "margin-top: 0; font-size: 1.2em;",
                     "DHT Operations Test"
                 }
 
                 button {
+                    class: "test-btn",
                     onclick: test_dht,
                     disabled: !state.is_attached,
-                    style: "padding: 10px 20px; font-size: 1em; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; margin-bottom: 10px;",
                     "Test DHT Create/Set/Get"
                 }
 
                 div {
-                    style: "margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px; font-family: monospace; font-size: 0.9em;",
+                    class: "test-result",
                     "{dht_test_result}"
                 }
             }
