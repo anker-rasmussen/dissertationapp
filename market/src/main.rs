@@ -3,14 +3,22 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use market::veilid::node::NodeState;
-use market::{Bid, DevNetConfig, Listing, ListingOperations, RegistryEntry, RegistryOperations, VeilidNode};
+use market::{DevNetConfig, Listing, ListingOperations, RegistryEntry, RegistryOperations, VeilidNode};
 use parking_lot::RwLock;
-use tracing::info;
+use tracing::{info, warn, error};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use veilid_core::RecordKey;
 
 // Global node state for UI access
 static NODE: once_cell::sync::OnceCell<Arc<RwLock<Option<VeilidNode>>>> =
+    once_cell::sync::OnceCell::new();
+
+// Global bid storage for keeping bid values
+static BID_STORAGE: once_cell::sync::OnceCell<market::BidStorage> =
+    once_cell::sync::OnceCell::new();
+
+// Global auction coordinator (handles MPC sidecars dynamically per auction)
+static AUCTION_COORDINATOR: once_cell::sync::OnceCell<Arc<market::AuctionCoordinator>> =
     once_cell::sync::OnceCell::new();
 
 fn init_logging() {
@@ -38,12 +46,15 @@ fn get_data_dir() -> PathBuf {
     base_dir.join(format!("smpc-auction-node-{}", node_offset))
 }
 
+// Legacy 3-party MPC initialization removed - now handled dynamically by AuctionCoordinator
+
 fn main() {
     init_logging();
     info!("Starting SMPC Auction Marketplace");
 
-    // Initialize global node holder
+    // Initialize global holders
     NODE.set(Arc::new(RwLock::new(None))).ok();
+    BID_STORAGE.set(market::BidStorage::new()).ok();
 
     // Start Veilid node in background thread
     let node_holder = NODE.get().unwrap().clone();
@@ -63,22 +74,90 @@ fn main() {
             };
 
             if let Err(e) = node.start().await {
-                tracing::error!("Failed to start Veilid node: {}", e);
+                error!("Failed to start Veilid node: {}", e);
                 return;
             }
 
             if let Err(e) = node.attach().await {
-                tracing::error!("Failed to attach to network: {}", e);
+                error!("Failed to attach to network: {}", e);
                 let _ = node.shutdown().await;
                 return;
             }
 
+            // Wait for node to be properly attached
+            info!("Waiting for network to stabilize...");
+            let mut retries = 0;
+            loop {
+                let state = node.state();
+                if state.is_attached {
+                    info!("Node attached and ready");
+                    break;
+                }
+                retries += 1;
+                if retries > 30 {
+                    error!("Timeout waiting for network attachment");
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+
+            // Initialize auction coordinator
+            // MPC sidecars will be created dynamically per auction
+            if let Some(dht) = node.dht_operations() {
+                let state = node.state();
+                if let Some(node_id_str) = state.node_ids.first() {
+                    if let Ok(my_node_id) = veilid_core::PublicKey::try_from(node_id_str.as_str()) {
+                        let bid_storage = BID_STORAGE.get().unwrap().clone();
+                        let coordinator = Arc::new(market::AuctionCoordinator::new(
+                            node.api().unwrap().clone(),
+                            dht,
+                            my_node_id,
+                            bid_storage,
+                        ));
+
+                        // Start monitoring deadlines
+                        coordinator.clone().start_monitoring().await;
+
+                        // Store coordinator globally
+                        AUCTION_COORDINATOR.set(coordinator).ok();
+
+                        info!("Auction coordinator started");
+                    }
+                }
+            }
+
+            // Take the update receiver to process AppMessages
+            let update_rx = node.take_update_receiver();
+
             // Store node for UI access
             *node_holder.write() = Some(node);
 
-            // Keep the runtime alive
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            // Process updates
+            if let Some(mut rx) = update_rx {
+                loop {
+                    match rx.recv().await {
+                        Some(veilid_core::VeilidUpdate::AppMessage(msg)) => {
+                            // Forward to auction coordinator's active MPC sidecar
+                            if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+                                if let Err(e) = coordinator.process_app_message(msg.message().to_vec()).await {
+                                    error!("Failed to process MPC message: {}", e);
+                                }
+                            }
+                        }
+                        Some(_) => {
+                            // Other updates are handled by the node's internal callback
+                        }
+                        None => {
+                            warn!("Update channel closed");
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // No update receiver, just keep alive
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                }
             }
         });
     });
@@ -145,6 +224,9 @@ async fn create_and_publish_listing(
     let key = generate_key();
     let (ciphertext, nonce) = encrypt_content(content, &key)?;
 
+    // Convert key to hex string for storage
+    let key_hex = hex::encode(&key);
+
     // Create DHT record first
     let record = dht.create_record().await?;
 
@@ -161,7 +243,7 @@ async fn create_and_publish_listing(
         .key(record.key.clone())
         .seller(seller.clone())
         .title(title)
-        .encrypted_content(ciphertext, nonce)
+        .encrypted_content(ciphertext, nonce, key_hex)
         .min_bid(min_bid)
         .auction_duration(duration)
         .build()
@@ -203,12 +285,14 @@ async fn fetch_listing(dht: &market::DHTOperations, key_str: &str) -> anyhow::Re
     }
 }
 
-/// Submit a bid on a listing
+/// Submit a bid on a listing (n-party auction system)
 async fn submit_bid(
-    _dht: &market::DHTOperations,
+    dht: &market::DHTOperations,
     listing_key: &str,
     amount: u64,
 ) -> anyhow::Result<String> {
+    use market::{BidOperations, BidRecord};
+
     // Get bidder's public key
     let node_state = get_node_state();
     let bidder_str = node_state
@@ -217,10 +301,10 @@ async fn submit_bid(
         .ok_or_else(|| anyhow::anyhow!("No node ID available"))?;
     let bidder = veilid_core::PublicKey::try_from(bidder_str.as_str())?;
 
-    let key = RecordKey::try_from(listing_key)?;
+    let listing_record_key = RecordKey::try_from(listing_key)?;
 
     // Create the bid with commitment
-    let bid = Bid::new(key.clone(), bidder, amount);
+    let bid = market::Bid::new(listing_record_key.clone(), bidder.clone(), amount);
 
     info!(
         "Created bid: amount={}, commitment={:?}",
@@ -228,11 +312,70 @@ async fn submit_bid(
         hex::encode(&bid.commitment[..8])
     );
 
-    // For now, we store the bid locally and log it
-    // In a full implementation, this would be sent to the listing owner
-    // or stored in a separate DHT record for the auction
+    // Store bid value locally for later reveal
+    if let Some(bid_storage) = BID_STORAGE.get() {
+        if let Some(nonce) = bid.reveal_nonce {
+            bid_storage.store_bid(&listing_record_key, amount, nonce).await;
+            info!("Stored bid value locally for MPC execution");
+        }
+    }
+
+    // Create BidRecord for DHT
+    let mut bid_ops = BidOperations::new(dht.clone());
+    let bid_record_own = bid_ops.publish_bid(BidRecord {
+        listing_key: listing_record_key.clone(),
+        bidder: bidder.clone(),
+        commitment: bid.commitment,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        bid_key: listing_record_key.clone(), // Will be set by publish_bid
+    }).await?;
+
+    // Update the bid_key with actual DHT key
+    let bid_record = BidRecord {
+        listing_key: listing_record_key.clone(),
+        bidder: bidder.clone(),
+        commitment: bid.commitment,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        bid_key: bid_record_own.key.clone(),
+    };
+
+    // Store bid_key in local storage for later MPC coordination
+    if let Some(bid_storage) = BID_STORAGE.get() {
+        bid_storage.store_bid_key(&listing_record_key, &bid_record.bid_key).await;
+        info!("Stored bid key locally for MPC coordination");
+    }
+
+    // Broadcast bid announcement to all peers via AppMessage
+    // This allows n-party bid discovery without writing to the listing's DHT record
+    if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+        // First register locally
+        coordinator.register_local_bid(&listing_record_key, bidder, bid_record.bid_key.clone()).await;
+        info!("Registered bid announcement locally");
+
+        // Then broadcast to peers
+        match coordinator.broadcast_bid_announcement(&listing_record_key, &bid_record.bid_key).await {
+            Ok(_) => info!("Broadcasted bid announcement to peers"),
+            Err(e) => warn!("Failed to broadcast bid announcement: {}", e),
+        }
+    }
+
+    // Fetch the listing and watch it for deadline
+    let listing_ops = market::ListingOperations::new(dht.clone());
+    if let Some(listing) = listing_ops.get_listing(&listing_record_key).await? {
+        if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+            coordinator.watch_listing(listing).await;
+            info!("Watching listing for auction deadline");
+        }
+    }
+
     Ok(format!(
-        "Bid of {} submitted for listing. Commitment: {}...",
+        "Bid of {} submitted! Commitment: {}... (Will execute MPC automatically at deadline)",
         amount,
         hex::encode(&bid.commitment[..8])
     ))
@@ -261,7 +404,9 @@ struct ListingInfo {
     min_bid: u64,
     time_remaining: u64,
     status: String,
-    bid_count: u32,
+    bid_count: usize,
+    has_decryption_key: bool,
+    decrypted_content: Option<String>,
 }
 
 fn app() -> Element {
@@ -402,6 +547,22 @@ fn app() -> Element {
                         match fetch_listing(&dht, &key_str).await {
                             Ok(listing) => {
                                 let status = format!("{:?}", listing.status);
+                                let listing_key = listing.key.clone();
+
+                                // Get real bid count from auction coordinator
+                                let bid_count = if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+                                    coordinator.get_bid_count(&listing_key).await
+                                } else {
+                                    0
+                                };
+
+                                // Check if we have a decryption key
+                                let has_decryption_key = if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+                                    coordinator.get_decryption_key(&listing_key).await.is_some()
+                                } else {
+                                    false
+                                };
+
                                 let info = ListingInfo {
                                     key: key_str.clone(),
                                     title: listing.title.clone(),
@@ -409,7 +570,9 @@ fn app() -> Element {
                                     min_bid: listing.min_bid,
                                     time_remaining: listing.time_remaining(),
                                     status,
-                                    bid_count: listing.bid_count,
+                                    bid_count,
+                                    has_decryption_key,
+                                    decrypted_content: None,
                                 };
                                 current_listing.set(Some(info));
                                 browse_result.set("✓ Listing loaded".to_string());
@@ -482,6 +645,91 @@ fn app() -> Element {
                 }
             } else {
                 bid_result.set("✗ Node holder not found".to_string());
+            }
+        });
+    };
+
+    // Decrypt content handler (for auction winners)
+    let decrypt_content_handler = move |_| {
+        let listing_info = current_listing.read().clone();
+
+        spawn(async move {
+            if listing_info.is_none() {
+                browse_result.set("✗ Error: No listing selected".to_string());
+                return;
+            }
+
+            let listing_info = listing_info.unwrap();
+
+            // Get decryption key from coordinator
+            let decryption_key_hex = if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+                let key_str = RecordKey::try_from(listing_info.key.as_str());
+                if let Ok(key) = key_str {
+                    coordinator.get_decryption_key(&key).await
+                } else {
+                    browse_result.set("✗ Error: Invalid listing key".to_string());
+                    return;
+                }
+            } else {
+                browse_result.set("✗ Error: Auction coordinator not available".to_string());
+                return;
+            };
+
+            if decryption_key_hex.is_none() {
+                browse_result.set("✗ Error: No decryption key available".to_string());
+                return;
+            }
+
+            // Fetch listing from DHT to get encrypted content and nonce
+            if let Some(node_holder) = NODE.get() {
+                if let Some(node) = node_holder.read().as_ref() {
+                    if let Some(dht) = node.dht_operations() {
+                        match fetch_listing(&dht, &listing_info.key).await {
+                            Ok(listing) => {
+                                // Decode decryption key from hex
+                                let key_hex = decryption_key_hex.unwrap();
+                                let key_bytes = match hex::decode(&key_hex) {
+                                    Ok(bytes) => bytes,
+                                    Err(e) => {
+                                        browse_result.set(format!("✗ Error decoding key: {}", e));
+                                        return;
+                                    }
+                                };
+
+                                if key_bytes.len() != 32 {
+                                    browse_result.set(format!("✗ Error: Invalid key length: {} bytes (expected 32)", key_bytes.len()));
+                                    return;
+                                }
+
+                                let mut key: [u8; 32] = [0; 32];
+                                key.copy_from_slice(&key_bytes);
+
+                                // Decrypt content
+                                match market::decrypt_content(&listing.encrypted_content, &key, &listing.content_nonce) {
+                                    Ok(plaintext) => {
+                                        // Update listing info with decrypted content
+                                        let mut updated_info = listing_info.clone();
+                                        updated_info.decrypted_content = Some(plaintext.clone());
+                                        current_listing.set(Some(updated_info));
+                                        browse_result.set("✓ Content decrypted successfully!".to_string());
+                                    }
+                                    Err(e) => {
+                                        browse_result.set(format!("✗ Decryption failed: {}", e));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                browse_result.set(format!("✗ Error fetching listing: {}", e));
+                            }
+                        }
+                    } else {
+                        browse_result.set("✗ Node not started yet".to_string());
+                    }
+                } else {
+                    browse_result.set("✗ Node not initialized".to_string());
+                }
+            } else {
+                browse_result.set("✗ Node holder not found".to_string());
             }
         });
     };
@@ -745,6 +993,32 @@ fn app() -> Element {
                             span {
                                 class: "seller-id",
                                 "{listing.seller}"
+                            }
+                        }
+
+                        // Decrypt button (only shown for auction winners)
+                        if listing.has_decryption_key && listing.decrypted_content.is_none() {
+                            div {
+                                class: "decrypt-section",
+                                h4 { "You won this auction!" }
+                                button {
+                                    class: "decrypt-btn",
+                                    onclick: decrypt_content_handler,
+                                    disabled: !state.is_attached,
+                                    "Decrypt Content"
+                                }
+                            }
+                        }
+
+                        // Show decrypted content
+                        if let Some(content) = &listing.decrypted_content {
+                            div {
+                                class: "decrypted-content",
+                                h4 { "Decrypted Content:" }
+                                div {
+                                    class: "content-box",
+                                    "{content}"
+                                }
                             }
                         }
 

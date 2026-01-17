@@ -59,9 +59,12 @@ impl DHTOperations {
     pub async fn create_record(&self) -> Result<OwnedDHTRecord> {
         let routing_context = self.get_routing_context()?;
 
-        // Create DHT schema for a simple key-value record
-        // Using DFLT (default) schema with a single subkey (subkey 0)
-        let schema = DHTSchema::dflt(1)?;
+        // Create DHT schema with 4 subkeys:
+        // - Subkey 0: Primary data (e.g., listing)
+        // - Subkey 1: Bid index (for auctions, currently unused)
+        // - Subkey 2: Coordination record (for bid announcements)
+        // - Subkey 3: Bidder registry (for n-party MPC)
+        let schema = DHTSchema::dflt(4)?;
 
         // Create the record - this generates a new key and allocates storage
         // kind: CRYPTO_KIND_VLD0, schema: dflt(1), owner: None (random keypair)

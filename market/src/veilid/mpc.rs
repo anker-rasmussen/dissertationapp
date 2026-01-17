@@ -1,0 +1,328 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::process::{Child, Command};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+use veilid_core::{VeilidAPI, RouteId, SafetySelection, SafetySpec, Stability, Sequencing, Target};
+use tracing::{info, error, debug, warn};
+use anyhow::{Result, Context};
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, Debug)]
+enum MpcMessage {
+    Open { source_party_id: usize },
+    Data { source_party_id: usize, payload: Vec<u8> },
+    Close { source_party_id: usize },
+}
+
+/// Manages the MP-SPDZ sidecar process and network tunneling
+#[derive(Clone)]
+pub struct MpcSidecar {
+    inner: Arc<MpcSidecarInner>,
+}
+
+struct MpcSidecarInner {
+    api: VeilidAPI,
+    party_id: usize,
+    party_routes: HashMap<usize, RouteId>,
+    base_port: u16,
+    proxy_offset: u16,
+    /// Active sessions: Map<RemotePartyID, TcpStream>
+    /// Note: This simple model assumes one connection per party pair (which MP-SPDZ usually does).
+    /// If multiple connections are needed, we need SessionIDs.
+    sessions: Mutex<HashMap<usize, tokio::net::tcp::OwnedWriteHalf>>,
+    /// Port forwarder processes (socat)
+    forwarders: Mutex<Vec<Child>>,
+}
+
+impl MpcSidecar {
+    pub fn new(api: VeilidAPI, party_id: usize, party_routes: HashMap<usize, RouteId>) -> Self {
+        Self {
+            inner: Arc::new(MpcSidecarInner {
+                api,
+                party_id,
+                party_routes,
+                base_port: 5000, // Default MP-SPDZ base port (start of range)
+                proxy_offset: 10000, // Proxy ports start at 15000+
+                sessions: Mutex::new(HashMap::new()),
+                forwarders: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    /// Setup automatic port forwarding so MP-SPDZ connects to our proxies
+    /// Uses socat to forward MP-SPDZ's outgoing ports to our proxy ports
+    async fn setup_port_forwarding(&self) -> Result<()> {
+        info!("Setting up automatic port forwarding for Party {}", self.inner.party_id);
+
+        let mut forwarders = self.inner.forwarders.lock().await;
+
+        // For each other party, forward their MP-SPDZ port to our proxy port
+        // Example: Party 0 forwards 5001→15001 and 5002→15002
+        for (&target_party, _) in &self.inner.party_routes {
+            if target_party == self.inner.party_id {
+                continue;
+            }
+
+            let mp_spdz_port = self.inner.base_port + (target_party as u16);
+            let proxy_port = self.inner.base_port + self.inner.proxy_offset + (target_party as u16);
+
+            info!(
+                "  Forwarding port {} -> {} (for connecting to Party {})",
+                mp_spdz_port, proxy_port, target_party
+            );
+
+            // Spawn socat process
+            match Command::new("socat")
+                .arg(format!("TCP-LISTEN:{},fork,reuseaddr", mp_spdz_port))
+                .arg(format!("TCP:localhost:{}", proxy_port))
+                .spawn()
+            {
+                Ok(child) => {
+                    info!("Started socat forwarder (PID {})", child.id());
+                    forwarders.push(child);
+                }
+                Err(e) => {
+                    error!("Failed to spawn socat forwarder for port {}: {}", mp_spdz_port, e);
+                    error!("Make sure 'socat' is installed: sudo pacman -S socat");
+                    return Err(anyhow::anyhow!("Failed to setup port forwarding: {}", e));
+                }
+            }
+        }
+
+        info!("Port forwarding active for {} connections", forwarders.len());
+        Ok(())
+    }
+
+    pub async fn run(&self) -> Result<()> {
+        info!("Starting MPC Sidecar for Party {}", self.inner.party_id);
+
+        // Setup automatic port forwarding (socat)
+        self.setup_port_forwarding().await?;
+
+        // Setup outgoing proxies
+        for (&pid, route_id) in &self.inner.party_routes {
+            if pid == self.inner.party_id { continue; }
+
+            let proxy_port = self.inner.base_port + self.inner.proxy_offset + (pid as u16);
+            let sidecar = self.clone();
+            let route_id = route_id.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = sidecar.run_outgoing_proxy(proxy_port, pid, route_id).await {
+                    error!("Proxy for Party {} failed: {}", pid, e);
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Cleanup port forwarders
+    pub async fn cleanup(&self) {
+        info!("Cleaning up MPC sidecar for Party {}", self.inner.party_id);
+        let mut forwarders = self.inner.forwarders.lock().await;
+        for mut child in forwarders.drain(..) {
+            let pid = child.id();
+            match child.kill() {
+                Ok(_) => {
+                    info!("Killed socat forwarder PID {}", pid);
+                    let _ = child.wait(); // Reap zombie
+                }
+                Err(e) => {
+                    warn!("Failed to kill socat forwarder PID {}: {}", pid, e);
+                }
+            }
+        }
+    }
+
+    async fn run_outgoing_proxy(&self, port: u16, target_pid: usize, target_route: RouteId) -> Result<()> {
+        let addr = format!("127.0.0.1:{}", port);
+        let listener = TcpListener::bind(&addr).await
+            .context(format!("Failed to bind outgoing proxy at {}", addr))?;
+        
+        info!("Listening for MP-SPDZ outgoing connection to Party {} on {}", target_pid, addr);
+
+        loop {
+            let (socket, _) = listener.accept().await?;
+            debug!("MP-SPDZ connected to proxy for Party {}", target_pid);
+
+            let (mut rd, wr) = socket.into_split();
+            
+            // Register write half so we can send data received from Veilid BACK to MP-SPDZ
+            {
+                let mut sessions = self.inner.sessions.lock().await;
+                sessions.insert(target_pid, wr);
+            }
+
+            // Create RoutingContext
+            let ctx = self.inner.api.routing_context()
+                .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
+                .with_safety(SafetySelection::Safe(SafetySpec {
+                    preferred_route: None,
+                    hop_count: 2, // Default
+                    stability: Stability::Reliable,
+                    sequencing: Sequencing::PreferOrdered,
+                }))
+                .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
+
+            // Send Open message
+            let open_msg = MpcMessage::Open { source_party_id: self.inner.party_id };
+            let data = bincode::serialize(&open_msg)?;
+            ctx.app_message(Target::RouteId(target_route.clone()), data).await
+                .map_err(|e| anyhow::anyhow!("Failed to send Open: {}", e))?;
+
+            // Read loop: TCP -> Veilid
+            let ctx_clone = ctx.clone();
+            let target_route_clone = target_route.clone();
+            let my_pid = self.inner.party_id;
+            
+            let mut buf = vec![0u8; 32000]; // Keep under 32KB
+            loop {
+                let n = match rd.read(&mut buf).await {
+                    Ok(0) => break, // EOF
+                    Ok(n) => n,
+                    Err(e) => {
+                        error!("TCP Read Error: {}", e);
+                        break;
+                    }
+                };
+
+                let msg = MpcMessage::Data { source_party_id: my_pid, payload: buf[..n].to_vec() };
+                let data = bincode::serialize(&msg)?;
+                
+                if let Err(e) = ctx_clone.app_message(Target::RouteId(target_route_clone.clone()), data).await {
+                    error!("Failed to send data to Party {}: {}", target_pid, e);
+                    break;
+                }
+            }
+
+            // Send Close
+            let close_msg = MpcMessage::Close { source_party_id: my_pid };
+            let data = bincode::serialize(&close_msg)?;
+            let _ = ctx_clone.app_message(Target::RouteId(target_route_clone), data).await;
+            
+            // Cleanup
+            {
+                let mut sessions = self.inner.sessions.lock().await;
+                sessions.remove(&target_pid);
+            }
+        }
+    }
+
+    /// Process incoming Veilid message (AppMessage)
+    pub async fn process_message(&self, message: Vec<u8>) -> Result<()> {
+        let mpc_msg: MpcMessage = bincode::deserialize(&message)?;
+        
+        match mpc_msg {
+            MpcMessage::Open { source_party_id } => {
+                info!("Received OPEN from Party {}", source_party_id);
+                // Connect to local MP-SPDZ listening port
+                // MP-SPDZ listens on base_port + MyPartyID ? 
+                // Wait, in full mesh:
+                // Party i listens on port_base + i
+                // Party j connects to Party i at port_base + i
+                // So if I am Party 0, I listen on 5000.
+                // Party 1 connects to me on 5000.
+                
+                // My local MP-SPDZ is listening on `base_port + my_party_id`?
+                // Actually, standard MP-SPDZ setup:
+                // -p 0 means I listen on 5000.
+                // -p 1 means I listen on 5001.
+                // But since we are tunneling, maybe we change this.
+                // If I am Party 0, my MP-SPDZ listens on 5000.
+                // Party 1's Sidecar connects to me.
+                // So Party 1's Sidecar sends OPEN.
+                // I (Sidecar 0) receive OPEN.
+                // I should connect to `localhost:5000` (my MP-SPDZ).
+                
+                let local_target_port = self.inner.base_port + (self.inner.party_id as u16);
+                let addr = format!("127.0.0.1:{}", local_target_port);
+                
+                match TcpStream::connect(&addr).await {
+                    Ok(stream) => {
+                        // We only need the WriteHalf to write data coming FROM Veilid
+                        // The ReadHalf? We don't read from this socket to send to Veilid?
+                        // YES WE DO.
+                        // Wait, if I am accepting a connection, it's bidirectional.
+                        // 
+                        // Scenario: P1 connects to P0.
+                        // P1 Sidecar (Proxy) -> P0 Sidecar (Receiver).
+                        // P1 Sidecar reads P1-MP-SPDZ (Client) -> Sends to P0 Sidecar.
+                        // P0 Sidecar writes to P0-MP-SPDZ (Server).
+                        //
+                        // BUT P0-MP-SPDZ writes back to P1-MP-SPDZ.
+                        // So P0 Sidecar must read from P0-MP-SPDZ -> Send to P1 Sidecar.
+                        //
+                        // So when we connect to local MP-SPDZ, we must also spawn a read loop.
+                        
+                        let (mut rd, wr) = stream.into_split();
+                        
+                        {
+                            let mut sessions = self.inner.sessions.lock().await;
+                            sessions.insert(source_party_id, wr);
+                        }
+                        
+                        // Spawn read loop for the "Response" path (Server -> Client)
+                        let sidecar = self.clone();
+                        let target_pid = source_party_id;
+                        let target_route = self.inner.party_routes.get(&target_pid).cloned();
+                        let my_pid = self.inner.party_id;
+
+                        if let Some(route) = target_route {
+                            tokio::spawn(async move {
+                                let ctx = match sidecar.inner.api.routing_context() {
+                                    Ok(c) => c,
+                                    Err(_) => return,
+                                }
+                                .with_safety(SafetySelection::Safe(SafetySpec {
+                                    preferred_route: None, hop_count: 2, stability: Stability::Reliable, sequencing: Sequencing::PreferOrdered
+                                })).unwrap();
+
+                                let mut buf = vec![0u8; 32000];
+                                loop {
+                                    let n = match rd.read(&mut buf).await {
+                                        Ok(0) => break,
+                                        Ok(n) => n,
+                                        Err(_) => break,
+                                    };
+                                    
+                                    let msg = MpcMessage::Data { source_party_id: my_pid, payload: buf[..n].to_vec() };
+                                    if let Ok(data) = bincode::serialize(&msg) {
+                                        let _ = ctx.app_message(Target::RouteId(route.clone()), data).await;
+                                    }
+                                }
+                            });
+                        } else {
+                            warn!("No route found for Party {}", target_pid);
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to connect to local MP-SPDZ at {}: {}", addr, e);
+                    }
+                }
+            },
+            MpcMessage::Data { source_party_id, payload } => {
+                let mut sessions = self.inner.sessions.lock().await;
+                if let Some(wr) = sessions.get_mut(&source_party_id) {
+                    if let Err(e) = wr.write_all(&payload).await {
+                        error!("Failed to write to local MP-SPDZ for Party {}: {}", source_party_id, e);
+                        // Close session?
+                    }
+                } else {
+                    // warn!("Received Data for unknown session from Party {}", source_party_id);
+                    // This might happen if OPEN hasn't processed yet or race condition.
+                    // For now, ignore.
+                }
+            },
+            MpcMessage::Close { source_party_id } => {
+                info!("Received CLOSE from Party {}", source_party_id);
+                let mut sessions = self.inner.sessions.lock().await;
+                sessions.remove(&source_party_id);
+            }
+        }
+        Ok(())
+    }
+}
+
