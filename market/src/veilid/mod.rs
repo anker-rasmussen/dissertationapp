@@ -1,9 +1,22 @@
+pub mod auction_coordinator;
+pub mod bid_announcement;
+pub mod bid_ops;
+pub mod bid_storage;
+pub mod bidder_registry;
 pub mod dht;
 pub mod listing_ops;
+pub mod mpc;
+pub mod mpc_routes;
 pub mod node;
 pub mod registry;
 
+pub use auction_coordinator::AuctionCoordinator;
+pub use bid_ops::BidOperations;
+pub use bid_storage::BidStorage;
+pub use bidder_registry::{BidderRegistry, BidderEntry, BidderRegistryOps};
 pub use dht::DHTOperations;
 pub use listing_ops::ListingOperations;
+pub use mpc::MpcSidecar;
+pub use mpc_routes::MpcRouteManager;
 pub use node::VeilidNode;
 pub use registry::{ListingRegistry, RegistryEntry, RegistryOperations};
