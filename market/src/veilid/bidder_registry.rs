@@ -1,6 +1,5 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tracing::{debug, info, warn};
 use veilid_core::{PublicKey, RecordKey};
 
@@ -87,7 +86,7 @@ impl BidderRegistryOps {
         let routing_context = self.dht.get_routing_context_pub()?;
 
         // Open the listing record
-        routing_context.open_dht_record(listing_key.clone(), None).await
+        let _ = routing_context.open_dht_record(listing_key.clone(), None).await
             .map_err(|e| anyhow::anyhow!("Failed to open listing record: {}", e))?;
 
         for attempt in 0..max_retries {

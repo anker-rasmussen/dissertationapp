@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::process::{Child, Command};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -27,90 +26,47 @@ struct MpcSidecarInner {
     party_id: usize,
     party_routes: HashMap<usize, RouteId>,
     base_port: u16,
-    proxy_offset: u16,
     /// Active sessions: Map<RemotePartyID, TcpStream>
     /// Note: This simple model assumes one connection per party pair (which MP-SPDZ usually does).
     /// If multiple connections are needed, we need SessionIDs.
     sessions: Mutex<HashMap<usize, tokio::net::tcp::OwnedWriteHalf>>,
-    /// Port forwarder processes (socat)
-    forwarders: Mutex<Vec<Child>>,
 }
 
 impl MpcSidecar {
-    pub fn new(api: VeilidAPI, party_id: usize, party_routes: HashMap<usize, RouteId>) -> Self {
+    pub fn new(api: VeilidAPI, party_id: usize, party_routes: HashMap<usize, RouteId>, node_offset: u16) -> Self {
+        // Offset ports based on node to avoid conflicts when running multiple nodes on same machine
+        // Node 5: base 5050
+        // Node 6: base 5060
+        // Node 7: base 5070
+        let base_port = 5000 + (node_offset * 10);
+
+        info!("MPC Sidecar for Party {}: using base port {} (node offset {})",
+              party_id, base_port, node_offset);
+
         Self {
             inner: Arc::new(MpcSidecarInner {
                 api,
                 party_id,
                 party_routes,
-                base_port: 5000, // Default MP-SPDZ base port (start of range)
-                proxy_offset: 10000, // Proxy ports start at 15000+
+                base_port,
                 sessions: Mutex::new(HashMap::new()),
-                forwarders: Mutex::new(Vec::new()),
             })
         }
-    }
-
-    /// Setup automatic port forwarding so MP-SPDZ connects to our proxies
-    /// Uses socat to forward MP-SPDZ's outgoing ports to our proxy ports
-    async fn setup_port_forwarding(&self) -> Result<()> {
-        info!("Setting up automatic port forwarding for Party {}", self.inner.party_id);
-
-        let mut forwarders = self.inner.forwarders.lock().await;
-
-        // For each other party, forward their MP-SPDZ port to our proxy port
-        // Example: Party 0 forwards 5001→15001 and 5002→15002
-        for (&target_party, _) in &self.inner.party_routes {
-            if target_party == self.inner.party_id {
-                continue;
-            }
-
-            let mp_spdz_port = self.inner.base_port + (target_party as u16);
-            let proxy_port = self.inner.base_port + self.inner.proxy_offset + (target_party as u16);
-
-            info!(
-                "  Forwarding port {} -> {} (for connecting to Party {})",
-                mp_spdz_port, proxy_port, target_party
-            );
-
-            // Spawn socat process
-            match Command::new("socat")
-                .arg(format!("TCP-LISTEN:{},fork,reuseaddr", mp_spdz_port))
-                .arg(format!("TCP:localhost:{}", proxy_port))
-                .spawn()
-            {
-                Ok(child) => {
-                    info!("Started socat forwarder (PID {})", child.id());
-                    forwarders.push(child);
-                }
-                Err(e) => {
-                    error!("Failed to spawn socat forwarder for port {}: {}", mp_spdz_port, e);
-                    error!("Make sure 'socat' is installed: sudo pacman -S socat");
-                    return Err(anyhow::anyhow!("Failed to setup port forwarding: {}", e));
-                }
-            }
-        }
-
-        info!("Port forwarding active for {} connections", forwarders.len());
-        Ok(())
     }
 
     pub async fn run(&self) -> Result<()> {
         info!("Starting MPC Sidecar for Party {}", self.inner.party_id);
 
-        // Setup automatic port forwarding (socat)
-        self.setup_port_forwarding().await?;
-
-        // Setup outgoing proxies
+        // Setup outgoing proxies - listen directly on MP-SPDZ ports
         for (&pid, route_id) in &self.inner.party_routes {
             if pid == self.inner.party_id { continue; }
 
-            let proxy_port = self.inner.base_port + self.inner.proxy_offset + (pid as u16);
+            let listen_port = self.inner.base_port + (pid as u16);
             let sidecar = self.clone();
             let route_id = route_id.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = sidecar.run_outgoing_proxy(proxy_port, pid, route_id).await {
+                if let Err(e) = sidecar.run_outgoing_proxy(listen_port, pid, route_id).await {
                     error!("Proxy for Party {} failed: {}", pid, e);
                 }
             });
@@ -119,30 +75,17 @@ impl MpcSidecar {
         Ok(())
     }
 
-    /// Cleanup port forwarders
+    /// Cleanup resources (no-op since we no longer spawn external processes)
     pub async fn cleanup(&self) {
         info!("Cleaning up MPC sidecar for Party {}", self.inner.party_id);
-        let mut forwarders = self.inner.forwarders.lock().await;
-        for mut child in forwarders.drain(..) {
-            let pid = child.id();
-            match child.kill() {
-                Ok(_) => {
-                    info!("Killed socat forwarder PID {}", pid);
-                    let _ = child.wait(); // Reap zombie
-                }
-                Err(e) => {
-                    warn!("Failed to kill socat forwarder PID {}: {}", pid, e);
-                }
-            }
-        }
     }
 
-    async fn run_outgoing_proxy(&self, port: u16, target_pid: usize, target_route: RouteId) -> Result<()> {
-        let addr = format!("127.0.0.1:{}", port);
+    async fn run_outgoing_proxy(&self, listen_port: u16, target_pid: usize, target_route: RouteId) -> Result<()> {
+        let addr = format!("127.0.0.1:{}", listen_port);
         let listener = TcpListener::bind(&addr).await
-            .context(format!("Failed to bind outgoing proxy at {}", addr))?;
-        
-        info!("Listening for MP-SPDZ outgoing connection to Party {} on {}", target_pid, addr);
+            .context(format!("Failed to bind proxy at {}", addr))?;
+
+        info!("Listening for MP-SPDZ connection to Party {} on port {}", target_pid, listen_port);
 
         loop {
             let (socket, _) = listener.accept().await?;

@@ -108,11 +108,19 @@ fn main() {
                 if let Some(node_id_str) = state.node_ids.first() {
                     if let Ok(my_node_id) = veilid_core::PublicKey::try_from(node_id_str.as_str()) {
                         let bid_storage = BID_STORAGE.get().unwrap().clone();
+
+                        // Get node offset for MPC port allocation
+                        let node_offset = std::env::var("MARKET_NODE_OFFSET")
+                            .ok()
+                            .and_then(|s| s.parse::<u16>().ok())
+                            .unwrap_or(5);
+
                         let coordinator = Arc::new(market::AuctionCoordinator::new(
                             node.api().unwrap().clone(),
                             dht,
                             my_node_id,
                             bid_storage,
+                            node_offset,
                         ));
 
                         // Start monitoring deadlines
@@ -217,8 +225,8 @@ async fn create_and_publish_listing(
     use market::{encrypt_content, generate_key, Listing, ListingOperations};
 
     // Parse inputs
-    let min_bid: u64 = min_bid_str.parse().unwrap_or(1000);
-    let duration: u64 = duration_str.parse().unwrap_or(3600);
+    let min_bid: u64 = min_bid_str.parse().unwrap_or(10);
+    let duration: u64 = duration_str.parse().unwrap_or(360);
 
     // Generate encryption key and encrypt content
     let key = generate_key();
@@ -266,6 +274,16 @@ async fn create_and_publish_listing(
     if let Err(e) = registry_ops.register_listing(registry_entry).await {
         tracing::warn!("Failed to register listing in shared registry: {}", e);
         // Continue anyway - listing is still published to DHT
+    }
+
+    // Register as owned listing with auction coordinator (for DHT bid registry)
+    if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+        if let Err(e) = coordinator.register_owned_listing(record.clone()).await {
+            tracing::warn!("Failed to register owned listing with coordinator: {}", e);
+            // Continue anyway - listing is still published
+        } else {
+            tracing::info!("Registered owned listing with auction coordinator");
+        }
     }
 
     Ok(CreateListingResult {
@@ -321,7 +339,7 @@ async fn submit_bid(
     }
 
     // Create BidRecord for DHT
-    let mut bid_ops = BidOperations::new(dht.clone());
+    let bid_ops = BidOperations::new(dht.clone());
     let bid_record_own = bid_ops.publish_bid(BidRecord {
         listing_key: listing_record_key.clone(),
         bidder: bidder.clone(),
@@ -355,13 +373,24 @@ async fn submit_bid(
     // This allows n-party bid discovery without writing to the listing's DHT record
     if let Some(coordinator) = AUCTION_COORDINATOR.get() {
         // First register locally
-        coordinator.register_local_bid(&listing_record_key, bidder, bid_record.bid_key.clone()).await;
+        coordinator.register_local_bid(&listing_record_key, bidder.clone(), bid_record.bid_key.clone()).await;
         info!("Registered bid announcement locally");
 
         // Then broadcast to peers
         match coordinator.broadcast_bid_announcement(&listing_record_key, &bid_record.bid_key).await {
             Ok(_) => info!("Broadcasted bid announcement to peers"),
             Err(e) => warn!("Failed to broadcast bid announcement: {}", e),
+        }
+
+        // If we own this listing (seller is also bidding), update DHT registry directly
+        // since we won't receive our own broadcast
+        if let Err(e) = coordinator.add_own_bid_to_registry(
+            &listing_record_key,
+            bidder.clone(),
+            bid_record.bid_key.clone(),
+            bid_record.timestamp
+        ).await {
+            tracing::warn!("Failed to add own bid to DHT registry: {}", e);
         }
     }
 
@@ -654,6 +683,8 @@ fn app() -> Element {
         let listing_info = current_listing.read().clone();
 
         spawn(async move {
+            browse_result.set("Decrypting content...".to_string());
+
             if listing_info.is_none() {
                 browse_result.set("✗ Error: No listing selected".to_string());
                 return;
@@ -661,75 +692,31 @@ fn app() -> Element {
 
             let listing_info = listing_info.unwrap();
 
-            // Get decryption key from coordinator
-            let decryption_key_hex = if let Some(coordinator) = AUCTION_COORDINATOR.get() {
-                let key_str = RecordKey::try_from(listing_info.key.as_str());
-                if let Ok(key) = key_str {
-                    coordinator.get_decryption_key(&key).await
-                } else {
+            // Parse listing key
+            let listing_key = match RecordKey::try_from(listing_info.key.as_str()) {
+                Ok(key) => key,
+                Err(_) => {
                     browse_result.set("✗ Error: Invalid listing key".to_string());
                     return;
                 }
-            } else {
-                browse_result.set("✗ Error: Auction coordinator not available".to_string());
-                return;
             };
 
-            if decryption_key_hex.is_none() {
-                browse_result.set("✗ Error: No decryption key available".to_string());
-                return;
-            }
-
-            // Fetch listing from DHT to get encrypted content and nonce
-            if let Some(node_holder) = NODE.get() {
-                if let Some(node) = node_holder.read().as_ref() {
-                    if let Some(dht) = node.dht_operations() {
-                        match fetch_listing(&dht, &listing_info.key).await {
-                            Ok(listing) => {
-                                // Decode decryption key from hex
-                                let key_hex = decryption_key_hex.unwrap();
-                                let key_bytes = match hex::decode(&key_hex) {
-                                    Ok(bytes) => bytes,
-                                    Err(e) => {
-                                        browse_result.set(format!("✗ Error decoding key: {}", e));
-                                        return;
-                                    }
-                                };
-
-                                if key_bytes.len() != 32 {
-                                    browse_result.set(format!("✗ Error: Invalid key length: {} bytes (expected 32)", key_bytes.len()));
-                                    return;
-                                }
-
-                                let mut key: [u8; 32] = [0; 32];
-                                key.copy_from_slice(&key_bytes);
-
-                                // Decrypt content
-                                match market::decrypt_content(&listing.encrypted_content, &key, &listing.content_nonce) {
-                                    Ok(plaintext) => {
-                                        // Update listing info with decrypted content
-                                        let mut updated_info = listing_info.clone();
-                                        updated_info.decrypted_content = Some(plaintext.clone());
-                                        current_listing.set(Some(updated_info));
-                                        browse_result.set("✓ Content decrypted successfully!".to_string());
-                                    }
-                                    Err(e) => {
-                                        browse_result.set(format!("✗ Decryption failed: {}", e));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                browse_result.set(format!("✗ Error fetching listing: {}", e));
-                            }
-                        }
-                    } else {
-                        browse_result.set("✗ Node not started yet".to_string());
+            // Use auction coordinator's fetch_and_decrypt method
+            if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+                match coordinator.fetch_and_decrypt_listing(&listing_key).await {
+                    Ok(plaintext) => {
+                        // Update listing info with decrypted content
+                        let mut updated_info = listing_info.clone();
+                        updated_info.decrypted_content = Some(plaintext);
+                        current_listing.set(Some(updated_info));
+                        browse_result.set("✓ Content decrypted successfully!".to_string());
                     }
-                } else {
-                    browse_result.set("✗ Node not initialized".to_string());
+                    Err(e) => {
+                        browse_result.set(format!("✗ Decryption failed: {}", e));
+                    }
                 }
             } else {
-                browse_result.set("✗ Node holder not found".to_string());
+                browse_result.set("✗ Error: Auction coordinator not available".to_string());
             }
         });
     };

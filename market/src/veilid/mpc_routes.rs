@@ -1,83 +1,33 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{info, debug, warn};
-use veilid_core::{VeilidAPI, RouteId, KeyPair, RecordKey, DHTSchema, CRYPTO_KIND_VLD0, Stability, Sequencing};
+use veilid_core::{VeilidAPI, RouteId, RouteBlob, RecordKey, CRYPTO_KIND_VLD0, Stability, Sequencing, PublicKey, SafetySelection, Target};
 
+use super::bid_announcement::AuctionMessage;
 use super::dht::DHTOperations;
-
-// Hardcoded DHT keys for each MPC party in devnet
-// Party 0 (Market Node 5)
-const PARTY_0_KEYPAIR: &str =
-    "VLD0:mJ8KQxNbT3wD9kYvP2lX6oZ1rS4uWt5xN7cV8bM9fH0:qL5pR2tY6uW8xZ0cV3bN4mJ7kQ9sT1wX5yA8dF0gH2j";
-const PARTY_0_RECORD_KEY: &str =
-    "VLD0:A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R8S9T0U1V2";
-
-// Party 1 (Market Node 6)
-const PARTY_1_KEYPAIR: &str =
-    "VLD0:xY9zW8vU7tS6rQ5pO4nM3lK2jH1gF0eD9cB8aZ7yX6w:V5u4T3s2R1q0P9o8N7m6L5k4J3h2G1f0E9d8C7b6A5z";
-const PARTY_1_RECORD_KEY: &str =
-    "VLD0:W2X3Y4Z5A6B7C8D9E0F1G2H3I4J5K6L7M8N9O0P1Q2R3";
-
-// Party 2 (Market Node 7)
-const PARTY_2_KEYPAIR: &str =
-    "VLD0:F0g1H2i3J4k5L6m7N8o9P0q1R2s3T4u5V6w7X8y9Z0a:B1c2D3e4F5g6H7i8J9k0L1m2N3o4P5q6R7s8T9u0V1w";
-const PARTY_2_RECORD_KEY: &str =
-    "VLD0:S3T4U5V6W7X8Y9Z0A1B2C3D4E5F6G7H8I9J0K1L2M3N4";
-
-/// MPC party route information for discovery
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MpcPartyInfo {
-    /// Party ID (0, 1, 2)
-    pub party_id: usize,
-    /// Veilid route for this party
-    pub route_id: String,
-    /// Node ID for verification
-    pub node_id: String,
-}
 
 /// Manages Veilid route exchange for MPC parties
 pub struct MpcRouteManager {
     api: VeilidAPI,
-    dht: DHTOperations,
+    _dht: DHTOperations,
     party_id: usize,
     my_route_id: Option<RouteId>,
+    my_route_blob: Option<RouteBlob>,  // Route blob for sharing with other parties
+    pub(crate) received_routes: Arc<Mutex<HashMap<PublicKey, RouteId>>>,
 }
 
 impl MpcRouteManager {
     pub fn new(api: VeilidAPI, dht: DHTOperations, party_id: usize) -> Self {
         Self {
             api,
-            dht,
+            _dht: dht,
             party_id,
             my_route_id: None,
+            my_route_blob: None,
+            received_routes: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    /// Get the hardcoded keypair for a specific party
-    fn get_party_keypair(party_id: usize) -> Result<KeyPair> {
-        let keypair_str = match party_id {
-            0 => PARTY_0_KEYPAIR,
-            1 => PARTY_1_KEYPAIR,
-            2 => PARTY_2_KEYPAIR,
-            _ => return Err(anyhow::anyhow!("Invalid party ID: {}", party_id)),
-        };
-
-        KeyPair::try_from(keypair_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse party {} keypair: {}", party_id, e))
-    }
-
-    /// Get the hardcoded record key for a specific party
-    fn get_party_record_key(party_id: usize) -> Result<RecordKey> {
-        let key_str = match party_id {
-            0 => PARTY_0_RECORD_KEY,
-            1 => PARTY_1_RECORD_KEY,
-            2 => PARTY_2_RECORD_KEY,
-            _ => return Err(anyhow::anyhow!("Invalid party ID: {}", party_id)),
-        };
-
-        RecordKey::try_from(key_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse party {} record key: {}", party_id, e))
     }
 
     /// Create a private route for this party
@@ -97,31 +47,116 @@ impl MpcRouteManager {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create route: {}", e))?;
 
-        let route_id = route_blob.route_id;
+        let route_id = route_blob.route_id.clone();
+
         info!("Created Veilid route for MPC Party {}: {}", self.party_id, route_id);
+
         self.my_route_id = Some(route_id.clone());
+        self.my_route_blob = Some(route_blob);
         Ok(route_id)
     }
 
-    /// Publish this party's route to the DHT
-    /// For n-party auctions, routes are exchanged directly, not via DHT
-    pub async fn publish_route(&self) -> Result<()> {
-        // In the n-party system, routes are exchanged via AppMessage
-        // This function is a no-op for now
-        debug!("Route publishing skipped - will exchange routes directly");
+    /// Broadcast this party's route announcement to all peers
+    pub async fn broadcast_route_announcement(
+        &self,
+        listing_key: &RecordKey,
+        my_pubkey: &PublicKey,
+    ) -> Result<()> {
+        let route_blob = self.my_route_blob.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Route not created yet"))?;
+
+        let route_id = self.my_route_id.as_ref().unwrap();
+        info!("Broadcasting MPC route {} for party {}", route_id, my_pubkey);
+
+        let announcement = AuctionMessage::mpc_route_announcement(
+            listing_key.clone(),
+            my_pubkey.clone(),
+            route_blob.clone(),
+        );
+
+        let data = announcement.to_bytes()?;
+
+        let routing_context = self.api.routing_context()
+            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
+            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
+            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
+
+        let state = self.api.get_state().await
+            .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
+
+        let mut sent_count = 0;
+        for peer in &state.network.peers {
+            for node_id in &peer.node_ids {
+                match routing_context.app_message(Target::NodeId(node_id.clone()), data.clone()).await {
+                    Ok(_) => {
+                        debug!("Sent route announcement to peer {}", node_id);
+                        sent_count += 1;
+                        break;
+                    }
+                    Err(e) => debug!("Failed to send to {}: {}", node_id, e),
+                }
+            }
+        }
+
+        info!("Broadcasted route to {} peers", sent_count);
         Ok(())
     }
 
-    /// Fetch routes for all other parties
-    pub async fn fetch_party_routes(&self, num_parties: usize) -> Result<HashMap<usize, RouteId>> {
-        // In the n-party system, routes would be exchanged via AppMessage
-        // For now, return empty routes (allows single-party MPC to proceed)
-        debug!("Route fetching skipped for {}-party auction - route exchange not yet implemented", num_parties);
-        Ok(HashMap::new())
+    /// Register a route announcement received from another party
+    pub async fn register_route_announcement(
+        &self,
+        party_pubkey: PublicKey,
+        route_blob: RouteBlob,
+    ) -> Result<()> {
+        let mut routes = self.received_routes.lock().await;
+
+        if routes.contains_key(&party_pubkey) {
+            debug!("Already have route for party {}, ignoring duplicate", party_pubkey);
+            return Ok(());
+        }
+
+        // Import the remote private route so we can send to it
+        let _ = self.api.import_remote_private_route(route_blob.blob.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to import remote route: {}", e))?;
+
+        let route_id = route_blob.route_id.clone();
+
+        routes.insert(party_pubkey.clone(), route_id.clone());
+        info!("Registered and imported route for party {}: {}", party_pubkey, route_id);
+        Ok(())
+    }
+
+    /// Assemble party routes from received announcements
+    /// Maps PublicKeys to party IDs based on sorted bidder order
+    pub async fn assemble_party_routes(
+        &self,
+        sorted_bidders: &[PublicKey],
+    ) -> Result<HashMap<usize, RouteId>> {
+        let routes_by_pubkey = self.received_routes.lock().await;
+        let mut routes_by_party_id = HashMap::new();
+
+        for (party_id, pubkey) in sorted_bidders.iter().enumerate() {
+            if let Some(route) = routes_by_pubkey.get(pubkey) {
+                routes_by_party_id.insert(party_id, route.clone());
+                info!("Party {} ({}): has route {}", party_id, pubkey, route);
+            } else {
+                warn!("Missing route for Party {} ({})", party_id, pubkey);
+            }
+        }
+
+        info!("Assembled {} routes from {} bidders",
+              routes_by_party_id.len(), sorted_bidders.len());
+
+        Ok(routes_by_party_id)
     }
 
     /// Get my route ID
     pub fn get_my_route(&self) -> Option<&RouteId> {
         self.my_route_id.as_ref()
+    }
+
+    /// Get my route blob for sharing
+    pub fn get_my_route_blob(&self) -> Option<&RouteBlob> {
+        self.my_route_blob.as_ref()
     }
 }
