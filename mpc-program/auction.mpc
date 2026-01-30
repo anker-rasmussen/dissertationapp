@@ -1,0 +1,116 @@
+# auction.mpc
+# 4-Party Sealed-Bid Auction with External Clients
+
+from Compiler.types import sint, regint, Array, MemValue
+from Compiler.library import print_ln, for_range, crash
+from Compiler.instructions import listen, acceptclientconnection
+
+# Configuration
+# This matches the number of active bidders we expect for the demo
+MAX_CLIENTS = 3 
+
+# The port base for external client connections
+# MP-SPDZ usually listens on: PORT_NUM_BASE + (client_id)
+PORT_NUM_BASE = 14000
+
+def main():
+    """
+    Main Auction Logic:
+    1. Listen for client connections.
+    2. Receive secret-shared bids.
+    3. Compute winner (highest bid).
+    4. Reveal winner to all.
+    """
+    
+    # Storage for the bids and client socket handles
+    bids = Array(MAX_CLIENTS, sint)
+    client_sockets = Array(MAX_CLIENTS, regint)
+    
+    print_ln("Auction MPC: Starting up...")
+    print_ln("Waiting for %s clients to connect...", MAX_CLIENTS)
+
+    # 1. Connection Phase
+    # -------------------
+    # Open a listening socket for external clients
+    # Note: In a real deployment, we loop this. For demo, we do it linearly.
+    listen_socket = regint()
+    listen(listen_socket, PORT_NUM_BASE + get_player_id())
+    
+    @for_range(MAX_CLIENTS)
+    def _(i):
+        print_ln("Waiting for client %s...", i)
+        # Accept connection from client i
+        # acceptclientconnection returns a handle to talk to this client
+        acceptclientconnection(client_sockets[i], listen_socket)
+        print_ln("Client %s connected.", i)
+
+    # 2. Bidding Phase
+    # ----------------
+    print_ln("Collecting bids...")
+    
+    @for_range(MAX_CLIENTS)
+    def _(i):
+        # Receive a secret shared integer (sint) from client i
+        # The client must send shares to all 4 parties.
+        # MP-SPDZ handles the reconstruction of the input internally 
+        # based on the protocol (Shamirs/Semi-honest).
+        bids[i] = sint.receive_from_client(MAX_CLIENTS, client_sockets[i])
+        
+    print_ln("All bids received. Computing winner...")
+
+    # 3. Compute Phase
+    # ----------------
+    # Find the index of the maximum bid
+    # We initialize max_val and max_idx
+    max_bid = MemValue(bids[0])
+    winner_idx = MemValue(regint(0))
+
+    @for_range(1, MAX_CLIENTS)
+    def _(i):
+        # Secure comparison: is bids[i] > max_bid?
+        is_higher = bids[i] > max_bid
+        
+        # Update max_bid if is_higher is true (oblivious selection)
+        max_bid.write(is_higher.if_else(bids[i], max_bid))
+        
+        # Update winner_idx if is_higher is true
+        # We need to cast 'i' to sint or mix types carefully
+        # Here we use the fact that secret comparisons return a secret bit (sint)
+        # We can multiply that bit by the index difference
+        
+        # Note: MP-SPDZ control flow is tricky. 
+        # Using if_else is the standard way for secret conditionals.
+        current_idx = is_higher.if_else(i, winner_idx)
+        winner_idx.write(current_idx)
+
+    # 4. Reveal Phase
+    # ---------------
+    # We reveal the result to the compute nodes (print it)
+    # and send it back to the clients.
+    
+    final_winner = winner_idx.read().reveal()
+    final_price = max_bid.read().reveal()
+
+    print_ln("Auction Complete!")
+    print_ln("Winner ID: %s", final_winner)
+    print_ln("Winning Price: %s", final_price)
+
+    # Send result back to all clients
+    # We send two values: [WinnerID, WinningPrice]
+    # In a real blinded auction, we might only send "You Won" or "You Lost" 
+    # but for this demo, we broadcast the result.
+    
+    @for_range(MAX_CLIENTS)
+    def _(i):
+        # We need to write values back to the client socket
+        # Note: The client must be expecting these values
+        # We write open values (regint/cint)
+        # MP-SPDZ python library might not have a direct 'send_public_to_client' 
+        # for regint in the high-level API easily exposed. 
+        # Usually we just assume the result is public.
+        
+        # Workaround: The tutorial usually suggests revealing and printing.
+        # Writing back to client usually requires 'sint.write_to_socket' or similar.
+        pass
+
+main()

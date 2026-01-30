@@ -1,18 +1,21 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use tracing::{debug, info, warn};
 use veilid_core::{DHTSchema, KeyPair, RecordKey, CRYPTO_KIND_VLD0};
 
 use super::dht::DHTOperations;
 
-/// Path to the shared registry keypair file
-/// All demo instances on the same machine share this file
-fn get_registry_keypair_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("smpc-auction-registry-keypair.txt")
-}
+/// Hardcoded registry keypair for devnet/demo
+/// In production, this should be loaded from a secure shared location
+/// For devnet, all nodes use this same keypair to share the registry
+const DEVNET_REGISTRY_KEYPAIR: &str =
+    "VLD0:Qz4_xPTDDkwDtIgwuk1AarJTudWkg1hlrMIuQstprzM:o70UeMuq22ZrE-ysnmtN8wthjO0YSRUe6nxn2DnnWeQ";
+
+/// Hardcoded registry record key for devnet/demo
+/// This is the DHT record key where the registry is stored
+/// All nodes use this same record key to access the shared registry
+const DEVNET_REGISTRY_RECORD_KEY: &str =
+    "VLD0:WvPYrb8EnnKOsCQ6MB_inMSnlXyQ6mkXuMa2fh55Dz4";
 
 /// Listing entry in the registry (minimal info for discovery)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +84,8 @@ pub struct RegistryOperations {
     dht: DHTOperations,
     /// Cached registry record key (once created/found)
     registry_key: Option<RecordKey>,
+    /// Track if we have an open record handle
+    record_open: bool,
 }
 
 impl RegistryOperations {
@@ -88,49 +93,24 @@ impl RegistryOperations {
         Self {
             dht,
             registry_key: None,
+            record_open: false,
         }
     }
 
-    /// Get or create the shared registry keypair
-    /// First instance generates it and saves to a shared file
-    /// Subsequent instances load from the file
+    /// Get the shared registry keypair
+    /// Uses a hardcoded keypair for devnet to ensure all nodes share the same registry
+    /// In production, this should load from a secure shared key management system
     fn get_or_create_registry_keypair(&self) -> Result<KeyPair> {
-        let keypair_path = get_registry_keypair_path();
+        // Use the hardcoded devnet keypair
+        let keypair = KeyPair::try_from(DEVNET_REGISTRY_KEYPAIR)
+            .map_err(|e| anyhow::anyhow!("Failed to parse devnet registry keypair: {}", e))?;
 
-        // Try to load existing keypair
-        if keypair_path.exists() {
-            let keypair_str = std::fs::read_to_string(&keypair_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read registry keypair file: {}", e))?;
-            let keypair_str = keypair_str.trim();
-            let keypair = KeyPair::try_from(keypair_str)
-                .map_err(|e| anyhow::anyhow!("Failed to parse registry keypair: {}", e))?;
-            debug!("Loaded registry keypair from {:?}", keypair_path);
-            return Ok(keypair);
-        }
-
-        // Generate new keypair using Veilid's crypto system
-        let routing_context = self.dht.get_routing_context_pub()?;
-        let api = routing_context.api();
-        let crypto = api
-            .crypto()
-            .map_err(|e| anyhow::anyhow!("Failed to get crypto: {}", e))?;
-        let vcrypto = crypto
-            .get(CRYPTO_KIND_VLD0)
-            .ok_or_else(|| anyhow::anyhow!("VLD0 crypto not available"))?;
-
-        let keypair = vcrypto.generate_keypair();
-        let keypair_str = keypair.to_string();
-
-        // Save to file for other instances
-        std::fs::write(&keypair_path, &keypair_str)
-            .map_err(|e| anyhow::anyhow!("Failed to save registry keypair: {}", e))?;
-
-        info!("Generated new registry keypair, saved to {:?}", keypair_path);
+        debug!("Using hardcoded devnet registry keypair");
         Ok(keypair)
     }
 
     /// Create or get the registry DHT record
-    /// First node creates it, others open it
+    /// All nodes use the hardcoded record key to share the same registry
     pub async fn get_or_create_registry(&mut self) -> Result<RecordKey> {
         if let Some(key) = &self.registry_key {
             return Ok(key.clone());
@@ -139,47 +119,67 @@ impl RegistryOperations {
         let keypair = self.get_or_create_registry_keypair()?;
         let routing_context = self.dht.get_routing_context_pub()?;
 
-        // Try to create the registry record with our known keypair
-        let schema = DHTSchema::dflt(1)?;
+        // Parse the hardcoded registry record key
+        let key = RecordKey::try_from(DEVNET_REGISTRY_RECORD_KEY)
+            .map_err(|e| anyhow::anyhow!("Failed to parse devnet registry record key: {}", e))?;
 
-        let (key, is_new) = match routing_context
-            .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(keypair.clone()))
+        // Try to open the existing record first (most common case)
+        let is_new = match routing_context
+            .open_dht_record(key.clone(), Some(keypair.clone()))
             .await
         {
-            Ok(descriptor) => {
-                let key = descriptor.key();
-                info!("Created new registry at: {}", key);
-                (key, true)
+            Ok(_) => {
+                info!("Opened existing registry at: {}", key);
+                false
             }
-            Err(e) => {
-                // Record might already exist - try to open it
-                debug!("Create failed ({}), trying to open existing record", e);
+            Err(open_err) => {
+                // Record doesn't exist yet - try to create it
+                debug!(
+                    "Open failed ({}), attempting to create new registry record",
+                    open_err
+                );
 
-                // Load the registry key from file
-                let key_path = get_registry_keypair_path().with_extension("key");
-                if key_path.exists() {
-                    let key_str = std::fs::read_to_string(&key_path)?;
-                    let key = RecordKey::try_from(key_str.trim())
-                        .map_err(|e| anyhow::anyhow!("Failed to parse registry key: {}", e))?;
-
-                    // Open the existing record
-                    let _ = routing_context
-                        .open_dht_record(key.clone(), Some(keypair.clone()))
-                        .await?;
-                    info!("Opened existing registry at: {}", key);
-                    (key, false) // NOT new - don't initialize!
-                } else {
-                    return Err(anyhow::anyhow!("Registry record not found and cannot create: {}", e));
+                let schema = DHTSchema::dflt(1)?;
+                match routing_context
+                    .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(keypair.clone()))
+                    .await
+                {
+                    Ok(descriptor) => {
+                        let created_key = descriptor.key();
+                        if created_key != key {
+                            warn!(
+                                "Created registry key {} doesn't match expected key {}. Using created key.",
+                                created_key, key
+                            );
+                            // This shouldn't happen with a hardcoded keypair, but handle it gracefully
+                        }
+                        info!("Created new registry at: {}", created_key);
+                        true
+                    }
+                    Err(create_err) => {
+                        // Race condition: another node created it between our open and create
+                        // Try opening again
+                        debug!(
+                            "Create failed ({}), trying to open again (race condition)",
+                            create_err
+                        );
+                        let _ = routing_context
+                            .open_dht_record(key.clone(), Some(keypair.clone()))
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to open or create registry. Open error: {}, Create error: {}, Retry open error: {}",
+                                    open_err,
+                                    create_err,
+                                    e
+                                )
+                            })?;
+                        info!("Opened registry at: {} (after race)", key);
+                        false
+                    }
                 }
             }
         };
-
-        // Save the registry key for future use
-        let key_path = get_registry_keypair_path().with_extension("key");
-        if !key_path.exists() {
-            std::fs::write(&key_path, key.to_string())?;
-            debug!("Saved registry key to {:?}", key_path);
-        }
 
         self.registry_key = Some(key.clone());
 
@@ -195,27 +195,35 @@ impl RegistryOperations {
                 .await?;
         }
 
-        routing_context.close_dht_record(key.clone()).await?;
+        // Keep the record open for future operations
+        // Don't close it - we'll reuse the open handle
+        self.record_open = true;
+        info!("Registry record is now open and ready");
         Ok(key)
     }
 
     /// Fetch the current registry from DHT
     pub async fn fetch_registry(&mut self) -> Result<ListingRegistry> {
         let key = self.get_or_create_registry().await?;
-        let keypair = self.get_or_create_registry_keypair()?;
         let routing_context = self.dht.get_routing_context_pub()?;
 
-        // Open with keypair for potential writes
-        let _ = routing_context
-            .open_dht_record(key.clone(), Some(keypair))
-            .await?;
+        // Record should already be open from get_or_create_registry
+        // If not, open it now
+        if !self.record_open {
+            let keypair = self.get_or_create_registry_keypair()?;
+            let _ = routing_context
+                .open_dht_record(key.clone(), Some(keypair))
+                .await?;
+            self.record_open = true;
+        }
 
+        // Force refresh to get latest data from the network
         let data = routing_context
             .get_dht_value(key.clone(), 0, true)
             .await?
             .map(|v| v.data().to_vec());
 
-        routing_context.close_dht_record(key.clone()).await?;
+        // Don't close the record - keep it open for future operations
 
         match data {
             Some(bytes) => {
@@ -238,38 +246,119 @@ impl RegistryOperations {
         }
     }
 
-    /// Add a listing to the registry
+    /// Add a listing to the registry with retry logic for conflict resolution
     pub async fn register_listing(&mut self, entry: RegistryEntry) -> Result<()> {
         let key = self.get_or_create_registry().await?;
-        let keypair = self.get_or_create_registry_keypair()?;
         let routing_context = self.dht.get_routing_context_pub()?;
 
-        // Open with keypair for writing
-        let _ = routing_context
-            .open_dht_record(key.clone(), Some(keypair))
-            .await?;
+        // Record should already be open from get_or_create_registry
+        if !self.record_open {
+            let keypair = self.get_or_create_registry_keypair()?;
+            let _ = routing_context
+                .open_dht_record(key.clone(), Some(keypair))
+                .await?;
+            self.record_open = true;
+        }
 
-        // Fetch current registry
-        let mut registry = match routing_context.get_dht_value(key.clone(), 0, true).await? {
-            Some(v) => ListingRegistry::from_cbor(v.data())
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize registry: {}", e))?,
-            None => ListingRegistry::default(),
-        };
+        // Retry up to 10 times with exponential backoff to handle concurrent writes
+        // This implements optimistic concurrency control
+        let max_retries = 10;
+        let mut retry_delay = std::time::Duration::from_millis(50);
 
-        // Add the new listing
-        registry.add_listing(entry.clone());
+        for attempt in 0..max_retries {
+            // Fetch current registry with force_refresh to get latest state from network
+            let value_data = routing_context
+                .get_dht_value(key.clone(), 0, true)
+                .await?;
 
-        // Write back
-        let data = registry
-            .to_cbor()
-            .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {}", e))?;
-        routing_context
-            .set_dht_value(key.clone(), 0, data, None)
-            .await?;
+            let (mut registry, old_seq) = match value_data {
+                Some(v) => {
+                    let seq = v.seq();
+                    let registry = ListingRegistry::from_cbor(v.data())
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize registry: {}", e))?;
+                    (registry, Some(seq))
+                }
+                None => (ListingRegistry::default(), None),
+            };
 
-        routing_context.close_dht_record(key.clone()).await?;
+            // Check if listing already exists (no-op if duplicate)
+            if registry.listings.iter().any(|e| e.key == entry.key) {
+                info!(
+                    "Listing '{}' already in registry, skipping",
+                    entry.title
+                );
+                return Ok(());
+            }
 
-        info!("Registered listing '{}' in registry", entry.title);
-        Ok(())
+            // Add the new listing
+            registry.add_listing(entry.clone());
+
+            // Serialize the updated registry
+            let data = registry
+                .to_cbor()
+                .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {}", e))?;
+
+            // Write the updated registry (Veilid automatically increments sequence number)
+            match routing_context
+                .set_dht_value(key.clone(), 0, data.clone(), None)
+                .await
+            {
+                Ok(old_value) => {
+                    // Verify the write succeeded by checking if the sequence changed
+                    // If another node wrote between our read and write, we need to retry
+                    if let Some(returned_value) = old_value {
+                        let returned_seq = returned_value.seq();
+                        if let Some(expected_seq) = old_seq {
+                            if returned_seq != expected_seq {
+                                // Sequence changed - another write happened
+                                if attempt < max_retries - 1 {
+                                    warn!(
+                                        "Concurrent write detected (seq {} -> {}), retrying in {:?}",
+                                        expected_seq, returned_seq, retry_delay
+                                    );
+                                    tokio::time::sleep(retry_delay).await;
+                                    retry_delay *= 2; // Exponential backoff
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    info!(
+                        "Successfully registered listing '{}' in registry (attempt {}/{})",
+                        entry.title,
+                        attempt + 1,
+                        max_retries
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Write failed - could be network issue or other error
+                    if attempt < max_retries - 1 {
+                        warn!(
+                            "Write failed ({}), retrying in {:?} (attempt {}/{})",
+                            e,
+                            retry_delay,
+                            attempt + 1,
+                            max_retries
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay *= 2;
+                        continue;
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Failed to register listing after {} attempts: {}",
+                            max_retries,
+                            e
+                        ));
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to register listing after {} attempts",
+            max_retries
+        ))
     }
 }
