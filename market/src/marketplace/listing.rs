@@ -36,6 +36,10 @@ pub struct Listing {
     /// AES-256-GCM nonce (12 bytes) - required for decryption
     pub content_nonce: ContentNonce,
 
+    /// Hex-encoded AES-256 key for decryption (sent to winner after auction)
+    /// The seller keeps this private and only reveals it to the auction winner
+    pub decryption_key: String,
+
     /// Minimum bid amount (in atomic units, e.g., piconeros for XMR)
     pub min_bid: u64,
 
@@ -78,6 +82,24 @@ impl Listing {
         }
     }
 
+    /// Decrypt the encrypted content using the provided hex-encoded decryption key
+    /// Returns the decrypted content as a UTF-8 string
+    pub fn decrypt_content_with_key(&self, decryption_key_hex: &str) -> anyhow::Result<String> {
+        use crate::crypto::{decrypt_content, ContentKey};
+
+        // Decode hex string to bytes
+        let key_bytes = hex::decode(decryption_key_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid hex key: {}", e))?;
+
+        // Convert to 32-byte array
+        let len = key_bytes.len();
+        let key: ContentKey = key_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Key must be 32 bytes, got {} bytes", len))?;
+
+        // Decrypt using the crypto module
+        decrypt_content(&self.encrypted_content, &key, &self.content_nonce)
+    }
+
     /// Serialize the listing to CBOR bytes
     pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
         let mut buffer = Vec::new();
@@ -99,6 +121,7 @@ pub struct ListingBuilder {
     title: Option<String>,
     encrypted_content: Option<Vec<u8>>,
     content_nonce: Option<ContentNonce>,
+    decryption_key: Option<String>,
     min_bid: Option<u64>,
     auction_duration_secs: Option<u64>,
 }
@@ -119,9 +142,10 @@ impl ListingBuilder {
         self
     }
 
-    pub fn encrypted_content(mut self, content: Vec<u8>, nonce: ContentNonce) -> Self {
+    pub fn encrypted_content(mut self, content: Vec<u8>, nonce: ContentNonce, key: String) -> Self {
         self.encrypted_content = Some(content);
         self.content_nonce = Some(nonce);
+        self.decryption_key = Some(key);
         self
     }
 
@@ -146,6 +170,7 @@ impl ListingBuilder {
             title: self.title.ok_or("title is required")?,
             encrypted_content: self.encrypted_content.ok_or("encrypted_content is required")?,
             content_nonce: self.content_nonce.ok_or("content_nonce is required")?,
+            decryption_key: self.decryption_key.ok_or("decryption_key is required")?,
             min_bid: self.min_bid.ok_or("min_bid is required")?,
             auction_end: created_at + self.auction_duration_secs.ok_or("auction_duration is required")?,
             created_at,
