@@ -82,6 +82,24 @@ impl Listing {
         }
     }
 
+    /// Decrypt the encrypted content using the provided hex-encoded decryption key
+    /// Returns the decrypted content as a UTF-8 string
+    pub fn decrypt_content_with_key(&self, decryption_key_hex: &str) -> anyhow::Result<String> {
+        use crate::crypto::{decrypt_content, ContentKey};
+
+        // Decode hex string to bytes
+        let key_bytes = hex::decode(decryption_key_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid hex key: {}", e))?;
+
+        // Convert to 32-byte array
+        let len = key_bytes.len();
+        let key: ContentKey = key_bytes.try_into()
+            .map_err(|_| anyhow::anyhow!("Key must be 32 bytes, got {} bytes", len))?;
+
+        // Decrypt using the crypto module
+        decrypt_content(&self.encrypted_content, &key, &self.content_nonce)
+    }
+
     /// Serialize the listing to CBOR bytes
     pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
         let mut buffer = Vec::new();

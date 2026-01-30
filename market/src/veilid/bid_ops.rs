@@ -55,7 +55,7 @@ impl BidOperations {
         let routing_context = self.dht.get_routing_context_pub()?;
 
         // Open the listing record (read/write)
-        routing_context.open_dht_record(listing_key.clone(), None).await
+        let _ = routing_context.open_dht_record(listing_key.clone(), None).await
             .map_err(|e| anyhow::anyhow!("Failed to open listing record: {}", e))?;
 
         for attempt in 0..max_retries {
@@ -120,10 +120,9 @@ impl BidOperations {
     pub async fn discover_bids_devnet(
         &self,
         listing_key: &RecordKey,
-        my_node_id: &veilid_core::PublicKey,
+        _my_node_id: &veilid_core::PublicKey,
         my_bid_key: &RecordKey,
     ) -> Result<BidIndex> {
-        use crate::marketplace::BidRecord;
 
         let mut bid_index = BidIndex::new(listing_key.clone());
 

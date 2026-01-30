@@ -133,6 +133,44 @@ impl DHTOperations {
     /// For simple records, use subkey 0
     /// Returns None if the value hasn't been set yet
     pub async fn get_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
+        self.get_value_at_subkey(key, 0).await
+    }
+
+    /// Set a value at a specific subkey (requires write access)
+    pub async fn set_value_at_subkey(&self, record: &OwnedDHTRecord, subkey: u32, value: Vec<u8>) -> Result<()> {
+        let routing_context = self.get_routing_context()?;
+
+        // Open the record with owner keypair for write access
+        let _ = routing_context
+            .open_dht_record(record.key.clone(), Some(record.owner.clone()))
+            .await
+            .context("Failed to open DHT record for writing")?;
+
+        // Set the value at specified subkey
+        routing_context
+            .set_dht_value(record.key.clone(), subkey, value.clone(), None)
+            .await
+            .context(format!("Failed to set DHT value at subkey {}", subkey))?;
+
+        info!(
+            "Set DHT value for key {}, {} bytes at subkey {}",
+            record.key,
+            value.len(),
+            subkey
+        );
+
+        // Close the record after writing
+        routing_context
+            .close_dht_record(record.key.clone())
+            .await
+            .context("Failed to close DHT record")?;
+
+        Ok(())
+    }
+
+    /// Get a value from a specific subkey
+    /// Returns None if the value hasn't been set yet
+    pub async fn get_value_at_subkey(&self, key: &RecordKey, subkey: u32) -> Result<Option<Vec<u8>>> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record first
@@ -141,12 +179,12 @@ impl DHTOperations {
             .await
             .context("Failed to open DHT record for reading")?;
 
-        // Get the value at subkey 0
+        // Get the value at specified subkey
         // force_refresh=true ensures we get the latest value from the network
         let value_data = routing_context
-            .get_dht_value(key.clone(), 0, true)
+            .get_dht_value(key.clone(), subkey, true)
             .await
-            .context("Failed to get DHT value")?;
+            .context(format!("Failed to get DHT value from subkey {}", subkey))?;
 
         // Close the record after reading
         routing_context
@@ -157,14 +195,15 @@ impl DHTOperations {
         match value_data {
             Some(data) => {
                 info!(
-                    "Retrieved DHT value for key {}: {} bytes from subkey 0",
+                    "Retrieved DHT value for key {}: {} bytes from subkey {}",
                     key,
-                    data.data().len()
+                    data.data().len(),
+                    subkey
                 );
                 Ok(Some(data.data().to_vec()))
             }
             None => {
-                debug!("No value found for key {} at subkey 0", key);
+                debug!("No value found for key {} at subkey {}", key, subkey);
                 Ok(None)
             }
         }
