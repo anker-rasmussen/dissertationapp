@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 use veilid_core::{PublicKey, RecordKey};
 
 use crate::crypto::ContentNonce;
+use crate::traits::{SystemTimeProvider, TimeProvider};
 
 /// Status of a listing in the auction marketplace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,23 +58,42 @@ pub struct Listing {
 
 impl Listing {
     /// Create a new listing builder
-    pub fn builder() -> ListingBuilder {
-        ListingBuilder::default()
+    pub fn builder() -> ListingBuilder<SystemTimeProvider> {
+        ListingBuilder::new(SystemTimeProvider::new())
+    }
+
+    /// Create a new listing builder with a custom time provider
+    pub fn builder_with_time<T: TimeProvider>(time: T) -> ListingBuilder<T> {
+        ListingBuilder::new(time)
     }
 
     /// Check if the auction is still active (hasn't ended yet)
     pub fn is_active(&self) -> bool {
-        self.status == ListingStatus::Active && self.auction_end > current_timestamp()
+        self.is_active_at(SystemTimeProvider::new().now_unix())
+    }
+
+    /// Check if the auction is still active at a specific timestamp
+    pub fn is_active_at(&self, now: u64) -> bool {
+        self.status == ListingStatus::Active && self.auction_end > now
     }
 
     /// Check if the auction has ended
     pub fn has_ended(&self) -> bool {
-        self.auction_end <= current_timestamp()
+        self.has_ended_at(SystemTimeProvider::new().now_unix())
+    }
+
+    /// Check if the auction has ended at a specific timestamp
+    pub fn has_ended_at(&self, now: u64) -> bool {
+        self.auction_end <= now
     }
 
     /// Get time remaining in seconds (0 if ended)
     pub fn time_remaining(&self) -> u64 {
-        let now = current_timestamp();
+        self.time_remaining_at(SystemTimeProvider::new().now_unix())
+    }
+
+    /// Get time remaining at a specific timestamp
+    pub fn time_remaining_at(&self, now: u64) -> u64 {
         if now >= self.auction_end {
             0
         } else {
@@ -114,8 +133,8 @@ impl Listing {
 }
 
 /// Builder for creating new listings
-#[derive(Default)]
-pub struct ListingBuilder {
+pub struct ListingBuilder<T: TimeProvider> {
+    time: T,
     key: Option<RecordKey>,
     seller: Option<PublicKey>,
     title: Option<String>,
@@ -126,7 +145,24 @@ pub struct ListingBuilder {
     auction_duration_secs: Option<u64>,
 }
 
-impl ListingBuilder {
+impl<T: TimeProvider> ListingBuilder<T> {
+    /// Create a new builder with a time provider
+    pub fn new(time: T) -> Self {
+        Self {
+            time,
+            key: None,
+            seller: None,
+            title: None,
+            encrypted_content: None,
+            content_nonce: None,
+            decryption_key: None,
+            min_bid: None,
+            auction_duration_secs: None,
+        }
+    }
+}
+
+impl<T: TimeProvider> ListingBuilder<T> {
     pub fn key(mut self, key: RecordKey) -> Self {
         self.key = Some(key);
         self
@@ -162,7 +198,7 @@ impl ListingBuilder {
 
     /// Build the listing (returns error if required fields are missing)
     pub fn build(self) -> Result<Listing, String> {
-        let created_at = current_timestamp();
+        let created_at = self.time.now_unix();
 
         Ok(Listing {
             key: self.key.ok_or("key is required")?,
@@ -180,27 +216,225 @@ impl ListingBuilder {
     }
 }
 
-/// Get current Unix timestamp in seconds
-fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("System time is before Unix epoch")
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mocks::{make_test_public_key, make_test_record_key, MockTime};
 
-    #[test]
-    fn test_listing_builder() {
-        // This test requires actual Veilid types, so it's more of a compilation test
-        // Real tests should be in integration tests with a running Veilid node
+    fn make_test_key() -> RecordKey {
+        make_test_record_key(1)
+    }
+
+    fn make_test_pubkey() -> PublicKey {
+        make_test_public_key(2)
+    }
+
+    fn make_test_listing(time: &MockTime) -> Listing {
+        Listing::builder_with_time(time.clone())
+            .key(make_test_key())
+            .seller(make_test_pubkey())
+            .title("Test Auction")
+            .encrypted_content(vec![1, 2, 3], [0u8; 12], "abc123".to_string())
+            .min_bid(100)
+            .auction_duration(3600) // 1 hour
+            .build()
+            .unwrap()
     }
 
     #[test]
-    fn test_listing_serialization() {
-        // Test CBOR serialization round-trip
-        // Will be implemented with actual data in integration tests
+    fn test_listing_builder_valid() {
+        let time = MockTime::new(1000);
+        let listing = make_test_listing(&time);
+
+        assert_eq!(listing.title, "Test Auction");
+        assert_eq!(listing.min_bid, 100);
+        assert_eq!(listing.created_at, 1000);
+        assert_eq!(listing.auction_end, 4600); // 1000 + 3600
+        assert_eq!(listing.status, ListingStatus::Active);
+        assert_eq!(listing.bid_count, 0);
+    }
+
+    #[test]
+    fn test_listing_builder_missing_key() {
+        let time = MockTime::new(1000);
+        let result = Listing::builder_with_time(time)
+            .seller(make_test_pubkey())
+            .title("Test")
+            .encrypted_content(vec![1], [0u8; 12], "key".to_string())
+            .min_bid(100)
+            .auction_duration(3600)
+            .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("key is required"));
+    }
+
+    #[test]
+    fn test_listing_builder_missing_seller() {
+        let time = MockTime::new(1000);
+        let result = Listing::builder_with_time(time)
+            .key(make_test_key())
+            .title("Test")
+            .encrypted_content(vec![1], [0u8; 12], "key".to_string())
+            .min_bid(100)
+            .auction_duration(3600)
+            .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("seller is required"));
+    }
+
+    #[test]
+    fn test_listing_builder_missing_title() {
+        let time = MockTime::new(1000);
+        let result = Listing::builder_with_time(time)
+            .key(make_test_key())
+            .seller(make_test_pubkey())
+            .encrypted_content(vec![1], [0u8; 12], "key".to_string())
+            .min_bid(100)
+            .auction_duration(3600)
+            .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("title is required"));
+    }
+
+    #[test]
+    fn test_listing_builder_missing_auction_duration() {
+        let time = MockTime::new(1000);
+        let result = Listing::builder_with_time(time)
+            .key(make_test_key())
+            .seller(make_test_pubkey())
+            .title("Test")
+            .encrypted_content(vec![1], [0u8; 12], "key".to_string())
+            .min_bid(100)
+            .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("auction_duration is required"));
+    }
+
+    #[test]
+    fn test_listing_is_active() {
+        let time = MockTime::new(1000);
+        let listing = make_test_listing(&time);
+
+        // Active during auction
+        assert!(listing.is_active_at(1000));
+        assert!(listing.is_active_at(4599));
+
+        // Not active after auction ends
+        assert!(!listing.is_active_at(4600));
+        assert!(!listing.is_active_at(5000));
+    }
+
+    #[test]
+    fn test_listing_has_ended() {
+        let time = MockTime::new(1000);
+        let listing = make_test_listing(&time);
+
+        // Not ended during auction
+        assert!(!listing.has_ended_at(1000));
+        assert!(!listing.has_ended_at(4599));
+
+        // Ended at and after deadline
+        assert!(listing.has_ended_at(4600));
+        assert!(listing.has_ended_at(5000));
+    }
+
+    #[test]
+    fn test_listing_time_remaining() {
+        let time = MockTime::new(1000);
+        let listing = make_test_listing(&time);
+
+        // Full time at start
+        assert_eq!(listing.time_remaining_at(1000), 3600);
+
+        // Half time
+        assert_eq!(listing.time_remaining_at(2800), 1800);
+
+        // Zero at end
+        assert_eq!(listing.time_remaining_at(4600), 0);
+
+        // Zero after end
+        assert_eq!(listing.time_remaining_at(5000), 0);
+    }
+
+    #[test]
+    fn test_listing_inactive_when_cancelled() {
+        let time = MockTime::new(1000);
+        let mut listing = make_test_listing(&time);
+        listing.status = ListingStatus::Cancelled;
+
+        // Not active even during auction window
+        assert!(!listing.is_active_at(2000));
+    }
+
+    #[test]
+    fn test_listing_serialization_roundtrip() {
+        let time = MockTime::new(1000);
+        let original = make_test_listing(&time);
+
+        let cbor = original.to_cbor().unwrap();
+        let restored = Listing::from_cbor(&cbor).unwrap();
+
+        assert_eq!(original.key, restored.key);
+        assert_eq!(original.seller, restored.seller);
+        assert_eq!(original.title, restored.title);
+        assert_eq!(original.encrypted_content, restored.encrypted_content);
+        assert_eq!(original.content_nonce, restored.content_nonce);
+        assert_eq!(original.decryption_key, restored.decryption_key);
+        assert_eq!(original.min_bid, restored.min_bid);
+        assert_eq!(original.auction_end, restored.auction_end);
+        assert_eq!(original.created_at, restored.created_at);
+        assert_eq!(original.status, restored.status);
+        assert_eq!(original.bid_count, restored.bid_count);
+    }
+
+    #[test]
+    fn test_listing_decrypt_content() {
+        use crate::crypto::{encrypt_content, generate_key};
+
+        let time = MockTime::new(1000);
+        let key = generate_key();
+        let plaintext = "Secret auction item details";
+        let (ciphertext, nonce) = encrypt_content(plaintext, &key).unwrap();
+
+        let listing = Listing::builder_with_time(time)
+            .key(make_test_key())
+            .seller(make_test_pubkey())
+            .title("Test")
+            .encrypted_content(ciphertext, nonce, hex::encode(key))
+            .min_bid(100)
+            .auction_duration(3600)
+            .build()
+            .unwrap();
+
+        let decrypted = listing.decrypt_content_with_key(&listing.decryption_key).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_listing_decrypt_with_wrong_key() {
+        use crate::crypto::{encrypt_content, generate_key};
+
+        let time = MockTime::new(1000);
+        let key = generate_key();
+        let wrong_key = generate_key();
+        let plaintext = "Secret";
+        let (ciphertext, nonce) = encrypt_content(plaintext, &key).unwrap();
+
+        let listing = Listing::builder_with_time(time)
+            .key(make_test_key())
+            .seller(make_test_pubkey())
+            .title("Test")
+            .encrypted_content(ciphertext, nonce, hex::encode(key))
+            .min_bid(100)
+            .auction_duration(3600)
+            .build()
+            .unwrap();
+
+        let result = listing.decrypt_content_with_key(&hex::encode(wrong_key));
+        assert!(result.is_err());
     }
 }

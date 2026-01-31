@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use tracing::{debug, info};
 use veilid_core::{
     DHTRecordDescriptor, DHTSchema, KeyPair, RecordKey, SafetySelection, Sequencing, VeilidAPI,
     ValueSubkeyRangeSet, CRYPTO_KIND_VLD0,
 };
+
+use crate::config::DHT_SUBKEY_COUNT;
+use crate::traits::DhtStore;
 
 /// DHT operations wrapper for Veilid
 #[derive(Clone)]
@@ -56,18 +60,18 @@ impl DHTOperations {
 
     /// Create a new DHT record with the default crypto system (VLD0)
     /// Returns the OwnedDHTRecord that includes the owner keypair for write access
-    pub async fn create_record(&self) -> Result<OwnedDHTRecord> {
+    pub async fn create_dht_record(&self) -> Result<OwnedDHTRecord> {
         let routing_context = self.get_routing_context()?;
 
-        // Create DHT schema with 4 subkeys:
+        // Create DHT schema with configured subkeys:
         // - Subkey 0: Primary data (e.g., listing)
-        // - Subkey 1: Bid index (for auctions, currently unused)
+        // - Subkey 1: Bid index (for auctions)
         // - Subkey 2: Coordination record (for bid announcements)
         // - Subkey 3: Bidder registry (for n-party MPC)
-        let schema = DHTSchema::dflt(4)?;
+        let schema = DHTSchema::dflt(DHT_SUBKEY_COUNT)?;
 
         // Create the record - this generates a new key and allocates storage
-        // kind: CRYPTO_KIND_VLD0, schema: dflt(1), owner: None (random keypair)
+        // kind: CRYPTO_KIND_VLD0, schema: dflt(4), owner: None (random keypair)
         let record_descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, None)
             .await
@@ -99,7 +103,7 @@ impl DHTOperations {
 
     /// Set a value in a DHT record (requires write access via owner keypair)
     /// For simple records, use subkey 0
-    pub async fn set_value(&self, record: &OwnedDHTRecord, value: Vec<u8>) -> Result<()> {
+    pub async fn set_dht_value(&self, record: &OwnedDHTRecord, value: Vec<u8>) -> Result<()> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record with owner keypair for write access
@@ -132,7 +136,7 @@ impl DHTOperations {
     /// Get a value from a DHT record
     /// For simple records, use subkey 0
     /// Returns None if the value hasn't been set yet
-    pub async fn get_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
+    pub async fn get_dht_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
         self.get_value_at_subkey(key, 0).await
     }
 
@@ -211,7 +215,7 @@ impl DHTOperations {
 
     /// Delete a DHT record
     /// This removes the record from the DHT entirely
-    pub async fn delete_record(&self, key: &RecordKey) -> Result<()> {
+    pub async fn delete_dht_record(&self, key: &RecordKey) -> Result<()> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record first
@@ -232,7 +236,7 @@ impl DHTOperations {
 
     /// Watch a DHT record for changes
     /// Returns true if watch was successfully established
-    pub async fn watch_record(&self, key: &RecordKey) -> Result<bool> {
+    pub async fn watch_dht_record(&self, key: &RecordKey) -> Result<bool> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record first
@@ -261,7 +265,7 @@ impl DHTOperations {
     }
 
     /// Cancel watching a DHT record
-    pub async fn cancel_watch(&self, key: &RecordKey) -> Result<bool> {
+    pub async fn cancel_dht_watch(&self, key: &RecordKey) -> Result<bool> {
         let routing_context = self.get_routing_context()?;
 
         // Cancel watch on subkey 0
@@ -282,10 +286,55 @@ impl DHTOperations {
     }
 }
 
+// Implement the DhtStore trait for DHTOperations
+#[async_trait]
+impl DhtStore for DHTOperations {
+    type OwnedRecord = OwnedDHTRecord;
+
+    async fn create_record(&self) -> Result<Self::OwnedRecord> {
+        self.create_dht_record().await
+    }
+
+    fn record_key(record: &Self::OwnedRecord) -> RecordKey {
+        record.key.clone()
+    }
+
+    async fn get_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
+        self.get_dht_value(key).await
+    }
+
+    async fn set_value(&self, record: &Self::OwnedRecord, value: Vec<u8>) -> Result<()> {
+        self.set_dht_value(record, value).await
+    }
+
+    async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> Result<Option<Vec<u8>>> {
+        self.get_value_at_subkey(key, subkey).await
+    }
+
+    async fn set_subkey(
+        &self,
+        record: &Self::OwnedRecord,
+        subkey: u32,
+        value: Vec<u8>,
+    ) -> Result<()> {
+        self.set_value_at_subkey(record, subkey, value).await
+    }
+
+    async fn delete_record(&self, key: &RecordKey) -> Result<()> {
+        self.delete_dht_record(key).await
+    }
+
+    async fn watch_record(&self, key: &RecordKey) -> Result<bool> {
+        self.watch_dht_record(key).await
+    }
+
+    async fn cancel_watch(&self, key: &RecordKey) -> Result<bool> {
+        self.cancel_dht_watch(key).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Note: These tests require a running Veilid node, so they're integration tests
     // They should be run with: cargo test --test integration_tests
 

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use veilid_core::{PublicKey, RecordKey};
 
+use crate::traits::{SystemTimeProvider, TimeProvider};
+
 /// A bid record published to the DHT for auction participation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BidRecord {
@@ -59,14 +61,17 @@ impl BidIndex {
         }
     }
 
+    /// Add a bid using the system clock for timestamp
     pub fn add_bid(&mut self, bid: BidRecord) {
+        self.add_bid_with_time(bid, &SystemTimeProvider::new());
+    }
+
+    /// Add a bid with a custom time provider for testing
+    pub fn add_bid_with_time<T: TimeProvider>(&mut self, bid: BidRecord, time: &T) {
         // Check for duplicates (same bidder)
         if !self.bids.iter().any(|b| b.bidder == bid.bidder) {
             self.bids.push(bid);
-            self.last_updated = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            self.last_updated = time.now_unix();
         }
     }
 
@@ -98,5 +103,222 @@ impl BidIndex {
     pub fn from_cbor(data: &[u8]) -> anyhow::Result<Self> {
         ciborium::de::from_reader(data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize bid index: {}", e))
+    }
+
+    /// Merge another index into this one
+    pub fn merge(&mut self, other: &BidIndex) {
+        self.merge_with_time(other, &SystemTimeProvider::new());
+    }
+
+    /// Merge with custom time provider
+    pub fn merge_with_time<T: TimeProvider>(&mut self, other: &BidIndex, time: &T) {
+        for bid in &other.bids {
+            self.add_bid_with_time(bid.clone(), time);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mocks::{make_test_public_key, make_test_record_key, MockTime};
+
+    fn make_test_key() -> RecordKey {
+        make_test_record_key(1)
+    }
+
+    fn make_bidder(id: u8) -> PublicKey {
+        make_test_public_key(id)
+    }
+
+    fn make_bid_record(listing_key: RecordKey, bidder_id: u8) -> BidRecord {
+        BidRecord {
+            listing_key,
+            bidder: make_bidder(bidder_id),
+            commitment: [bidder_id; 32],
+            timestamp: 1000,
+            bid_key: make_test_record_key(bidder_id as u64),
+        }
+    }
+
+    #[test]
+    fn test_bid_record_serialization() {
+        let original = make_bid_record(make_test_key(), 1);
+
+        let cbor = original.to_cbor().unwrap();
+        let restored = BidRecord::from_cbor(&cbor).unwrap();
+
+        assert_eq!(original.listing_key, restored.listing_key);
+        assert_eq!(original.bidder, restored.bidder);
+        assert_eq!(original.commitment, restored.commitment);
+        assert_eq!(original.timestamp, restored.timestamp);
+        assert_eq!(original.bid_key, restored.bid_key);
+    }
+
+    #[test]
+    fn test_bid_index_new() {
+        let listing_key = make_test_key();
+        let index = BidIndex::new(listing_key.clone());
+
+        assert_eq!(index.listing_key, listing_key);
+        assert!(index.bids.is_empty());
+        assert_eq!(index.last_updated, 0);
+    }
+
+    #[test]
+    fn test_bid_index_add_bid() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+        let mut index = BidIndex::new(listing_key.clone());
+
+        let bid = make_bid_record(listing_key.clone(), 1);
+        index.add_bid_with_time(bid.clone(), &time);
+
+        assert_eq!(index.bids.len(), 1);
+        assert_eq!(index.last_updated, 2000);
+    }
+
+    #[test]
+    fn test_bid_index_no_duplicates() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+        let mut index = BidIndex::new(listing_key.clone());
+
+        let bid = make_bid_record(listing_key.clone(), 1);
+        index.add_bid_with_time(bid.clone(), &time);
+        index.add_bid_with_time(bid.clone(), &time);
+
+        assert_eq!(index.bids.len(), 1);
+    }
+
+    #[test]
+    fn test_bid_index_sorted_bidders() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+        let mut index = BidIndex::new(listing_key.clone());
+
+        // Add bids in non-sorted order
+        index.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
+        index.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
+        index.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+
+        let sorted = index.sorted_bidders();
+        assert_eq!(sorted.len(), 3);
+
+        // Verify sorted order (by string representation)
+        for i in 0..sorted.len() - 1 {
+            assert!(sorted[i].to_string() <= sorted[i + 1].to_string());
+        }
+    }
+
+    #[test]
+    fn test_bid_index_get_party_id() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+        let mut index = BidIndex::new(listing_key.clone());
+
+        index.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
+        index.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+        index.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
+
+        // Each bidder should have a unique party ID
+        let id1 = index.get_party_id(&make_bidder(1));
+        let id2 = index.get_party_id(&make_bidder(2));
+        let id3 = index.get_party_id(&make_bidder(3));
+
+        assert!(id1.is_some());
+        assert!(id2.is_some());
+        assert!(id3.is_some());
+
+        // All IDs should be distinct
+        let ids: std::collections::HashSet<_> = [id1, id2, id3].into_iter().flatten().collect();
+        assert_eq!(ids.len(), 3);
+
+        // All IDs should be in range [0, 3)
+        for id in ids {
+            assert!(id < 3);
+        }
+    }
+
+    #[test]
+    fn test_bid_index_get_party_id_unknown() {
+        let listing_key = make_test_key();
+        let index = BidIndex::new(listing_key);
+
+        let unknown_bidder = make_bidder(99);
+        assert!(index.get_party_id(&unknown_bidder).is_none());
+    }
+
+    #[test]
+    fn test_bid_index_deterministic_party_ids() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+
+        // Create two indices with same bids added in different order
+        let mut index1 = BidIndex::new(listing_key.clone());
+        index1.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
+        index1.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+
+        let mut index2 = BidIndex::new(listing_key.clone());
+        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
+
+        // Party IDs should be the same regardless of insertion order
+        let bidder1 = make_bidder(1);
+        let bidder2 = make_bidder(2);
+
+        assert_eq!(index1.get_party_id(&bidder1), index2.get_party_id(&bidder1));
+        assert_eq!(index1.get_party_id(&bidder2), index2.get_party_id(&bidder2));
+    }
+
+    #[test]
+    fn test_bid_index_merge() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+
+        let mut index1 = BidIndex::new(listing_key.clone());
+        index1.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
+
+        let mut index2 = BidIndex::new(listing_key.clone());
+        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
+
+        index1.merge_with_time(&index2, &time);
+
+        assert_eq!(index1.bids.len(), 3);
+    }
+
+    #[test]
+    fn test_bid_index_merge_no_duplicates() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+
+        let mut index1 = BidIndex::new(listing_key.clone());
+        index1.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
+        index1.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+
+        let mut index2 = BidIndex::new(listing_key.clone());
+        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time); // Duplicate
+        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
+
+        index1.merge_with_time(&index2, &time);
+
+        assert_eq!(index1.bids.len(), 3);
+    }
+
+    #[test]
+    fn test_bid_index_serialization() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+        let mut original = BidIndex::new(listing_key.clone());
+        original.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
+        original.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+
+        let cbor = original.to_cbor().unwrap();
+        let restored = BidIndex::from_cbor(&cbor).unwrap();
+
+        assert_eq!(original.listing_key, restored.listing_key);
+        assert_eq!(original.bids.len(), restored.bids.len());
+        assert_eq!(original.last_updated, restored.last_updated);
     }
 }

@@ -4,6 +4,7 @@ use tracing::{debug, info, warn};
 use veilid_core::{DHTSchema, KeyPair, RecordKey, CRYPTO_KIND_VLD0};
 
 use super::dht::DHTOperations;
+use crate::traits::{SystemTimeProvider, TimeProvider};
 
 /// Hardcoded registry keypair for devnet/demo
 /// In production, this should be loaded from a secure shared location
@@ -65,10 +66,12 @@ impl ListingRegistry {
 
     /// Remove expired listings (auction ended more than 1 hour ago)
     pub fn cleanup_expired(&mut self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.cleanup_expired_with_time(&SystemTimeProvider::new());
+    }
+
+    /// Remove expired listings with a custom time provider
+    pub fn cleanup_expired_with_time<T: TimeProvider>(&mut self, time: &T) {
+        let now = time.now_unix();
         let one_hour_ago = now.saturating_sub(3600);
 
         let before = self.listings.len();

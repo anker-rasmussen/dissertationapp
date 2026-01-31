@@ -3,9 +3,12 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use market::veilid::node::NodeState;
-use market::{DevNetConfig, Listing, ListingOperations, RegistryEntry, RegistryOperations, VeilidNode};
+use market::{
+    DevNetConfig, DhtStore, Listing, ListingOperations, RegistryEntry, RegistryOperations,
+    VeilidNode,
+};
 use parking_lot::RwLock;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use veilid_core::RecordKey;
 
