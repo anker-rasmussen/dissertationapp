@@ -218,10 +218,13 @@ impl MpcSidecar {
                                 let ctx = match sidecar.inner.api.routing_context() {
                                     Ok(c) => c,
                                     Err(_) => return,
-                                }
-                                .with_safety(SafetySelection::Safe(SafetySpec {
+                                };
+                                let ctx = match ctx.with_safety(SafetySelection::Safe(SafetySpec {
                                     preferred_route: None, hop_count: 2, stability: Stability::Reliable, sequencing: Sequencing::PreferOrdered
-                                })).unwrap();
+                                })) {
+                                    Ok(c) => c,
+                                    Err(_) => return,
+                                };
 
                                 let mut buf = vec![0u8; 32000];
                                 loop {

@@ -2,6 +2,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use veilid_core::{PublicKey, RecordKey, RouteBlob};
 
+use crate::traits::{SystemTimeProvider, TimeProvider};
+
 /// Registry of bid announcements stored in DHT (listing subkey 2)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BidAnnouncementRegistry {
@@ -85,69 +87,96 @@ pub enum AuctionMessage {
 }
 
 impl AuctionMessage {
-    /// Create a bid announcement
+    /// Create a bid announcement using system time.
     pub fn bid_announcement(
         listing_key: RecordKey,
         bidder: PublicKey,
         bid_record_key: RecordKey,
     ) -> Self {
+        Self::bid_announcement_with_time(listing_key, bidder, bid_record_key, &SystemTimeProvider::new())
+    }
+
+    /// Create a bid announcement with a custom time provider.
+    pub fn bid_announcement_with_time<T: TimeProvider>(
+        listing_key: RecordKey,
+        bidder: PublicKey,
+        bid_record_key: RecordKey,
+        time: &T,
+    ) -> Self {
         Self::BidAnnouncement {
             listing_key,
             bidder,
             bid_record_key,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: time.now_unix(),
         }
     }
 
-    /// Create a winner decryption request
+    /// Create a winner decryption request using system time.
     pub fn winner_decryption_request(
         listing_key: RecordKey,
         winner: PublicKey,
     ) -> Self {
+        Self::winner_decryption_request_with_time(listing_key, winner, &SystemTimeProvider::new())
+    }
+
+    /// Create a winner decryption request with a custom time provider.
+    pub fn winner_decryption_request_with_time<T: TimeProvider>(
+        listing_key: RecordKey,
+        winner: PublicKey,
+        time: &T,
+    ) -> Self {
         Self::WinnerDecryptionRequest {
             listing_key,
             winner,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: time.now_unix(),
         }
     }
 
-    /// Create a decryption hash transfer
+    /// Create a decryption hash transfer using system time.
     pub fn decryption_hash_transfer(
         listing_key: RecordKey,
         winner: PublicKey,
         decryption_hash: String,
     ) -> Self {
+        Self::decryption_hash_transfer_with_time(listing_key, winner, decryption_hash, &SystemTimeProvider::new())
+    }
+
+    /// Create a decryption hash transfer with a custom time provider.
+    pub fn decryption_hash_transfer_with_time<T: TimeProvider>(
+        listing_key: RecordKey,
+        winner: PublicKey,
+        decryption_hash: String,
+        time: &T,
+    ) -> Self {
         Self::DecryptionHashTransfer {
             listing_key,
             winner,
             decryption_hash,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: time.now_unix(),
         }
     }
 
-    /// Create an MPC route announcement
+    /// Create an MPC route announcement using system time.
     pub fn mpc_route_announcement(
         listing_key: RecordKey,
         party_pubkey: PublicKey,
         route_blob: RouteBlob,
     ) -> Self {
+        Self::mpc_route_announcement_with_time(listing_key, party_pubkey, route_blob, &SystemTimeProvider::new())
+    }
+
+    /// Create an MPC route announcement with a custom time provider.
+    pub fn mpc_route_announcement_with_time<T: TimeProvider>(
+        listing_key: RecordKey,
+        party_pubkey: PublicKey,
+        route_blob: RouteBlob,
+        time: &T,
+    ) -> Self {
         Self::MpcRouteAnnouncement {
             listing_key,
             party_pubkey,
             route_blob,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: time.now_unix(),
         }
     }
 

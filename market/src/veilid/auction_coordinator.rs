@@ -1,12 +1,13 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::process::Command;
+use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn, error, debug};
-use veilid_core::{VeilidAPI, RecordKey, PublicKey, RouteId, Target, SafetySelection, Sequencing};
+use tracing::{debug, error, info, warn};
+use veilid_core::{PublicKey, RecordKey, RouteId, SafetySelection, Sequencing, Target, VeilidAPI};
 
-use crate::marketplace::{Listing, BidIndex};
+use crate::marketplace::{BidIndex, Listing};
+use crate::traits::DhtStore;
 use super::bid_ops::BidOperations;
 use super::bid_storage::BidStorage;
 use super::mpc_routes::MpcRouteManager;

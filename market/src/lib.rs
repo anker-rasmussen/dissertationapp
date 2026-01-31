@@ -1,11 +1,18 @@
 #![recursion_limit = "256"]
 
+pub mod config;
 pub mod crypto;
 pub mod marketplace;
+pub mod traits;
 pub mod veilid;
 
+#[cfg(test)]
+pub mod mocks;
+
+pub use config::*;
 pub use crypto::{decrypt_content, encrypt_content, generate_key, ContentKey, ContentNonce};
-pub use marketplace::{Bid, BidCollection, BidRecord, BidIndex, Listing, ListingStatus, SealedBid};
+pub use marketplace::{Bid, BidCollection, BidIndex, BidRecord, Listing, ListingStatus, SealedBid};
+pub use traits::{DhtStore, MessageTransport, MpcRunner, RandomSource, TimeProvider};
 pub use veilid::auction_coordinator::AuctionCoordinator;
 pub use veilid::bid_ops::BidOperations;
 pub use veilid::bid_storage::BidStorage;
