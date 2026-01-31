@@ -1,4 +1,5 @@
 pub mod auction_coordinator;
+pub mod auction_logic;
 pub mod bid_announcement;
 pub mod bid_ops;
 pub mod bid_storage;
@@ -11,6 +12,7 @@ pub mod node;
 pub mod registry;
 
 pub use auction_coordinator::AuctionCoordinator;
+pub use auction_logic::AuctionLogic;
 pub use bid_ops::BidOperations;
 pub use bid_storage::BidStorage;
 pub use bidder_registry::{BidderRegistry, BidderEntry, BidderRegistryOps};

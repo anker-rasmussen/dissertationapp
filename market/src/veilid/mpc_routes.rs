@@ -65,7 +65,8 @@ impl MpcRouteManager {
         let route_blob = self.my_route_blob.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Route not created yet"))?;
 
-        let route_id = self.my_route_id.as_ref().unwrap();
+        let route_id = self.my_route_id.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Route ID not set (internal error)"))?;
         info!("Broadcasting MPC route {} for party {}", route_id, my_pubkey);
 
         let announcement = AuctionMessage::mpc_route_announcement(

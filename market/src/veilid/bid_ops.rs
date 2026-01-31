@@ -1,22 +1,24 @@
 use anyhow::Result;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 use veilid_core::RecordKey;
 
-use crate::marketplace::{BidRecord, BidIndex};
-use super::dht::{DHTOperations, OwnedDHTRecord};
+use crate::config::{subkeys, BID_REGISTER_INITIAL_DELAY_MS, BID_REGISTER_MAX_RETRIES};
+use crate::marketplace::{BidIndex, BidRecord};
+use crate::traits::DhtStore;
 
-/// Operations for managing bids in the DHT
-pub struct BidOperations {
-    dht: DHTOperations,
+/// Operations for managing bids in the DHT.
+/// Generic over the DHT store implementation for testability.
+pub struct BidOperations<D: DhtStore> {
+    dht: D,
 }
 
-impl BidOperations {
-    pub fn new(dht: DHTOperations) -> Self {
+impl<D: DhtStore> BidOperations<D> {
+    pub fn new(dht: D) -> Self {
         Self { dht }
     }
 
     /// Publish a bid to the DHT
-    pub async fn publish_bid(&self, bid: BidRecord) -> Result<OwnedDHTRecord> {
+    pub async fn publish_bid(&self, bid: BidRecord) -> Result<D::OwnedRecord> {
         // Create a new DHT record for this bid
         let record = self.dht.create_record().await?;
 
@@ -24,7 +26,8 @@ impl BidOperations {
         let data = bid.to_cbor()?;
         self.dht.set_value(&record, data).await?;
 
-        info!("Published bid to DHT at {}", record.key);
+        let key = D::record_key(&record);
+        info!("Published bid to DHT at {}", key);
         Ok(record)
     }
 
@@ -40,35 +43,23 @@ impl BidOperations {
         }
     }
 
-    /// Get the bid index subkey (stored alongside listing in same DHT record)
-    /// Listing is at subkey 0, bid index is at subkey 1
-    const BID_INDEX_SUBKEY: u32 = 1;
-
-    /// Register a bid in the shared bid index for a listing
-    pub async fn register_bid(&mut self, bid: BidRecord) -> Result<()> {
-        let listing_key = bid.listing_key.clone();
-
-        // Use optimistic concurrency control with retry
-        let max_retries = 10;
-        let mut retry_delay = std::time::Duration::from_millis(50);
-
-        let routing_context = self.dht.get_routing_context_pub()?;
-
-        // Open the listing record (read/write)
-        let _ = routing_context.open_dht_record(listing_key.clone(), None).await
-            .map_err(|e| anyhow::anyhow!("Failed to open listing record: {}", e))?;
+    /// Register a bid in the shared bid index for a listing.
+    /// Uses optimistic concurrency control with retry.
+    pub async fn register_bid(&self, listing_record: &D::OwnedRecord, bid: BidRecord) -> Result<()> {
+        let listing_key = D::record_key(listing_record);
+        let max_retries = BID_REGISTER_MAX_RETRIES;
+        let mut retry_delay = std::time::Duration::from_millis(BID_REGISTER_INITIAL_DELAY_MS);
 
         for attempt in 0..max_retries {
-            // Fetch current bid index from subkey 1 (read directly, don't use fetch_bid_index to avoid double-open)
-            let old_value = routing_context.get_dht_value(listing_key.clone(), Self::BID_INDEX_SUBKEY, true).await?;
-            let old_seq = old_value.as_ref().map(|v| v.seq());
+            // Fetch current bid index from subkey
+            let old_value = self
+                .dht
+                .get_subkey(&listing_key, subkeys::BID_INDEX)
+                .await?;
 
-            let mut index = match &old_value {
-                Some(value) => {
-                    BidIndex::from_cbor(value.data())?
-                }
+            let mut index = match old_value {
+                Some(data) => BidIndex::from_cbor(&data)?,
                 None => {
-                    // No bid index yet, create empty one
                     debug!("No bid index found, creating new one");
                     BidIndex::new(listing_key.clone())
                 }
@@ -77,75 +68,178 @@ impl BidOperations {
             // Add our bid
             index.add_bid(bid.clone());
 
-            // Try to write back to subkey 1
+            // Try to write back
             let data = index.to_cbor()?;
 
-            // Write new value
-            match routing_context.set_dht_value(listing_key.clone(), Self::BID_INDEX_SUBKEY, data.clone(), None).await {
-                Ok(returned_value) => {
-                    // Check for concurrent modifications
-                    if let Some(rv) = returned_value {
-                        if Some(rv.seq()) != old_seq {
-                            // Concurrent write detected, retry
-                            warn!("Bid index conflict detected (attempt {}/{}), retrying...", attempt + 1, max_retries);
-                            tokio::time::sleep(retry_delay).await;
-                            retry_delay *= 2;
-                            continue;
-                        }
-                    }
-                    info!("Successfully registered bid in index (attempt {}/{})", attempt + 1, max_retries);
-                    let _ = routing_context.close_dht_record(listing_key).await;
+            match self
+                .dht
+                .set_subkey(listing_record, subkeys::BID_INDEX, data)
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        "Successfully registered bid in index (attempt {}/{})",
+                        attempt + 1,
+                        max_retries
+                    );
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("Failed to write bid index (attempt {}/{}): {}", attempt + 1, max_retries, e);
+                    warn!(
+                        "Failed to write bid index (attempt {}/{}): {}",
+                        attempt + 1,
+                        max_retries,
+                        e
+                    );
                     if attempt < max_retries - 1 {
                         tokio::time::sleep(retry_delay).await;
                         retry_delay *= 2;
                         continue;
                     }
-                    let _ = routing_context.close_dht_record(listing_key).await;
-                    return Err(anyhow::anyhow!("Failed to register bid after {} attempts: {}", max_retries, e));
+                    return Err(anyhow::anyhow!(
+                        "Failed to register bid after {} attempts: {}",
+                        max_retries,
+                        e
+                    ));
                 }
             }
         }
 
-        let _ = routing_context.close_dht_record(listing_key).await;
-        Err(anyhow::anyhow!("Failed to register bid after {} retries", max_retries))
+        Err(anyhow::anyhow!(
+            "Failed to register bid after {} retries",
+            max_retries
+        ))
     }
 
-    /// Discover bids for a listing in devnet mode
-    /// Uses a simple approach: write bid announcements to listing's subkey 1
-    /// Each bidder's BidStorage maintains their bid_key, which we'll aggregate
-    pub async fn discover_bids_devnet(
-        &self,
-        listing_key: &RecordKey,
-        _my_node_id: &veilid_core::PublicKey,
-        my_bid_key: &RecordKey,
-    ) -> Result<BidIndex> {
+    /// Fetch the bid index for a listing
+    pub async fn fetch_bid_index(&self, listing_key: &RecordKey) -> Result<BidIndex> {
+        match self.dht.get_subkey(listing_key, subkeys::BID_INDEX).await? {
+            Some(data) => {
+                let index = BidIndex::from_cbor(&data)?;
+                debug!("Fetched bid index with {} bids", index.bids.len());
+                Ok(index)
+            }
+            None => {
+                debug!("No bid index found, returning empty");
+                Ok(BidIndex::new(listing_key.clone()))
+            }
+        }
+    }
+}
 
-        let mut bid_index = BidIndex::new(listing_key.clone());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mocks::{make_test_public_key, make_test_record_key, MockDht};
 
-        // Add our own bid first
-        if let Some(our_bid) = self.fetch_bid(my_bid_key).await? {
-            info!("Added our own bid to index");
-            bid_index.add_bid(our_bid);
+    fn make_test_bid(listing_key: RecordKey, bidder_id: u8) -> BidRecord {
+        BidRecord {
+            listing_key,
+            bidder: make_test_public_key(bidder_id),
+            commitment: [bidder_id; 32],
+            timestamp: 1000,
+            bid_key: make_test_record_key(bidder_id as u64),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_bid() {
+        let dht = MockDht::new();
+        let ops = BidOperations::new(dht.clone());
+        let listing_key = make_test_record_key(1);
+
+        let bid = make_test_bid(listing_key, 1);
+        let record = ops.publish_bid(bid).await.unwrap();
+        let key = MockDht::record_key(&record);
+
+        assert!(dht.has_record(&key).await);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_bid() {
+        let dht = MockDht::new();
+        let ops = BidOperations::new(dht.clone());
+        let listing_key = make_test_record_key(1);
+
+        let bid = make_test_bid(listing_key, 1);
+        let record = ops.publish_bid(bid.clone()).await.unwrap();
+        let key = MockDht::record_key(&record);
+
+        let fetched = ops.fetch_bid(&key).await.unwrap().unwrap();
+        assert_eq!(fetched.bidder, bid.bidder);
+        assert_eq!(fetched.commitment, bid.commitment);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_nonexistent_bid() {
+        let dht = MockDht::new();
+        let ops = BidOperations::new(dht);
+
+        let key = make_test_record_key(99);
+        let result = ops.fetch_bid(&key).await.unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_bid() {
+        let dht = MockDht::new();
+        let ops = BidOperations::new(dht.clone());
+
+        // Create a listing record first
+        let listing_record = dht.create_record().await.unwrap();
+        let listing_key = MockDht::record_key(&listing_record);
+
+        let bid = make_test_bid(listing_key.clone(), 1);
+        ops.register_bid(&listing_record, bid).await.unwrap();
+
+        // Fetch the index and verify
+        let index = ops.fetch_bid_index(&listing_key).await.unwrap();
+        assert_eq!(index.bids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_register_multiple_bids() {
+        let dht = MockDht::new();
+        let ops = BidOperations::new(dht.clone());
+
+        let listing_record = dht.create_record().await.unwrap();
+        let listing_key = MockDht::record_key(&listing_record);
+
+        // Register multiple bids
+        for i in 1..=3 {
+            let bid = make_test_bid(listing_key.clone(), i);
+            ops.register_bid(&listing_record, bid).await.unwrap();
         }
 
-        // For devnet MVP: Just return our own bid for now
-        // In a real system, we'd use AppMessages to announce bids to each other
-        // or maintain a shared coordination record
-
-        info!("Devnet bid discovery: found {} bids (currently only our own)", bid_index.bids.len());
-        Ok(bid_index)
+        let index = ops.fetch_bid_index(&listing_key).await.unwrap();
+        assert_eq!(index.bids.len(), 3);
     }
 
-    /// Fetch all bids for a listing by discovering bidders' individual BidRecords
-    /// This is the production version that would use proper P2P discovery
-    pub async fn fetch_bid_index(&self, listing_key: &RecordKey) -> Result<BidIndex> {
-        // For now, just return empty - this would be implemented with AppMessage-based discovery
-        let bid_index = BidIndex::new(listing_key.clone());
-        debug!("P2P bid discovery not yet implemented, returning empty index");
-        Ok(bid_index)
+    #[tokio::test]
+    async fn test_register_duplicate_bid() {
+        let dht = MockDht::new();
+        let ops = BidOperations::new(dht.clone());
+
+        let listing_record = dht.create_record().await.unwrap();
+        let listing_key = MockDht::record_key(&listing_record);
+
+        let bid = make_test_bid(listing_key.clone(), 1);
+        ops.register_bid(&listing_record, bid.clone()).await.unwrap();
+        ops.register_bid(&listing_record, bid).await.unwrap(); // Duplicate
+
+        let index = ops.fetch_bid_index(&listing_key).await.unwrap();
+        assert_eq!(index.bids.len(), 1); // Should not have duplicate
+    }
+
+    #[tokio::test]
+    async fn test_fetch_empty_bid_index() {
+        let dht = MockDht::new();
+        let ops = BidOperations::new(dht);
+
+        let listing_key = make_test_record_key(1);
+        let index = ops.fetch_bid_index(&listing_key).await.unwrap();
+
+        assert!(index.bids.is_empty());
     }
 }
