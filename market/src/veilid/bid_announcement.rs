@@ -84,6 +84,19 @@ pub enum AuctionMessage {
         /// Timestamp of announcement
         timestamp: u64,
     },
+    /// Winner reveals bid value and nonce for verification (Danish Sugar Beet style)
+    WinnerBidReveal {
+        /// Listing this reveal is for
+        listing_key: RecordKey,
+        /// Winner's public key
+        winner: PublicKey,
+        /// The bid value being revealed
+        bid_value: u64,
+        /// The nonce used in the commitment
+        nonce: [u8; 32],
+        /// Timestamp of reveal
+        timestamp: u64,
+    },
 }
 
 impl AuctionMessage {
@@ -176,6 +189,33 @@ impl AuctionMessage {
             listing_key,
             party_pubkey,
             route_blob,
+            timestamp: time.now_unix(),
+        }
+    }
+
+    /// Create a winner bid reveal using system time.
+    pub fn winner_bid_reveal(
+        listing_key: RecordKey,
+        winner: PublicKey,
+        bid_value: u64,
+        nonce: [u8; 32],
+    ) -> Self {
+        Self::winner_bid_reveal_with_time(listing_key, winner, bid_value, nonce, &SystemTimeProvider::new())
+    }
+
+    /// Create a winner bid reveal with a custom time provider.
+    pub fn winner_bid_reveal_with_time<T: TimeProvider>(
+        listing_key: RecordKey,
+        winner: PublicKey,
+        bid_value: u64,
+        nonce: [u8; 32],
+        time: &T,
+    ) -> Self {
+        Self::WinnerBidReveal {
+            listing_key,
+            winner,
+            bid_value,
+            nonce,
             timestamp: time.now_unix(),
         }
     }
