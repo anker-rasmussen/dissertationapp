@@ -15,6 +15,92 @@ pub struct RecordedExecution {
     pub input_value: u64,
 }
 
+/// Strategy for determining the auction winner.
+#[derive(Debug, Clone)]
+pub enum WinnerStrategy {
+    /// Always return the specified party as winner.
+    Fixed(usize),
+    /// Calculate winner based on registered bids (highest bid wins).
+    /// Ties are broken by party_id (lowest wins, simulating earliest timestamp).
+    CalculateFromBids,
+}
+
+/// Shared bid registry for multi-party MPC simulation.
+///
+/// This allows multiple MockMpcRunner instances to share bid information
+/// so winner determination works correctly across all parties.
+#[derive(Debug)]
+pub struct SharedBidRegistry {
+    /// Map<party_id, (bid_value, timestamp)>
+    bids: RwLock<HashMap<usize, (u64, u64)>>,
+    /// Counter for timestamps (used for tie-breaking)
+    timestamp_counter: std::sync::atomic::AtomicU64,
+}
+
+impl SharedBidRegistry {
+    /// Create a new shared bid registry.
+    pub fn new() -> Self {
+        Self {
+            bids: RwLock::new(HashMap::new()),
+            timestamp_counter: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Register a bid from a party.
+    pub async fn register_bid(&self, party_id: usize, bid_value: u64) {
+        let timestamp = self
+            .timestamp_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.bids.write().await.insert(party_id, (bid_value, timestamp));
+    }
+
+    /// Register a bid with an explicit timestamp (for tie-break testing).
+    pub async fn register_bid_with_timestamp(&self, party_id: usize, bid_value: u64, timestamp: u64) {
+        self.bids.write().await.insert(party_id, (bid_value, timestamp));
+    }
+
+    /// Calculate the winner based on highest bid.
+    /// Ties are broken by timestamp (earliest wins).
+    pub async fn calculate_winner(&self) -> Option<usize> {
+        let bids = self.bids.read().await;
+        if bids.is_empty() {
+            return None;
+        }
+
+        let mut winner: Option<(usize, u64, u64)> = None; // (party_id, bid, timestamp)
+
+        for (&party_id, &(bid, timestamp)) in bids.iter() {
+            match winner {
+                None => winner = Some((party_id, bid, timestamp)),
+                Some((_, best_bid, best_ts)) => {
+                    // Higher bid wins, or earlier timestamp if tied
+                    if bid > best_bid || (bid == best_bid && timestamp < best_ts) {
+                        winner = Some((party_id, bid, timestamp));
+                    }
+                }
+            }
+        }
+
+        winner.map(|(party_id, _, _)| party_id)
+    }
+
+    /// Get all registered bids.
+    pub async fn get_bids(&self) -> HashMap<usize, (u64, u64)> {
+        self.bids.read().await.clone()
+    }
+
+    /// Clear all bids.
+    pub async fn clear(&self) {
+        self.bids.write().await.clear();
+    }
+}
+
+impl Default for SharedBidRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Mock MPC runner for testing.
 #[derive(Debug, Clone)]
 pub struct MockMpcRunner {
@@ -26,8 +112,10 @@ pub struct MockMpcRunner {
     inputs: Arc<RwLock<HashMap<usize, u64>>>,
     /// Recorded hosts files: Map<hosts_name, num_parties>
     hosts_files: Arc<RwLock<HashMap<String, usize>>>,
-    /// Predetermined winner (party_id that should win).
-    winner: Arc<RwLock<Option<usize>>>,
+    /// Strategy for determining winner.
+    winner_strategy: Arc<RwLock<WinnerStrategy>>,
+    /// Shared bid registry for multi-party winner calculation.
+    bid_registry: Arc<SharedBidRegistry>,
     /// Whether to fail operations.
     fail_mode: Arc<RwLock<bool>>,
 }
@@ -40,14 +128,41 @@ impl MockMpcRunner {
             executions: Arc::new(RwLock::new(Vec::new())),
             inputs: Arc::new(RwLock::new(HashMap::new())),
             hosts_files: Arc::new(RwLock::new(HashMap::new())),
-            winner: Arc::new(RwLock::new(None)),
+            winner_strategy: Arc::new(RwLock::new(WinnerStrategy::Fixed(0))),
+            bid_registry: Arc::new(SharedBidRegistry::new()),
             fail_mode: Arc::new(RwLock::new(false)),
         }
     }
 
-    /// Set the predetermined winner.
+    /// Create a new mock MPC runner with a shared bid registry.
+    ///
+    /// Use this when simulating multi-party auctions where all parties
+    /// need to see the same winner result.
+    pub fn with_shared_registry(registry: Arc<SharedBidRegistry>) -> Self {
+        Self {
+            compilations: Arc::new(RwLock::new(HashMap::new())),
+            executions: Arc::new(RwLock::new(Vec::new())),
+            inputs: Arc::new(RwLock::new(HashMap::new())),
+            hosts_files: Arc::new(RwLock::new(HashMap::new())),
+            winner_strategy: Arc::new(RwLock::new(WinnerStrategy::CalculateFromBids)),
+            bid_registry: registry,
+            fail_mode: Arc::new(RwLock::new(false)),
+        }
+    }
+
+    /// Set the predetermined winner (legacy API).
     pub async fn set_winner(&self, party_id: usize) {
-        *self.winner.write().await = Some(party_id);
+        *self.winner_strategy.write().await = WinnerStrategy::Fixed(party_id);
+    }
+
+    /// Set the winner strategy.
+    pub async fn set_winner_strategy(&self, strategy: WinnerStrategy) {
+        *self.winner_strategy.write().await = strategy;
+    }
+
+    /// Get the bid registry for registering bids.
+    pub fn bid_registry(&self) -> &SharedBidRegistry {
+        &self.bid_registry
     }
 
     /// Set failure mode.
@@ -125,9 +240,17 @@ impl MpcRunner for MockMpcRunner {
             input_value,
         });
 
-        // Determine winner
-        let winner = self.winner.read().await;
-        let is_winner = winner.map(|w| w == party_id).unwrap_or(false);
+        // Determine winner based on strategy
+        let strategy = self.winner_strategy.read().await.clone();
+        let is_winner = match strategy {
+            WinnerStrategy::Fixed(winner_id) => party_id == winner_id,
+            WinnerStrategy::CalculateFromBids => {
+                match self.bid_registry.calculate_winner().await {
+                    Some(winner_id) => party_id == winner_id,
+                    None => false,
+                }
+            }
+        };
 
         Ok(MpcResult {
             is_winner,
@@ -207,5 +330,76 @@ mod tests {
         assert!(runner.compile("test", 2).await.is_err());
         assert!(runner.execute(0, 2, 100).await.is_err());
         assert!(runner.write_input(0, 100).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_shared_bid_registry_highest_wins() {
+        let registry = SharedBidRegistry::new();
+
+        // Register bids
+        registry.register_bid(0, 100).await;
+        registry.register_bid(1, 200).await; // Highest
+        registry.register_bid(2, 150).await;
+
+        // Party 1 should win (highest bid)
+        assert_eq!(registry.calculate_winner().await, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_shared_bid_registry_tie_breaks_by_timestamp() {
+        let registry = SharedBidRegistry::new();
+
+        // Same bids, but party 0 registers first
+        registry.register_bid_with_timestamp(0, 200, 100).await;
+        registry.register_bid_with_timestamp(1, 200, 200).await;
+        registry.register_bid_with_timestamp(2, 200, 300).await;
+
+        // Party 0 should win (earliest timestamp)
+        assert_eq!(registry.calculate_winner().await, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_calculate_from_bids() {
+        let registry = Arc::new(SharedBidRegistry::new());
+        let runner = MockMpcRunner::with_shared_registry(registry.clone());
+
+        // Register bids
+        registry.register_bid(0, 100).await;
+        registry.register_bid(1, 300).await; // Highest
+        registry.register_bid(2, 200).await;
+
+        // Execute for each party
+        let result0 = runner.execute(0, 3, 100).await.unwrap();
+        let result1 = runner.execute(1, 3, 300).await.unwrap();
+        let result2 = runner.execute(2, 3, 200).await.unwrap();
+
+        // Only party 1 should be winner
+        assert!(!result0.is_winner);
+        assert!(result1.is_winner);
+        assert!(!result2.is_winner);
+    }
+
+    #[tokio::test]
+    async fn test_shared_registry_multiple_runners() {
+        let registry = Arc::new(SharedBidRegistry::new());
+
+        // Create separate runners sharing the same registry
+        let runner0 = MockMpcRunner::with_shared_registry(registry.clone());
+        let runner1 = MockMpcRunner::with_shared_registry(registry.clone());
+        let runner2 = MockMpcRunner::with_shared_registry(registry.clone());
+
+        // Register bids through the shared registry
+        registry.register_bid(0, 150).await;
+        registry.register_bid(1, 250).await; // Winner
+        registry.register_bid(2, 200).await;
+
+        // Each runner should agree on the winner
+        let result0 = runner0.execute(0, 3, 150).await.unwrap();
+        let result1 = runner1.execute(1, 3, 250).await.unwrap();
+        let result2 = runner2.execute(2, 3, 200).await.unwrap();
+
+        assert!(!result0.is_winner);
+        assert!(result1.is_winner);
+        assert!(!result2.is_winner);
     }
 }

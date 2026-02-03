@@ -6,7 +6,7 @@ pub mod marketplace;
 pub mod traits;
 pub mod veilid;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod mocks;
 
 pub use config::*;

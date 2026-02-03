@@ -581,12 +581,9 @@ fn app() -> Element {
                                 let status = format!("{:?}", listing.status);
                                 let listing_key = listing.key.clone();
 
-                                // Get real bid count from auction coordinator
-                                let bid_count = if let Some(coordinator) = AUCTION_COORDINATOR.get() {
-                                    coordinator.get_bid_count(&listing_key).await
-                                } else {
-                                    0
-                                };
+                                // Get bid count from the listing's DHT record (authoritative)
+                                // The seller updates this when they register bids
+                                let bid_count = listing.bid_count as usize;
 
                                 // Check if we have a decryption key
                                 let has_decryption_key = if let Some(coordinator) = AUCTION_COORDINATOR.get() {

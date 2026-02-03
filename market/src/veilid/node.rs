@@ -109,15 +109,14 @@ impl VeilidNode {
 
         // Build network config based on whether we're connecting to devnet
         let network_config = if let Some(devnet) = &self.devnet_config {
-            // Calculate our port based on offset
+            // Calculate our port - bind to 127.0.0.1 directly for LocalNetwork routing domain
+            // No public_address means we use LocalNetwork for peer discovery
             let port = 5160 + devnet.port_offset;
-            // Use LocalNetwork routing domain instead of PublicInternet
-            // This avoids the fake IP translation issues with LD_PRELOAD
             let listen_addr = format!("127.0.0.1:{}", port);
 
             info!(
-                "Configuring for devnet: key={}, bootstrap={:?}, port={}, listen={}",
-                devnet.network_key, devnet.bootstrap_nodes, port, listen_addr
+                "Configuring for devnet: key={}, bootstrap={:?}, listen_addr={}",
+                devnet.network_key, devnet.bootstrap_nodes, listen_addr
             );
 
             VeilidConfigNetwork {
@@ -139,14 +138,14 @@ impl VeilidNode {
                         enabled: true,
                         socket_pool_size: 0,
                         listen_address: listen_addr.clone(),
-                        public_address: None,  // Use LocalNetwork routing domain
+                        public_address: None,
                     },
                     tcp: VeilidConfigTCP {
                         connect: true,
                         listen: true,
                         max_connections: 32,
                         listen_address: listen_addr.clone(),
-                        public_address: None,  // Use LocalNetwork routing domain
+                        public_address: None,
                     },
                     ws: VeilidConfigWS {
                         connect: true,
@@ -154,7 +153,7 @@ impl VeilidNode {
                         max_connections: 16,
                         listen_address: listen_addr.clone(),
                         path: "ws".to_string(),
-                        url: None,  // Use LocalNetwork routing domain
+                        url: None,
                     },
                     ..Default::default()
                 },
@@ -181,9 +180,15 @@ impl VeilidNode {
             VeilidConfigCapabilities::default()
         };
 
+        let namespace = self.data_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("smpc-auction-{}", s))
+            .unwrap_or_else(|| "smpc-auction".to_string());
+
         let config = VeilidConfig {
             program_name: "market".into(),
-            namespace: "smpc-auction".into(),
+            namespace: namespace.into(),
             capabilities,
             protected_store: VeilidConfigProtectedStore {
                 always_use_insecure_storage: true, // TODO: Disable in production
@@ -245,6 +250,10 @@ impl VeilidNode {
 
         let api = api_startup(update_callback, config)
             .await
+            .map_err(|e| {
+                error!("Veilid API startup failed: {:?}", e);
+                e
+            })
             .context("Failed to start Veilid API")?;
 
         self.api = Some(api);

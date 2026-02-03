@@ -1,0 +1,35 @@
+# Enable experimental setup scripts feature
+experimental = ["setup-scripts"]
+
+[store]
+dir = "target/nextest"
+
+[profile.default]
+retries = 0
+
+[profile.e2e]
+# E2E tests run serially and need longer timeouts
+test-threads = 1
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+# Setup script for E2E tests - sets LD_PRELOAD for IP spoofing
+[[profile.e2e.scripts]]
+filter = 'all()'
+setup = 'setup-e2e'
+
+[profile.e2e-fast]
+# Fast E2E tests - reuses persistent devnet, no start/stop overhead
+# Start devnet first with: cargo devnet-start
+test-threads = 1
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+# Setup script sets LD_PRELOAD and E2E_FAST_MODE=1
+[[profile.e2e-fast.scripts]]
+filter = 'all()'
+setup = 'setup-e2e-fast'
+
+[scripts.setup.setup-e2e]
+command = 'scripts/setup-e2e.sh'
+
+[scripts.setup.setup-e2e-fast]
+command = 'scripts/setup-e2e-fast.sh'
