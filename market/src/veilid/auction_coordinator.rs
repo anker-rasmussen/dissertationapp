@@ -36,6 +36,9 @@ pub struct AuctionCoordinator {
     decryption_keys: Arc<Mutex<HashMap<String, String>>>,
     /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
     route_managers: Arc<Mutex<HashMap<String, Arc<Mutex<MpcRouteManager>>>>>,
+    /// Pending verifications: listing_key -> (winner_pubkey, mpc_winning_bid, verified?)
+    /// Used for Danish Sugar Beet style bid verification before releasing decryption key
+    pending_verifications: Arc<Mutex<HashMap<String, (PublicKey, u64, Option<bool>)>>>,
 }
 
 impl AuctionCoordinator {
@@ -52,6 +55,7 @@ impl AuctionCoordinator {
             bid_announcements: Arc::new(Mutex::new(HashMap::new())),
             decryption_keys: Arc::new(Mutex::new(HashMap::new())),
             route_managers: Arc::new(Mutex::new(HashMap::new())),
+            pending_verifications: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -122,13 +126,31 @@ impl AuctionCoordinator {
                 if let Some(_record) = owned.get(&listing_key) {
                     drop(owned); // Release lock before async call
 
-                    info!("I am the seller, fetching listing to send decryption key");
+                    // Check verification status (Danish Sugar Beet style)
+                    let key = listing_key.to_string();
+                    let verified = {
+                        let verifications = self.pending_verifications.lock().await;
+                        verifications.get(&key)
+                            .map(|(expected_winner, _, v)| {
+                                // Verify both winner identity and verification status
+                                expected_winner == &winner && v.unwrap_or(false)
+                            })
+                            .unwrap_or(false)
+                    };
+
+                    if !verified {
+                        warn!("Winner bid verification not passed for listing {} - withholding decryption key", listing_key);
+                        warn!("Winner {} must first broadcast WinnerBidReveal with valid nonce", winner);
+                        return Ok(());
+                    }
+
+                    info!("I am the seller, verification passed - sending decryption key");
 
                     // Get the listing to retrieve decryption key
                     let listing_ops = ListingOperations::new(self.dht.clone());
                     match listing_ops.get_listing(&listing_key).await {
                         Ok(Some(listing)) => {
-                            info!("Sending decryption key to winner {}", winner);
+                            info!("Sending decryption key to verified winner {}", winner);
                             if let Err(e) = self.send_decryption_hash(&listing_key, &winner, &listing.decryption_key).await {
                                 error!("Failed to send decryption key to winner: {}", e);
                             }
@@ -156,6 +178,10 @@ impl AuctionCoordinator {
                     let mut keys = self.decryption_keys.lock().await;
                     keys.insert(key, decryption_hash);
                     info!("Stored decryption key for listing {}", listing_key);
+
+                    // Cleanup route manager now that we have the decryption key
+                    drop(keys);
+                    self.cleanup_route_manager(&listing_key).await;
                 } else {
                     debug!("Decryption hash transfer not for me, ignoring");
                 }
@@ -171,6 +197,24 @@ impl AuctionCoordinator {
                     mgr.register_route_announcement(party_pubkey, route_blob).await?;
                 } else {
                     debug!("Received route for unwatched auction {}", listing_key);
+                }
+            }
+            AuctionMessage::WinnerBidReveal { listing_key, winner, bid_value, nonce, timestamp: _ } => {
+                info!("Received WinnerBidReveal for listing {} from winner {}", listing_key, winner);
+
+                // Verify the commitment
+                let verified = self.verify_winner_reveal(&listing_key, &winner, bid_value, &nonce).await;
+
+                // Store verification result
+                let key = listing_key.to_string();
+                let mut verifications = self.pending_verifications.lock().await;
+                verifications.entry(key.clone())
+                    .and_modify(|(_, _, v)| *v = Some(verified));
+
+                if verified {
+                    info!("Winner bid VERIFIED for listing {}", listing_key);
+                } else {
+                    warn!("Winner bid verification FAILED for listing {}", listing_key);
                 }
             }
         }
@@ -527,6 +571,8 @@ impl AuctionCoordinator {
                 match routing_context.app_message(Target::RouteId(winner_route), data).await {
                     Ok(_) => {
                         info!("Successfully sent decryption hash to winner via MPC route {}", route_display);
+                        // Cleanup route manager after successfully sending decryption key
+                        self.cleanup_route_manager(listing_key).await;
                         return Ok(());
                     }
                     Err(e) => {
@@ -561,7 +607,149 @@ impl AuctionCoordinator {
             }
         }
 
+        // Cleanup route manager after broadcast fallback
+        self.cleanup_route_manager(listing_key).await;
+
         Ok(())
+    }
+
+    /// Cleanup route manager for a listing (called after decryption key transfer completes)
+    async fn cleanup_route_manager(&self, listing_key: &RecordKey) {
+        let key = listing_key.to_string();
+        let mut managers = self.route_managers.lock().await;
+        if managers.remove(&key).is_some() {
+            info!("Cleaned up route manager for listing {}", listing_key);
+        }
+    }
+
+    /// Broadcast winner's bid reveal to all parties for verification (Danish Sugar Beet style)
+    async fn broadcast_winner_reveal(&self, listing_key: &RecordKey, bid_value: u64, nonce: &[u8; 32]) -> Result<()> {
+        info!("Broadcasting winner bid reveal for listing {} (bid value: {})", listing_key, bid_value);
+
+        let message = AuctionMessage::winner_bid_reveal(
+            listing_key.clone(),
+            self.my_node_id.clone(),
+            bid_value,
+            *nonce,
+        );
+
+        let data = message.to_bytes()?;
+
+        // Broadcast to all peers
+        let routing_context = self.api.routing_context()
+            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
+            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
+            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
+
+        let state = self.api.get_state().await
+            .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
+
+        let mut sent_count = 0;
+        for peer in &state.network.peers {
+            for node_id in &peer.node_ids {
+                match routing_context.app_message(Target::NodeId(node_id.clone()), data.clone()).await {
+                    Ok(_) => {
+                        sent_count += 1;
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        info!("Broadcast winner bid reveal to {} peers", sent_count);
+        Ok(())
+    }
+
+    /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style)
+    async fn verify_winner_reveal(&self, listing_key: &RecordKey, winner: &PublicKey, bid_value: u64, nonce: &[u8; 32]) -> bool {
+        use sha2::{Sha256, Digest};
+
+        // 1. Get pending verification to check expected winning bid
+        let key = listing_key.to_string();
+        let verifications = self.pending_verifications.lock().await;
+        let expected_bid = match verifications.get(&key) {
+            Some((expected_winner, expected_bid, _)) => {
+                // Check winner matches
+                if expected_winner != winner {
+                    warn!("Winner mismatch: expected {}, got {}", expected_winner, winner);
+                    return false;
+                }
+                *expected_bid
+            }
+            None => {
+                warn!("No pending verification found for listing {}", listing_key);
+                return false;
+            }
+        };
+        drop(verifications);
+
+        // 2. Check bid value matches MPC output
+        if bid_value != expected_bid {
+            warn!("Bid value mismatch: revealed {} but MPC output was {}", bid_value, expected_bid);
+            return false;
+        }
+
+        // 3. Fetch winner's BidRecord from DHT to get stored commitment
+        let bid_ops = BidOperations::new(self.dht.clone());
+
+        // Get bid registry to find winner's bid record key
+        let registry_data = match self.dht.get_value_at_subkey(listing_key, 2).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                warn!("No bid registry found for listing {}", listing_key);
+                return false;
+            }
+            Err(e) => {
+                warn!("Failed to fetch bid registry: {}", e);
+                return false;
+            }
+        };
+
+        let registry = match BidAnnouncementRegistry::from_bytes(&registry_data) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Failed to parse bid registry: {}", e);
+                return false;
+            }
+        };
+
+        // Find winner's bid record key
+        let winner_bid_record_key = match registry.announcements.iter().find(|(b, _, _)| b == winner) {
+            Some((_, key, _)) => key.clone(),
+            None => {
+                warn!("Winner {} not found in bid registry", winner);
+                return false;
+            }
+        };
+
+        // Fetch the bid record
+        let bid_record = match bid_ops.fetch_bid(&winner_bid_record_key).await {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                warn!("Winner's bid record not found at {}", winner_bid_record_key);
+                return false;
+            }
+            Err(e) => {
+                warn!("Failed to fetch winner's bid record: {}", e);
+                return false;
+            }
+        };
+
+        // 4. Compute commitment: SHA256(bid_value || nonce)
+        let mut hasher = Sha256::new();
+        hasher.update(bid_value.to_le_bytes());
+        hasher.update(nonce);
+        let computed_commitment: [u8; 32] = hasher.finalize().into();
+
+        // 5. Compare with stored commitment
+        if computed_commitment != bid_record.commitment {
+            warn!("Commitment mismatch for winner {}", winner);
+            return false;
+        }
+
+        info!("Commitment verified for winner {} with bid value {}", winner, bid_value);
+        true
     }
 
     /// Discover bids from DHT bid registry (n-party approach)
@@ -819,9 +1007,10 @@ impl AuctionCoordinator {
                 }
 
                 // Parse result from output
-                // Each party privately learns: "You won: 0" or "You won: 1"
-                // Winner will contact seller to request decryption key
+                // Each party learns: winner ID, winning bid, and privately whether they won
                 let mut i_won = false;
+                let mut winning_bid: Option<u64> = None;
+                let mut winner_party_id: Option<usize> = None;
 
                 for line in stdout.lines() {
                     if line.contains("You won:") {
@@ -833,11 +1022,55 @@ impl AuctionCoordinator {
                             info!("Result: I did not win");
                         }
                     }
+                    if line.contains("Winning bid:") {
+                        if let Some(bid_str) = line.split(':').last() {
+                            winning_bid = bid_str.trim().parse().ok();
+                            if let Some(bid) = winning_bid {
+                                info!("Parsed winning bid from MPC output: {}", bid);
+                            }
+                        }
+                    }
+                    if line.contains("Winner: Party") {
+                        if let Some(party_str) = line.split("Party").last() {
+                            winner_party_id = party_str.trim().parse().ok();
+                            if let Some(pid) = winner_party_id {
+                                info!("Parsed winner party ID from MPC output: {}", pid);
+                            }
+                        }
+                    }
                 }
 
-                // If I won, request decryption key from seller
+                // Store winning bid and winner for verification (Danish Sugar Beet style)
+                if let (Some(bid), Some(winner_pid)) = (winning_bid, winner_party_id) {
+                    let sorted_bidders = bid_index.sorted_bidders();
+                    if winner_pid < sorted_bidders.len() {
+                        let winner_pubkey = sorted_bidders[winner_pid].clone();
+                        let key = bid_index.listing_key.to_string();
+                        self.pending_verifications.lock().await
+                            .insert(key, (winner_pubkey.clone(), bid, None));
+                        info!("Stored pending verification: winner={}, bid={}", winner_pubkey, bid);
+                    }
+                }
+
+                // If I won, broadcast my bid reveal for verification, then request decryption key
                 if i_won {
-                    info!("I won - requesting decryption key from seller");
+                    info!("I won - broadcasting bid reveal for verification (Danish Sugar Beet style)");
+
+                    // Get my bid value and nonce
+                    let (my_bid_value, my_nonce) = self.bid_storage.get_bid(&bid_index.listing_key).await
+                        .ok_or_else(|| anyhow::anyhow!("Bid not found in storage"))?;
+
+                    // Broadcast reveal to all parties
+                    if let Err(e) = self.broadcast_winner_reveal(&bid_index.listing_key, my_bid_value, &my_nonce).await {
+                        error!("Failed to broadcast winner reveal: {}", e);
+                    }
+
+                    // Wait for verification to propagate
+                    info!("Waiting for verification to propagate...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+                    // Now request decryption key from seller
+                    info!("Requesting decryption key from seller");
 
                     // Get listing to find seller
                     let listing_ops = ListingOperations::new(self.dht.clone());
@@ -867,12 +1100,11 @@ impl AuctionCoordinator {
                 sidecar.cleanup().await;
                 *self.active_sidecar.lock().await = None;
 
-                // Cleanup route manager
-                {
-                    let key = bid_index.listing_key.to_string();
-                    let mut managers = self.route_managers.lock().await;
-                    managers.remove(&key);
-                }
+                // NOTE: Route manager is NOT cleaned up here - it's needed by the seller
+                // to send the decryption key to the winner via their MPC route.
+                // Cleanup happens in:
+                // - send_decryption_hash() after successfully sending the key (seller)
+                // - DecryptionHashTransfer handler after receiving the key (winner)
 
                 Ok(())
             }
@@ -881,7 +1113,7 @@ impl AuctionCoordinator {
                 sidecar.cleanup().await;
                 *self.active_sidecar.lock().await = None;
 
-                // Cleanup route manager
+                // On error, cleanup route manager immediately
                 {
                     let key = bid_index.listing_key.to_string();
                     let mut managers = self.route_managers.lock().await;
