@@ -4,6 +4,19 @@ version = "0.1.0"
 edition = "2021"
 description = "Decentralized P2P SMPC Sealed-Bid Auction Marketplace"
 authors = ["Anker Rasmussen"]
+default-run = "market"
+
+[[bin]]
+name = "market"
+path = "src/main.rs"
+
+[[bin]]
+name = "devnet-ctl"
+path = "src/bin/devnet-ctl.rs"
+
+[features]
+default = []
+test-support = []
 
 [dependencies]
 # UI Framework
@@ -45,3 +58,8 @@ parking_lot = "0.12"
 dirs = "6.0"
 hex = "0.4"
 data-encoding = "2.6"
+
+[dev-dependencies]
+market = { path = ".", features = ["test-support"] }
+serial_test = "3.0"  # Run E2E tests sequentially
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use veilid_core::RecordKey;
+use veilid_core::{PublicKey, RecordKey};
 
 /// A mock DHT record with a unique key.
 #[derive(Debug, Clone)]
@@ -245,6 +245,233 @@ impl DhtStore for MockDht {
     }
 }
 
+/// Shared DHT that multiple AuctionLogic instances can use.
+///
+/// This simulates a real DHT network where all parties share the same state.
+/// Each party gets its own "view" of the DHT but reads/writes affect the shared storage.
+#[derive(Debug, Clone)]
+pub struct SharedMockDht {
+    /// The underlying shared storage.
+    inner: Arc<SharedMockDhtInner>,
+    /// The node ID of the party using this DHT view.
+    node_id: PublicKey,
+}
+
+#[derive(Debug)]
+struct SharedMockDhtInner {
+    /// Storage for all records: Map<record_key_string, RecordStorage>
+    storage: RwLock<HashMap<String, RecordStorage>>,
+    /// Counter for generating unique record IDs.
+    next_id: AtomicU64,
+    /// Track which node created each record (for ownership simulation).
+    record_owners: RwLock<HashMap<String, PublicKey>>,
+    /// Whether to simulate failures.
+    fail_mode: RwLock<Option<MockDhtFailure>>,
+}
+
+/// Handle to shared DHT storage for creating party views.
+#[derive(Debug, Clone)]
+pub struct SharedDhtHandle {
+    inner: Arc<SharedMockDhtInner>,
+}
+
+impl SharedDhtHandle {
+    /// Create a new shared DHT handle.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(SharedMockDhtInner {
+                storage: RwLock::new(HashMap::new()),
+                next_id: AtomicU64::new(1),
+                record_owners: RwLock::new(HashMap::new()),
+                fail_mode: RwLock::new(None),
+            }),
+        }
+    }
+
+    /// Create a view of the shared DHT for a specific party.
+    pub fn create_party_view(&self, node_id: PublicKey) -> SharedMockDht {
+        SharedMockDht {
+            inner: self.inner.clone(),
+            node_id,
+        }
+    }
+}
+
+impl Default for SharedDhtHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SharedMockDht {
+    /// Create a new shared DHT with a single party view.
+    ///
+    /// Use `SharedDhtHandle` when you need multiple parties to share the same DHT.
+    pub fn new(node_id: PublicKey) -> Self {
+        Self {
+            inner: Arc::new(SharedMockDhtInner {
+                storage: RwLock::new(HashMap::new()),
+                next_id: AtomicU64::new(1),
+                record_owners: RwLock::new(HashMap::new()),
+                fail_mode: RwLock::new(None),
+            }),
+            node_id,
+        }
+    }
+
+    /// Get the node ID for this DHT view.
+    pub fn node_id(&self) -> PublicKey {
+        self.node_id.clone()
+    }
+
+    /// Set failure mode for testing error handling.
+    pub async fn set_fail_mode(&self, mode: Option<MockDhtFailure>) {
+        *self.inner.fail_mode.write().await = mode;
+    }
+
+    /// Check if current operation should fail.
+    async fn should_fail(&self, is_write: bool, key: Option<&str>) -> bool {
+        let mode = self.inner.fail_mode.read().await;
+        match &*mode {
+            None => false,
+            Some(MockDhtFailure::All) => true,
+            Some(MockDhtFailure::Reads) => !is_write,
+            Some(MockDhtFailure::Writes) => is_write,
+            Some(MockDhtFailure::OnKey(k)) => key.map(|key| key == k).unwrap_or(false),
+        }
+    }
+
+    /// Get a snapshot of all stored data (for test assertions).
+    pub async fn snapshot(&self) -> HashMap<String, HashMap<u32, Vec<u8>>> {
+        let storage = self.inner.storage.read().await;
+        storage
+            .iter()
+            .map(|(k, v)| (k.clone(), v.subkeys.clone()))
+            .collect()
+    }
+
+    /// Check if a specific record exists.
+    pub async fn has_record(&self, key: &RecordKey) -> bool {
+        let storage = self.inner.storage.read().await;
+        storage.contains_key(&key.to_string())
+    }
+
+    /// Get the number of records stored.
+    pub async fn record_count(&self) -> usize {
+        self.inner.storage.read().await.len()
+    }
+}
+
+#[async_trait]
+impl DhtStore for SharedMockDht {
+    type OwnedRecord = MockOwnedRecord;
+
+    async fn create_record(&self) -> Result<Self::OwnedRecord> {
+        if self.should_fail(true, None).await {
+            return Err(anyhow!("SharedMockDht: simulated create failure"));
+        }
+
+        let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
+        let record = MockOwnedRecord::new(id);
+
+        let mut storage = self.inner.storage.write().await;
+        storage.insert(record.key.to_string(), RecordStorage::default());
+
+        // Track ownership
+        let mut owners = self.inner.record_owners.write().await;
+        owners.insert(record.key.to_string(), self.node_id.clone());
+
+        Ok(record)
+    }
+
+    fn record_key(record: &Self::OwnedRecord) -> RecordKey {
+        record.key.clone()
+    }
+
+    async fn get_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
+        self.get_subkey(key, 0).await
+    }
+
+    async fn set_value(&self, record: &Self::OwnedRecord, value: Vec<u8>) -> Result<()> {
+        self.set_subkey(record, 0, value).await
+    }
+
+    async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> Result<Option<Vec<u8>>> {
+        let key_str = key.to_string();
+        if self.should_fail(false, Some(&key_str)).await {
+            return Err(anyhow!("SharedMockDht: simulated read failure"));
+        }
+
+        let storage = self.inner.storage.read().await;
+        Ok(storage
+            .get(&key_str)
+            .and_then(|r| r.subkeys.get(&subkey).cloned()))
+    }
+
+    async fn set_subkey(
+        &self,
+        record: &Self::OwnedRecord,
+        subkey: u32,
+        value: Vec<u8>,
+    ) -> Result<()> {
+        let key_str = record.key.to_string();
+        if self.should_fail(true, Some(&key_str)).await {
+            return Err(anyhow!("SharedMockDht: simulated write failure"));
+        }
+
+        let mut storage = self.inner.storage.write().await;
+        let record_storage = storage
+            .entry(key_str)
+            .or_insert_with(RecordStorage::default);
+        record_storage.subkeys.insert(subkey, value);
+
+        Ok(())
+    }
+
+    async fn delete_record(&self, key: &RecordKey) -> Result<()> {
+        let key_str = key.to_string();
+        if self.should_fail(true, Some(&key_str)).await {
+            return Err(anyhow!("SharedMockDht: simulated delete failure"));
+        }
+
+        let mut storage = self.inner.storage.write().await;
+        storage.remove(&key_str);
+        Ok(())
+    }
+
+    async fn watch_record(&self, key: &RecordKey) -> Result<bool> {
+        let key_str = key.to_string();
+        if self.should_fail(true, Some(&key_str)).await {
+            return Err(anyhow!("SharedMockDht: simulated watch failure"));
+        }
+
+        let mut storage = self.inner.storage.write().await;
+        if let Some(record) = storage.get_mut(&key_str) {
+            let was_watched = record.is_watched;
+            record.is_watched = true;
+            Ok(!was_watched)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn cancel_watch(&self, key: &RecordKey) -> Result<bool> {
+        let key_str = key.to_string();
+        if self.should_fail(true, Some(&key_str)).await {
+            return Err(anyhow!("SharedMockDht: simulated cancel_watch failure"));
+        }
+
+        let mut storage = self.inner.storage.write().await;
+        if let Some(record) = storage.get_mut(&key_str) {
+            let was_watched = record.is_watched;
+            record.is_watched = false;
+            Ok(was_watched)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +579,71 @@ mod tests {
 
         // Reads should fail
         assert!(dht.get_value(&key).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_shared_mock_dht_multi_party() {
+        // Create shared DHT handle
+        let handle = SharedDhtHandle::new();
+
+        // Create two party views
+        let party1 = handle.create_party_view(make_test_public_key(1));
+        let party2 = handle.create_party_view(make_test_public_key(2));
+
+        // Party 1 creates a record
+        let record = party1.create_record().await.unwrap();
+        let key = SharedMockDht::record_key(&record);
+
+        // Party 1 writes a value
+        party1
+            .set_value(&record, b"shared data".to_vec())
+            .await
+            .unwrap();
+
+        // Party 2 can read the value (same underlying storage)
+        let value = party2.get_value(&key).await.unwrap();
+        assert_eq!(value, Some(b"shared data".to_vec()));
+
+        // Both parties see the same record count
+        assert_eq!(party1.record_count().await, 1);
+        assert_eq!(party2.record_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_shared_mock_dht_independent_records() {
+        let handle = SharedDhtHandle::new();
+
+        let party1 = handle.create_party_view(make_test_public_key(1));
+        let party2 = handle.create_party_view(make_test_public_key(2));
+
+        // Both parties create records
+        let record1 = party1.create_record().await.unwrap();
+        let record2 = party2.create_record().await.unwrap();
+
+        // Each writes to their own record
+        party1
+            .set_value(&record1, b"party1 data".to_vec())
+            .await
+            .unwrap();
+        party2
+            .set_value(&record2, b"party2 data".to_vec())
+            .await
+            .unwrap();
+
+        // Both records exist in shared storage
+        assert_eq!(party1.record_count().await, 2);
+
+        // Each can read the other's data
+        let key1 = SharedMockDht::record_key(&record1);
+        let key2 = SharedMockDht::record_key(&record2);
+
+        assert_eq!(
+            party2.get_value(&key1).await.unwrap(),
+            Some(b"party1 data".to_vec())
+        );
+        assert_eq!(
+            party1.get_value(&key2).await.unwrap(),
+            Some(b"party2 data".to_vec())
+        );
     }
 }
