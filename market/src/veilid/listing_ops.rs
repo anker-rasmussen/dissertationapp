@@ -102,7 +102,7 @@ mod tests {
             .seller(make_test_public_key(2))
             .title("Test Auction")
             .encrypted_content(vec![1, 2, 3], [0u8; 12], "abc123".to_string())
-            .min_bid(100)
+            .reserve_price(100)
             .auction_duration(3600)
             .build()
             .unwrap()
@@ -136,7 +136,7 @@ mod tests {
         let retrieved = ops.get_listing(&key).await.unwrap().unwrap();
 
         assert_eq!(retrieved.title, "Test Auction");
-        assert_eq!(retrieved.min_bid, 100);
+        assert_eq!(retrieved.reserve_price, 100);
     }
 
     #[tokio::test]

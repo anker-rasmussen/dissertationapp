@@ -12,7 +12,7 @@ use veilid_core::{
     VEILID_CAPABILITY_RELAY, VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeState {
     pub is_attached: bool,
     pub peer_count: usize,

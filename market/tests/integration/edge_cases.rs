@@ -187,8 +187,6 @@ async fn test_seller_can_bid() {
 
     let winner = harness.execute_auction(&listing).await;
 
-    // In this mock, seller can win their own auction
-    // (real system might want to prevent this)
     assert_eq!(winner, Some(0));
 }
 

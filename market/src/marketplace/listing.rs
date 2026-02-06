@@ -40,8 +40,8 @@ pub struct Listing {
     /// The seller keeps this private and only reveals it to the auction winner
     pub decryption_key: String,
 
-    /// Minimum bid amount (in atomic units, e.g., piconeros for XMR)
-    pub min_bid: u64,
+    /// Reserve price (in atomic units) - seller automatically bids this amount
+    pub reserve_price: u64,
 
     /// Unix timestamp when the auction ends
     pub auction_end: u64,
@@ -141,7 +141,7 @@ pub struct ListingBuilder<T: TimeProvider> {
     encrypted_content: Option<Vec<u8>>,
     content_nonce: Option<ContentNonce>,
     decryption_key: Option<String>,
-    min_bid: Option<u64>,
+    reserve_price: Option<u64>,
     auction_duration_secs: Option<u64>,
 }
 
@@ -156,7 +156,7 @@ impl<T: TimeProvider> ListingBuilder<T> {
             encrypted_content: None,
             content_nonce: None,
             decryption_key: None,
-            min_bid: None,
+            reserve_price: None,
             auction_duration_secs: None,
         }
     }
@@ -185,8 +185,8 @@ impl<T: TimeProvider> ListingBuilder<T> {
         self
     }
 
-    pub fn min_bid(mut self, amount: u64) -> Self {
-        self.min_bid = Some(amount);
+    pub fn reserve_price(mut self, amount: u64) -> Self {
+        self.reserve_price = Some(amount);
         self
     }
 
@@ -207,7 +207,7 @@ impl<T: TimeProvider> ListingBuilder<T> {
             encrypted_content: self.encrypted_content.ok_or("encrypted_content is required")?,
             content_nonce: self.content_nonce.ok_or("content_nonce is required")?,
             decryption_key: self.decryption_key.ok_or("decryption_key is required")?,
-            min_bid: self.min_bid.ok_or("min_bid is required")?,
+            reserve_price: self.reserve_price.ok_or("reserve_price is required")?,
             auction_end: created_at + self.auction_duration_secs.ok_or("auction_duration is required")?,
             created_at,
             status: ListingStatus::Active,
@@ -235,7 +235,7 @@ mod tests {
             .seller(make_test_pubkey())
             .title("Test Auction")
             .encrypted_content(vec![1, 2, 3], [0u8; 12], "abc123".to_string())
-            .min_bid(100)
+            .reserve_price(100)
             .auction_duration(3600) // 1 hour
             .build()
             .unwrap()
@@ -247,7 +247,7 @@ mod tests {
         let listing = make_test_listing(&time);
 
         assert_eq!(listing.title, "Test Auction");
-        assert_eq!(listing.min_bid, 100);
+        assert_eq!(listing.reserve_price, 100);
         assert_eq!(listing.created_at, 1000);
         assert_eq!(listing.auction_end, 4600); // 1000 + 3600
         assert_eq!(listing.status, ListingStatus::Active);
@@ -261,7 +261,7 @@ mod tests {
             .seller(make_test_pubkey())
             .title("Test")
             .encrypted_content(vec![1], [0u8; 12], "key".to_string())
-            .min_bid(100)
+            .reserve_price(100)
             .auction_duration(3600)
             .build();
 
@@ -276,7 +276,7 @@ mod tests {
             .key(make_test_key())
             .title("Test")
             .encrypted_content(vec![1], [0u8; 12], "key".to_string())
-            .min_bid(100)
+            .reserve_price(100)
             .auction_duration(3600)
             .build();
 
@@ -291,7 +291,7 @@ mod tests {
             .key(make_test_key())
             .seller(make_test_pubkey())
             .encrypted_content(vec![1], [0u8; 12], "key".to_string())
-            .min_bid(100)
+            .reserve_price(100)
             .auction_duration(3600)
             .build();
 
@@ -307,7 +307,7 @@ mod tests {
             .seller(make_test_pubkey())
             .title("Test")
             .encrypted_content(vec![1], [0u8; 12], "key".to_string())
-            .min_bid(100)
+            .reserve_price(100)
             .build();
 
         assert!(result.is_err());
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(original.encrypted_content, restored.encrypted_content);
         assert_eq!(original.content_nonce, restored.content_nonce);
         assert_eq!(original.decryption_key, restored.decryption_key);
-        assert_eq!(original.min_bid, restored.min_bid);
+        assert_eq!(original.reserve_price, restored.reserve_price);
         assert_eq!(original.auction_end, restored.auction_end);
         assert_eq!(original.created_at, restored.created_at);
         assert_eq!(original.status, restored.status);
@@ -405,7 +405,7 @@ mod tests {
             .seller(make_test_pubkey())
             .title("Test")
             .encrypted_content(ciphertext, nonce, hex::encode(key))
-            .min_bid(100)
+            .reserve_price(100)
             .auction_duration(3600)
             .build()
             .unwrap();
@@ -429,7 +429,7 @@ mod tests {
             .seller(make_test_pubkey())
             .title("Test")
             .encrypted_content(ciphertext, nonce, hex::encode(key))
-            .min_bid(100)
+            .reserve_price(100)
             .auction_duration(3600)
             .build()
             .unwrap();

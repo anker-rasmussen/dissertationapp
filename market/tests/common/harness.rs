@@ -120,7 +120,7 @@ impl MultiPartyHarness {
     pub async fn create_listing(
         &mut self,
         title: &str,
-        min_bid: u64,
+        reserve_price: u64,
         duration: u64,
     ) -> Listing {
         let record_key = make_test_record_key(self.listing_counter);
@@ -137,7 +137,7 @@ impl MultiPartyHarness {
                 [0u8; 12],
                 "decryption_key_hex".to_string(),
             )
-            .min_bid(min_bid)
+            .reserve_price(reserve_price)
             .auction_duration(duration)
             .build()
             .expect("Failed to build listing");
@@ -347,7 +347,7 @@ mod tests {
         let listing = harness.create_listing("Test Item", 100, 3600).await;
 
         assert_eq!(listing.title, "Test Item");
-        assert_eq!(listing.min_bid, 100);
+        assert_eq!(listing.reserve_price, 100);
     }
 
     #[tokio::test]

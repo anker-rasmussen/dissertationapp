@@ -365,7 +365,7 @@ mod tests {
             .seller(make_test_public_key(2))
             .title("Test Auction")
             .encrypted_content(vec![1, 2, 3], [0u8; 12], "abc123".to_string())
-            .min_bid(100)
+            .reserve_price(100)
             .auction_duration(3600)
             .build()
             .unwrap()
