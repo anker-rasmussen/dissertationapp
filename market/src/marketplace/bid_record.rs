@@ -75,16 +75,16 @@ impl BidIndex {
         }
     }
 
-    /// Get bidders sorted by public key (deterministic party assignment)
+    /// Get bidders sorted by bid timestamp (ascending), with pubkey as tiebreaker.
+    /// The seller's auto-bid (created at listing time) always has the earliest
+    /// timestamp, making them party 0. Remaining bidders are ordered by time.
     pub fn sorted_bidders(&self) -> Vec<PublicKey> {
-        let mut bidders: Vec<_> = self.bids.iter().map(|b| b.bidder.clone()).collect();
-        bidders.sort_by(|a, b| {
-            // Compare using string representation
-            let a_str = a.to_string();
-            let b_str = b.to_string();
-            a_str.cmp(&b_str)
+        let mut bids_sorted: Vec<_> = self.bids.iter().collect();
+        bids_sorted.sort_by(|a, b| {
+            a.timestamp.cmp(&b.timestamp)
+                .then_with(|| a.bidder.to_string().cmp(&b.bidder.to_string()))
         });
-        bidders
+        bids_sorted.into_iter().map(|b| b.bidder.clone()).collect()
     }
 
     /// Get party ID for a specific bidder
@@ -197,7 +197,8 @@ mod tests {
         let listing_key = make_test_key();
         let mut index = BidIndex::new(listing_key.clone());
 
-        // Add bids in non-sorted order
+        // Add bids with different timestamps (all use default timestamp=1000)
+        // Since all have same timestamp, falls back to pubkey sort
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
@@ -205,10 +206,37 @@ mod tests {
         let sorted = index.sorted_bidders();
         assert_eq!(sorted.len(), 3);
 
-        // Verify sorted order (by string representation)
+        // All bids have timestamp=1000, so sorted by pubkey string as tiebreaker
         for i in 0..sorted.len() - 1 {
             assert!(sorted[i].to_string() <= sorted[i + 1].to_string());
         }
+    }
+
+    #[test]
+    fn test_bid_index_sorted_bidders_by_timestamp() {
+        let time = MockTime::new(2000);
+        let listing_key = make_test_key();
+        let mut index = BidIndex::new(listing_key.clone());
+
+        // Create bids with distinct timestamps
+        let mut bid3 = make_bid_record(listing_key.clone(), 3);
+        bid3.timestamp = 3000; // Latest
+        let mut bid1 = make_bid_record(listing_key.clone(), 1);
+        bid1.timestamp = 1000; // Earliest
+        let mut bid2 = make_bid_record(listing_key.clone(), 2);
+        bid2.timestamp = 2000; // Middle
+
+        index.add_bid_with_time(bid3, &time);
+        index.add_bid_with_time(bid1, &time);
+        index.add_bid_with_time(bid2, &time);
+
+        let sorted = index.sorted_bidders();
+        assert_eq!(sorted.len(), 3);
+
+        // Should be sorted by timestamp: bidder1 (ts=1000), bidder2 (ts=2000), bidder3 (ts=3000)
+        assert_eq!(sorted[0], make_bidder(1));
+        assert_eq!(sorted[1], make_bidder(2));
+        assert_eq!(sorted[2], make_bidder(3));
     }
 
     #[test]
@@ -255,6 +283,7 @@ mod tests {
         let listing_key = make_test_key();
 
         // Create two indices with same bids added in different order
+        // Both bids have same default timestamp (1000), so pubkey tiebreaker applies
         let mut index1 = BidIndex::new(listing_key.clone());
         index1.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
         index1.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
@@ -269,6 +298,37 @@ mod tests {
 
         assert_eq!(index1.get_party_id(&bidder1), index2.get_party_id(&bidder1));
         assert_eq!(index1.get_party_id(&bidder2), index2.get_party_id(&bidder2));
+    }
+
+    #[test]
+    fn test_bid_index_deterministic_party_ids_by_timestamp() {
+        let time = MockTime::new(5000);
+        let listing_key = make_test_key();
+
+        // Create bids with distinct timestamps
+        let mut bid1 = make_bid_record(listing_key.clone(), 1);
+        bid1.timestamp = 2000;
+        let mut bid2 = make_bid_record(listing_key.clone(), 2);
+        bid2.timestamp = 1000; // Earlier = lower party ID
+
+        // Add in different orders
+        let mut index1 = BidIndex::new(listing_key.clone());
+        index1.add_bid_with_time(bid1.clone(), &time);
+        index1.add_bid_with_time(bid2.clone(), &time);
+
+        let mut index2 = BidIndex::new(listing_key.clone());
+        index2.add_bid_with_time(bid2, &time);
+        index2.add_bid_with_time(bid1, &time);
+
+        let bidder1 = make_bidder(1);
+        let bidder2 = make_bidder(2);
+
+        assert_eq!(index1.get_party_id(&bidder1), index2.get_party_id(&bidder1));
+        assert_eq!(index1.get_party_id(&bidder2), index2.get_party_id(&bidder2));
+
+        // Bidder 2 has earlier timestamp (1000) so should be party 0
+        assert_eq!(index1.get_party_id(&bidder2), Some(0));
+        assert_eq!(index1.get_party_id(&bidder1), Some(1));
     }
 
     #[test]

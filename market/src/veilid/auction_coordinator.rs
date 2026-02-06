@@ -4,8 +4,9 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
-use veilid_core::{PublicKey, RecordKey, RouteId, SafetySelection, Sequencing, Target, VeilidAPI};
+use veilid_core::{PublicKey, RecordKey, RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target, VeilidAPI};
 
+use crate::config;
 use crate::marketplace::{BidIndex, Listing};
 use crate::traits::DhtStore;
 use super::bid_ops::BidOperations;
@@ -118,52 +119,72 @@ impl AuctionCoordinator {
                           listing_key, registry.announcements.len());
                 }
             }
-            AuctionMessage::WinnerDecryptionRequest { listing_key, winner, timestamp: _ } => {
-                info!("Received decryption key request from winner {} for listing {}", winner, listing_key);
+            AuctionMessage::WinnerDecryptionRequest { listing_key, winner: _sender, timestamp: _ } => {
+                // Seller-initiated: this is received BY the winner FROM the seller.
+                // The seller is challenging the winner to prove their bid.
+                info!("Received WinnerDecryptionRequest (challenge) for listing {}", listing_key);
 
-                // Check if we own this listing (are the seller)
-                let owned = self.owned_listings.lock().await;
-                if let Some(_record) = owned.get(&listing_key) {
-                    drop(owned); // Release lock before async call
+                // Look up our bid value + nonce from local storage
+                let bid_data = self.bid_storage.get_bid(&listing_key).await;
+                match bid_data {
+                    Some((bid_value, nonce)) => {
+                        info!("Responding to seller's challenge with bid reveal (value: {})", bid_value);
 
-                    // Check verification status (Danish Sugar Beet style)
-                    let key = listing_key.to_string();
-                    let verified = {
-                        let verifications = self.pending_verifications.lock().await;
-                        verifications.get(&key)
-                            .map(|(expected_winner, _, v)| {
-                                // Verify both winner identity and verification status
-                                expected_winner == &winner && v.unwrap_or(false)
-                            })
-                            .unwrap_or(false)
-                    };
+                        // Look up seller's MPC route from route manager
+                        let key = listing_key.to_string();
+                        let managers = self.route_managers.lock().await;
 
-                    if !verified {
-                        warn!("Winner bid verification not passed for listing {} - withholding decryption key", listing_key);
-                        warn!("Winner {} must first broadcast WinnerBidReveal with valid nonce", winner);
-                        return Ok(());
-                    }
+                        if let Some(route_manager) = managers.get(&key) {
+                            let mgr = route_manager.lock().await;
+                            let routes = mgr.received_routes.lock().await;
 
-                    info!("I am the seller, verification passed - sending decryption key");
+                            // Find the seller's route (the sender of this challenge)
+                            // We need to find any route that isn't ours — the seller is party 0
+                            // We look for routes from the listing seller
+                            let listing_ops = ListingOperations::new(self.dht.clone());
+                            let seller_pubkey = match listing_ops.get_listing(&listing_key).await {
+                                Ok(Some(listing)) => Some(listing.seller),
+                                _ => None,
+                            };
 
-                    // Get the listing to retrieve decryption key
-                    let listing_ops = ListingOperations::new(self.dht.clone());
-                    match listing_ops.get_listing(&listing_key).await {
-                        Ok(Some(listing)) => {
-                            info!("Sending decryption key to verified winner {}", winner);
-                            if let Err(e) = self.send_decryption_hash(&listing_key, &winner, &listing.decryption_key).await {
-                                error!("Failed to send decryption key to winner: {}", e);
+                            let seller_route = seller_pubkey.as_ref()
+                                .and_then(|seller| routes.get(seller).cloned());
+
+                            drop(routes);
+                            drop(mgr);
+                            drop(managers);
+
+                            if let Some(route_id) = seller_route {
+                                // Send WinnerBidReveal directed to seller's route
+                                let message = AuctionMessage::winner_bid_reveal(
+                                    listing_key.clone(),
+                                    self.my_node_id.clone(),
+                                    bid_value,
+                                    nonce,
+                                );
+
+                                let data = message.to_bytes()?;
+
+                                let routing_context = self.safe_routing_context()?;
+
+                                match routing_context.app_message(Target::RouteId(route_id), data).await {
+                                    Ok(_) => {
+                                        info!("Sent WinnerBidReveal to seller via MPC route");
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to send WinnerBidReveal to seller: {}", e);
+                                    }
+                                }
+                            } else {
+                                warn!("Seller's MPC route not found, cannot respond to challenge");
                             }
-                        }
-                        Ok(None) => {
-                            warn!("Listing not found when trying to send decryption key");
-                        }
-                        Err(e) => {
-                            error!("Failed to retrieve listing: {}", e);
+                        } else {
+                            warn!("No route manager for listing {}, cannot respond to challenge", listing_key);
                         }
                     }
-                } else {
-                    debug!("Not the seller for listing {}, ignoring request", listing_key);
+                    None => {
+                        debug!("No bid stored for listing {}, ignoring challenge", listing_key);
+                    }
                 }
             }
             AuctionMessage::DecryptionHashTransfer { listing_key, winner, decryption_hash, timestamp: _ } => {
@@ -200,6 +221,8 @@ impl AuctionCoordinator {
                 }
             }
             AuctionMessage::WinnerBidReveal { listing_key, winner, bid_value, nonce, timestamp: _ } => {
+                // Seller-initiated: this is received BY the seller FROM the winner.
+                // Winner is responding to the seller's challenge with their bid proof.
                 info!("Received WinnerBidReveal for listing {} from winner {}", listing_key, winner);
 
                 // Verify the commitment
@@ -207,14 +230,32 @@ impl AuctionCoordinator {
 
                 // Store verification result
                 let key = listing_key.to_string();
-                let mut verifications = self.pending_verifications.lock().await;
-                verifications.entry(key.clone())
-                    .and_modify(|(_, _, v)| *v = Some(verified));
+                {
+                    let mut verifications = self.pending_verifications.lock().await;
+                    verifications.entry(key.clone())
+                        .and_modify(|(_, _, v)| *v = Some(verified));
+                }
 
                 if verified {
-                    info!("Winner bid VERIFIED for listing {}", listing_key);
+                    info!("Winner bid VERIFIED for listing {} — sending decryption key immediately", listing_key);
+
+                    // Immediately send decryption key to winner
+                    let listing_ops = ListingOperations::new(self.dht.clone());
+                    match listing_ops.get_listing(&listing_key).await {
+                        Ok(Some(listing)) => {
+                            if let Err(e) = self.send_decryption_hash(&listing_key, &winner, &listing.decryption_key).await {
+                                error!("Failed to send decryption key to winner: {}", e);
+                            }
+                        }
+                        Ok(None) => {
+                            warn!("Listing not found when trying to send decryption key");
+                        }
+                        Err(e) => {
+                            error!("Failed to retrieve listing: {}", e);
+                        }
+                    }
                 } else {
-                    warn!("Winner bid verification FAILED for listing {}", listing_key);
+                    warn!("Winner bid verification FAILED for listing {} — withholding decryption key", listing_key);
                 }
             }
         }
@@ -405,8 +446,7 @@ impl AuctionCoordinator {
 
         info!("We bid on this listing, our bid record: {}", our_bid_key);
 
-        // For devnet: Discover bids by checking all known participants
-        // In production, this would use AppMessage announcements
+        // Discover bids from DHT registry
         let bid_index = self.discover_bids_from_storage(listing_key).await?;
 
         if bid_index.bids.is_empty() {
@@ -416,8 +456,20 @@ impl AuctionCoordinator {
 
         info!("Discovered {} bids for auction", bid_index.bids.len());
 
-        // Check if we're a bidder
+        // Sort bidders by timestamp (seller's auto-bid has earliest timestamp = party 0)
         let sorted_bidders = bid_index.sorted_bidders();
+
+        // Shamir secret sharing requires at least 3 parties
+        if sorted_bidders.len() < 3 {
+            warn!(
+                "Auction for '{}' has only {} parties, but Shamir requires at least 3. Aborting MPC.",
+                listing.title, sorted_bidders.len()
+            );
+            self.cleanup_route_manager(listing_key).await;
+            return Ok(());
+        }
+
+        // Check if we're a bidder
         let my_party_id = sorted_bidders.iter().position(|b| b == &self.my_node_id);
 
         match my_party_id {
@@ -431,7 +483,7 @@ impl AuctionCoordinator {
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
                 // Trigger MPC execution
-                self.execute_mpc_auction(party_id, sorted_bidders.len(), &bid_index, routes).await?;
+                self.execute_mpc_auction(party_id, sorted_bidders.len(), &bid_index, routes, &sorted_bidders).await?;
             }
             None => {
                 debug!("Not a bidder in this auction, skipping MPC participation");
@@ -496,42 +548,7 @@ impl AuctionCoordinator {
         Ok(())
     }
 
-    /// Send decryption key request to seller
-    async fn send_decryption_request(&self, listing_key: &RecordKey, seller: &PublicKey) -> Result<()> {
-        info!("Sending decryption key request to seller {} for listing {}", seller, listing_key);
-
-        let message = AuctionMessage::winner_decryption_request(
-            listing_key.clone(),
-            self.my_node_id.clone(),
-        );
-
-        let data = message.to_bytes()?;
-
-        // Broadcast to all peers (seller will receive and respond)
-        let routing_context = self.api.routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
-            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
-
-        let state = self.api.get_state().await
-            .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
-
-        let mut sent_count = 0;
-        for peer in &state.network.peers {
-            for node_id in &peer.node_ids {
-                match routing_context.app_message(Target::NodeId(node_id.clone()), data.clone()).await {
-                    Ok(_) => {
-                        sent_count += 1;
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-        }
-
-        info!("Sent decryption request to {} peers", sent_count);
-        Ok(())
-    }
+    // NOTE: send_decryption_request removed — replaced by seller-initiated send_winner_challenge
 
     /// Send decryption hash to auction winner via their MPC route
     async fn send_decryption_hash(&self, listing_key: &RecordKey, winner: &PublicKey, decryption_hash: &str) -> Result<()> {
@@ -562,10 +579,7 @@ impl AuctionCoordinator {
                 drop(managers);
 
                 // Send directly to winner's private route
-                let routing_context = self.api.routing_context()
-                    .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
-                    .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-                    .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
+                let routing_context = self.safe_routing_context()?;
 
                 let route_display = winner_route.clone();
                 match routing_context.app_message(Target::RouteId(winner_route), data).await {
@@ -622,44 +636,8 @@ impl AuctionCoordinator {
         }
     }
 
-    /// Broadcast winner's bid reveal to all parties for verification (Danish Sugar Beet style)
-    async fn broadcast_winner_reveal(&self, listing_key: &RecordKey, bid_value: u64, nonce: &[u8; 32]) -> Result<()> {
-        info!("Broadcasting winner bid reveal for listing {} (bid value: {})", listing_key, bid_value);
-
-        let message = AuctionMessage::winner_bid_reveal(
-            listing_key.clone(),
-            self.my_node_id.clone(),
-            bid_value,
-            *nonce,
-        );
-
-        let data = message.to_bytes()?;
-
-        // Broadcast to all peers
-        let routing_context = self.api.routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
-            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
-
-        let state = self.api.get_state().await
-            .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
-
-        let mut sent_count = 0;
-        for peer in &state.network.peers {
-            for node_id in &peer.node_ids {
-                match routing_context.app_message(Target::NodeId(node_id.clone()), data.clone()).await {
-                    Ok(_) => {
-                        sent_count += 1;
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-        }
-
-        info!("Broadcast winner bid reveal to {} peers", sent_count);
-        Ok(())
-    }
+    // NOTE: broadcast_winner_reveal removed — winner now sends directed WinnerBidReveal
+    // to the seller via their MPC route in response to a WinnerDecryptionRequest challenge
 
     /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style)
     async fn verify_winner_reveal(&self, listing_key: &RecordKey, winner: &PublicKey, bid_value: u64, nonce: &[u8; 32]) -> bool {
@@ -888,15 +866,16 @@ impl AuctionCoordinator {
         }
     }
 
-    /// Execute the MPC auction computation
+    /// Execute the MPC auction computation using Shamir secret sharing
     async fn execute_mpc_auction(
         &self,
         party_id: usize,
         num_parties: usize,
         bid_index: &BidIndex,
         routes: HashMap<usize, RouteId>,
+        all_parties: &[PublicKey],
     ) -> Result<()> {
-        info!("Executing {}-party MPC auction as Party {}", num_parties, party_id);
+        info!("Executing {}-party MPC auction as Party {} (Shamir)", num_parties, party_id);
 
         // Get my bid value from storage
         let listing_key = &bid_index.listing_key;
@@ -913,8 +892,8 @@ impl AuctionCoordinator {
         *self.active_sidecar.lock().await = Some(sidecar.clone());
 
         // Write input file for MP-SPDZ
-        let mp_spdz_dir = std::env::var("MP_SPDZ_DIR")
-            .unwrap_or_else(|_| "/home/broadcom/Repos/Dissertation/Repos/MP-SPDZ".to_string());
+        let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
+            .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
 
         let input_path = format!("{}/Player-Data/Input-P{}-0", mp_spdz_dir, party_id);
         std::fs::write(&input_path, format!("{}\n", bid_value))
@@ -942,12 +921,10 @@ impl AuctionCoordinator {
         info!("Waiting 5 seconds for all parties to be ready...");
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-        // Compile MPC program for the specific number of parties
+        // Compile MPC program for the specific number of parties (Shamir uses prime field, no -R flag)
         info!("Compiling auction_n program for {} parties...", num_parties);
         let compile_output = Command::new(format!("{}/compile.py", mp_spdz_dir))
             .current_dir(&mp_spdz_dir)
-            .arg("-R")
-            .arg("64")
             .arg("auction_n")
             .arg("--")
             .arg(num_parties.to_string())
@@ -976,16 +953,18 @@ impl AuctionCoordinator {
             }
         }
 
-        // Execute MP-SPDZ
-        info!("Executing MP-SPDZ auction_n-{} program...", num_parties);
+        // Execute MP-SPDZ with Shamir party executable
+        info!("Executing MP-SPDZ auction_n-{} program (Shamir)...", num_parties);
 
         let program_name = format!("auction_n-{}", num_parties);
-        let output = Command::new(format!("{}/replicated-ring-party.x", mp_spdz_dir))
+        let output = Command::new(format!("{}/shamir-party.x", mp_spdz_dir))
             .current_dir(&mp_spdz_dir)
             .arg("-p")
             .arg(party_id.to_string())
+            .arg("-N")
+            .arg(num_parties.to_string())
             .arg("-OF")
-            .arg(".")  // Output to stdout for all parties (not just Party 0)
+            .arg(".")  // Output to stdout
             .arg("-ip")
             .arg(&hosts_file_name)  // Use node-specific hosts file
             .arg(&program_name)
@@ -1006,93 +985,78 @@ impl AuctionCoordinator {
                     warn!("STDERR:\n{}", stderr);
                 }
 
-                // Parse result from output
-                // Each party learns: winner ID, winning bid, and privately whether they won
-                let mut i_won = false;
-                let mut winning_bid: Option<u64> = None;
-                let mut winner_party_id: Option<usize> = None;
+                let is_seller = party_id == 0;
 
-                for line in stdout.lines() {
-                    if line.contains("You won:") {
-                        // Each party privately learns if they won
-                        if line.contains("You won: 1") {
-                            i_won = true;
-                            info!("Result: I won the auction!");
-                        } else {
-                            info!("Result: I did not win");
-                        }
-                    }
-                    if line.contains("Winning bid:") {
-                        if let Some(bid_str) = line.split(':').last() {
-                            winning_bid = bid_str.trim().parse().ok();
-                            if let Some(bid) = winning_bid {
-                                info!("Parsed winning bid from MPC output: {}", bid);
-                            }
-                        }
-                    }
-                    if line.contains("Winner: Party") {
-                        if let Some(party_str) = line.split("Party").last() {
-                            winner_party_id = party_str.trim().parse().ok();
-                            if let Some(pid) = winner_party_id {
-                                info!("Parsed winner party ID from MPC output: {}", pid);
-                            }
-                        }
-                    }
-                }
+                if is_seller {
+                    // === SELLER (party 0): Parse winner ID and winning bid ===
+                    let mut winning_bid: Option<u64> = None;
+                    let mut winner_party_id: Option<usize> = None;
 
-                // Store winning bid and winner for verification (Danish Sugar Beet style)
-                if let (Some(bid), Some(winner_pid)) = (winning_bid, winner_party_id) {
-                    let sorted_bidders = bid_index.sorted_bidders();
-                    if winner_pid < sorted_bidders.len() {
-                        let winner_pubkey = sorted_bidders[winner_pid].clone();
-                        let key = bid_index.listing_key.to_string();
-                        self.pending_verifications.lock().await
-                            .insert(key, (winner_pubkey.clone(), bid, None));
-                        info!("Stored pending verification: winner={}, bid={}", winner_pubkey, bid);
-                    }
-                }
-
-                // If I won, broadcast my bid reveal for verification, then request decryption key
-                if i_won {
-                    info!("I won - broadcasting bid reveal for verification (Danish Sugar Beet style)");
-
-                    // Get my bid value and nonce
-                    let (my_bid_value, my_nonce) = self.bid_storage.get_bid(&bid_index.listing_key).await
-                        .ok_or_else(|| anyhow::anyhow!("Bid not found in storage"))?;
-
-                    // Broadcast reveal to all parties
-                    if let Err(e) = self.broadcast_winner_reveal(&bid_index.listing_key, my_bid_value, &my_nonce).await {
-                        error!("Failed to broadcast winner reveal: {}", e);
-                    }
-
-                    // Wait for verification to propagate
-                    info!("Waiting for verification to propagate...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-                    // Now request decryption key from seller
-                    info!("Requesting decryption key from seller");
-
-                    // Get listing to find seller
-                    let listing_ops = ListingOperations::new(self.dht.clone());
-                    match listing_ops.get_listing(&bid_index.listing_key).await {
-                        Ok(Some(listing)) => {
-                            // Check if I am also the seller
-                            if listing.seller == self.my_node_id {
-                                info!("I am both the seller and the winner - I already have the decryption key");
-                            } else {
-                                // Send request to seller
-                                info!("Sending decryption key request to seller {}", listing.seller);
-                                if let Err(e) = self.send_decryption_request(&bid_index.listing_key, &listing.seller).await {
-                                    error!("Failed to send decryption request to seller: {}", e);
+                    for line in stdout.lines() {
+                        if line.contains("Winning bid:") {
+                            if let Some(bid_str) = line.split(':').last() {
+                                winning_bid = bid_str.trim().parse().ok();
+                                if let Some(bid) = winning_bid {
+                                    info!("Parsed winning bid from MPC output: {}", bid);
                                 }
                             }
                         }
-                        Ok(None) => {
-                            warn!("Listing not found when trying to request decryption key");
+                        if line.contains("Winner: Party") {
+                            if let Some(party_str) = line.split("Party").last() {
+                                winner_party_id = party_str.trim().parse().ok();
+                                if let Some(pid) = winner_party_id {
+                                    info!("Parsed winner party ID from MPC output: {}", pid);
+                                }
+                            }
                         }
-                        Err(e) => {
-                            error!("Failed to retrieve listing: {}", e);
+                    }
+
+                    if let (Some(bid), Some(winner_pid)) = (winning_bid, winner_party_id) {
+                        if winner_pid == 0 {
+                            // Winner is the seller (reserve price was highest) = no sale
+                            info!("No bidder exceeded the reserve price — no sale");
+                            self.cleanup_route_manager(listing_key).await;
+                        } else if winner_pid < all_parties.len() {
+                            let winner_pubkey = all_parties[winner_pid].clone();
+                            let key = listing_key.to_string();
+
+                            // Store pending verification entry
+                            self.pending_verifications.lock().await
+                                .insert(key, (winner_pubkey.clone(), bid, None));
+                            info!("Stored pending verification: winner={}, bid={}", winner_pubkey, bid);
+
+                            // Send WinnerDecryptionRequest to winner via their MPC route (challenge)
+                            info!("Sending challenge (WinnerDecryptionRequest) to winner {}", winner_pubkey);
+                            self.send_winner_challenge(listing_key, &winner_pubkey).await;
+                        } else {
+                            error!("Winner party ID {} out of range (only {} parties)", winner_pid, all_parties.len());
                         }
+                    } else {
+                        warn!("Could not parse winner/bid from MPC output");
+                    }
+                } else {
+                    // === BIDDER (party 1..N): Parse only "You won: 0/1" ===
+                    let mut i_won = false;
+
+                    for line in stdout.lines() {
+                        if line.contains("You won:") {
+                            if line.contains("You won: 1") {
+                                i_won = true;
+                                info!("Result: I won the auction!");
+                            } else {
+                                info!("Result: I did not win");
+                            }
+                        }
+                    }
+
+                    if i_won {
+                        // Wait for seller's WinnerDecryptionRequest challenge
+                        info!("I won — waiting for seller's challenge (WinnerDecryptionRequest)");
+                        // Route manager stays active to receive the challenge and send the response
+                    } else {
+                        // Lost — cleanup route manager
+                        info!("I lost — cleaning up route manager");
+                        self.cleanup_route_manager(listing_key).await;
                     }
                 }
 
@@ -1100,11 +1064,11 @@ impl AuctionCoordinator {
                 sidecar.cleanup().await;
                 *self.active_sidecar.lock().await = None;
 
-                // NOTE: Route manager is NOT cleaned up here - it's needed by the seller
-                // to send the decryption key to the winner via their MPC route.
+                // NOTE: Route manager is NOT cleaned up here for seller or winner.
                 // Cleanup happens in:
                 // - send_decryption_hash() after successfully sending the key (seller)
                 // - DecryptionHashTransfer handler after receiving the key (winner)
+                // - Losers clean up immediately above.
 
                 Ok(())
             }
@@ -1122,6 +1086,74 @@ impl AuctionCoordinator {
 
                 Err(anyhow::anyhow!("MP-SPDZ execution failed: {}", e))
             }
+        }
+    }
+
+    /// Create a routing context suitable for sending to private routes.
+    /// Uses Safe routing (matching MPC sidecar) so Veilid doesn't need to look up
+    /// our own node ID in the routing table — Unsafe + RouteId fails with
+    /// "can't look up own node id in routing table" in devnet configurations.
+    fn safe_routing_context(&self) -> Result<veilid_core::RoutingContext> {
+        self.api.routing_context()
+            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
+            .with_safety(SafetySelection::Safe(SafetySpec {
+                preferred_route: None,
+                hop_count: 2,
+                stability: Stability::Reliable,
+                sequencing: Sequencing::PreferOrdered,
+            }))
+            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))
+    }
+
+    /// Send WinnerDecryptionRequest challenge to winner via their MPC route
+    async fn send_winner_challenge(&self, listing_key: &RecordKey, winner: &PublicKey) {
+        let message = AuctionMessage::winner_decryption_request(
+            listing_key.clone(),
+            self.my_node_id.clone(), // sender is the seller
+        );
+
+        let data = match message.to_bytes() {
+            Ok(d) => d,
+            Err(e) => {
+                error!("Failed to serialize WinnerDecryptionRequest: {}", e);
+                return;
+            }
+        };
+
+        // Look up winner's MPC route
+        let key = listing_key.to_string();
+        let managers = self.route_managers.lock().await;
+
+        if let Some(route_manager) = managers.get(&key) {
+            let mgr = route_manager.lock().await;
+            let routes = mgr.received_routes.lock().await;
+
+            if let Some(winner_route) = routes.get(winner).cloned() {
+                drop(routes);
+                drop(mgr);
+                drop(managers);
+
+                let routing_context = match self.safe_routing_context() {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        error!("Failed to create routing context: {}", e);
+                        return;
+                    }
+                };
+
+                match routing_context.app_message(Target::RouteId(winner_route), data).await {
+                    Ok(_) => info!("Sent WinnerDecryptionRequest challenge to winner via MPC route"),
+                    Err(e) => error!("Failed to send challenge to winner: {}", e),
+                }
+            } else {
+                drop(routes);
+                drop(mgr);
+                drop(managers);
+                warn!("Winner's MPC route not found in route manager");
+            }
+        } else {
+            drop(managers);
+            warn!("Route manager not found for listing {}", listing_key);
         }
     }
 }

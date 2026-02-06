@@ -95,10 +95,11 @@ Devnet Nodes (Docker):
 └── Node 4:    1.2.3.5:5164 (port 5164)
 
 Market Instances (Local):
-├── Bidder 1:     1.2.3.6:5165 (port 5165)
-├── Bidder 2:     1.2.3.7:5166 (port 5166)
-└── Auctioneer:   1.2.3.8:5167 (port 5167)
-```
+├── Party 0:     1.2.3.6:5165 (port 5165)
+├── Party 1:     1.2.3.7:5166 (port 5166)
+├── Party 2:     1.2.3.8:5167 (port 5167)
+└── Party n:     1.2.3.(6+n):(5165+n) (port 5165+n) - note. cap of 35 nodes (LD_PRELOAD only translates 40 IPs.)
+``` 
 
 All nodes use the same network key: `development-network-2025`
 

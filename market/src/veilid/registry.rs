@@ -27,8 +27,8 @@ pub struct RegistryEntry {
     pub title: String,
     /// Seller's public key
     pub seller: String,
-    /// Minimum bid
-    pub min_bid: u64,
+    /// Reserve price
+    pub reserve_price: u64,
     /// When the auction ends (unix timestamp)
     pub auction_end: u64,
 }
