@@ -50,7 +50,8 @@ fn veilid_repo_path() -> PathBuf {
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("market/ should have a parent directory")
+        .and_then(|p| p.parent())
+        .expect("market/ should be nested under Repos/dissertationapp/")
         .join("veilid")
 }
 
