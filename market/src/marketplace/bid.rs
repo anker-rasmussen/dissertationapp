@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use veilid_core::{PublicKey, RecordKey};
 
-use crate::traits::{RandomSource, SystemTimeProvider, ThreadRng, TimeProvider};
+use crate::config::now_unix;
+use crate::traits::{RandomSource, TimeProvider};
 
 /// A sealed bid for an auction listing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,13 +31,25 @@ pub struct Bid {
 impl Bid {
     /// Create a new sealed bid with commitment using default providers
     pub fn new(listing_key: RecordKey, bidder: PublicKey, amount: u64) -> Self {
-        Self::new_with_providers(
+        use rand::RngCore;
+        use sha2::{Digest, Sha256};
+
+        let mut nonce = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut nonce);
+
+        let mut hasher = Sha256::new();
+        hasher.update(amount.to_le_bytes());
+        hasher.update(nonce);
+        let commitment: [u8; 32] = hasher.finalize().into();
+
+        Self {
             listing_key,
             bidder,
             amount,
-            &ThreadRng::new(),
-            &SystemTimeProvider::new(),
-        )
+            timestamp: now_unix(),
+            commitment,
+            reveal_nonce: Some(nonce),
+        }
     }
 
     /// Create a new sealed bid with custom providers for testing
