@@ -28,6 +28,10 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 filter = 'all()'
 setup = 'setup-e2e-fast'
 
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 2 }
+fail-fast = false
+
 [scripts.setup.setup-e2e]
 command = 'scripts/setup-e2e.sh'
 
