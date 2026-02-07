@@ -322,20 +322,13 @@ where
         let data = message.to_bytes()?;
 
         // Send to winner's node directly
-        match self
-            .transport
-            .send(TransportTarget::Node(winner.clone()), data.clone())
+        self.transport
+            .send(TransportTarget::Node(winner.clone()), data)
             .await
-        {
-            Ok(()) => {
-                info!("Sent decryption hash directly to winner");
-                Ok(1)
-            }
-            Err(e) => {
-                warn!("Failed to send directly to winner: {}, broadcasting", e);
-                self.transport.broadcast(data).await
-            }
-        }
+            .map_err(|e| anyhow::anyhow!("Failed to send decryption hash to winner: {}", e))?;
+
+        info!("Sent decryption hash directly to winner");
+        Ok(1)
     }
 }
 
