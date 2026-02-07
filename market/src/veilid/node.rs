@@ -55,6 +55,9 @@ pub struct VeilidNode {
     state: Arc<RwLock<NodeState>>,
     data_dir: PathBuf,
     devnet_config: Option<DevNetConfig>,
+    /// Whether to use insecure (unencrypted) protected storage.
+    /// Defaults to `false` for production safety; set to `true` for devnet/test.
+    insecure_storage: bool,
     update_tx: mpsc::UnboundedSender<VeilidUpdate>,
     update_rx: Option<mpsc::UnboundedReceiver<VeilidUpdate>>,
 }
@@ -67,14 +70,27 @@ impl VeilidNode {
             state: Arc::new(RwLock::new(NodeState::default())),
             data_dir,
             devnet_config: None,
+            insecure_storage: false,
             update_tx,
             update_rx: Some(update_rx),
         }
     }
 
     /// Configure this node to connect to the local devnet (requires LD_PRELOAD)
+    ///
+    /// Automatically enables insecure storage for devnet use.
     pub fn with_devnet(mut self, config: DevNetConfig) -> Self {
         self.devnet_config = Some(config);
+        self.insecure_storage = true;
+        self
+    }
+
+    /// Explicitly set whether to use insecure (unencrypted) protected storage.
+    ///
+    /// In production this should remain `false` (the default).
+    /// Devnet mode sets this to `true` automatically via [`with_devnet`].
+    pub fn with_insecure_storage(mut self, insecure: bool) -> Self {
+        self.insecure_storage = insecure;
         self
     }
 
@@ -181,7 +197,7 @@ impl VeilidNode {
             namespace,
             capabilities,
             protected_store: VeilidConfigProtectedStore {
-                always_use_insecure_storage: self.devnet_config.is_some(),
+                always_use_insecure_storage: self.insecure_storage,
                 directory: protected_store_dir.to_string_lossy().to_string(),
                 ..Default::default()
             },
