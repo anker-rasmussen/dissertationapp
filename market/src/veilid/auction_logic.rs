@@ -12,10 +12,14 @@ use veilid_core::{PublicKey, RecordKey};
 
 use crate::config::subkeys;
 use crate::marketplace::{BidIndex, Listing};
-use crate::traits::{DhtStore, MessageTransport, MpcResult, MpcRunner, TimeProvider, TransportTarget};
+use crate::traits::{
+    DhtStore, MessageTransport, MpcResult, MpcRunner, TimeProvider, TransportTarget,
+};
 use crate::veilid::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use crate::veilid::bid_ops::BidOperations;
 use crate::veilid::bid_storage::BidStorage;
+
+type BidAnnouncementMap = Arc<Mutex<HashMap<String, Vec<(PublicKey, RecordKey)>>>>;
 
 /// Testable auction coordination logic.
 ///
@@ -37,7 +41,7 @@ where
     /// Listings we're monitoring
     watched_listings: Arc<Mutex<HashMap<RecordKey, Listing>>>,
     /// Collected bid announcements: Map<listing_key, Vec<(bidder, bid_record_key)>>
-    bid_announcements: Arc<Mutex<HashMap<String, Vec<(PublicKey, RecordKey)>>>>,
+    bid_announcements: BidAnnouncementMap,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
     decryption_keys: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -74,7 +78,10 @@ where
     /// Watch a listing for deadline.
     pub async fn watch_listing(&self, listing: Listing) {
         let mut watched = self.watched_listings.lock().await;
-        info!("Now watching listing '{}' for auction deadline", listing.title);
+        info!(
+            "Now watching listing '{}' for auction deadline",
+            listing.title
+        );
         watched.insert(listing.key.clone(), listing);
     }
 
@@ -198,7 +205,10 @@ where
                     bid_index.add_bid(bid_record);
                 }
                 Ok(None) => {
-                    warn!("No bid record found for bidder {} at {}", bidder, bid_record_key);
+                    warn!(
+                        "No bid record found for bidder {} at {}",
+                        bidder, bid_record_key
+                    );
                 }
                 Err(e) => {
                     warn!("Failed to fetch bid for {}: {}", bidder, e);
@@ -337,8 +347,7 @@ mod tests {
     use super::*;
     use crate::marketplace::BidRecord;
     use crate::mocks::{
-        make_test_public_key, make_test_record_key, MockDht, MockMpcRunner, MockTime,
-        MockTransport,
+        make_test_public_key, make_test_record_key, MockDht, MockMpcRunner, MockTime, MockTransport,
     };
 
     fn create_test_logic() -> AuctionLogic<MockDht, MockTransport, MockMpcRunner, MockTime> {
@@ -538,14 +547,7 @@ mod tests {
         // Set party 0 as winner
         mpc.set_winner(0).await;
 
-        let logic = AuctionLogic::new(
-            dht,
-            transport,
-            mpc.clone(),
-            time,
-            my_node_id,
-            bid_storage,
-        );
+        let logic = AuctionLogic::new(dht, transport, mpc.clone(), time, my_node_id, bid_storage);
 
         let result = logic.execute_mpc(0, 3, 100).await.unwrap();
 
@@ -571,14 +573,7 @@ mod tests {
         // Set party 2 as winner (not us)
         mpc.set_winner(2).await;
 
-        let logic = AuctionLogic::new(
-            dht,
-            transport,
-            mpc,
-            time,
-            my_node_id,
-            bid_storage,
-        );
+        let logic = AuctionLogic::new(dht, transport, mpc, time, my_node_id, bid_storage);
 
         let result = logic.execute_mpc(0, 3, 100).await.unwrap();
 
@@ -598,14 +593,7 @@ mod tests {
         transport.add_peer(make_test_public_key(2)).await;
         transport.add_peer(make_test_public_key(3)).await;
 
-        let logic = AuctionLogic::new(
-            dht,
-            transport.clone(),
-            mpc,
-            time,
-            my_node_id,
-            bid_storage,
-        );
+        let logic = AuctionLogic::new(dht, transport.clone(), mpc, time, my_node_id, bid_storage);
 
         let listing_key = make_test_record_key(1);
         let bid_key = make_test_record_key(10);
@@ -672,14 +660,7 @@ mod tests {
         let my_node_id = make_test_public_key(1);
         let bid_storage = BidStorage::new();
 
-        let logic = AuctionLogic::new(
-            dht,
-            transport,
-            mpc,
-            time.clone(),
-            my_node_id,
-            bid_storage,
-        );
+        let logic = AuctionLogic::new(dht, transport, mpc, time.clone(), my_node_id, bid_storage);
 
         // Create a listing that ends at time 4600 (1000 + 3600)
         let listing = make_test_listing(&time);
@@ -712,14 +693,7 @@ mod tests {
         transport.add_peer(make_test_public_key(2)).await;
         transport.add_peer(make_test_public_key(3)).await;
 
-        let logic = AuctionLogic::new(
-            dht,
-            transport.clone(),
-            mpc,
-            time,
-            my_node_id,
-            bid_storage,
-        );
+        let logic = AuctionLogic::new(dht, transport.clone(), mpc, time, my_node_id, bid_storage);
 
         let listing_key = make_test_record_key(1);
         let count = logic.send_decryption_request(&listing_key).await.unwrap();
@@ -743,14 +717,7 @@ mod tests {
         // Add winner as peer
         transport.add_peer(make_test_public_key(5)).await;
 
-        let logic = AuctionLogic::new(
-            dht,
-            transport.clone(),
-            mpc,
-            time,
-            my_node_id,
-            bid_storage,
-        );
+        let logic = AuctionLogic::new(dht, transport.clone(), mpc, time, my_node_id, bid_storage);
 
         let listing_key = make_test_record_key(1);
         let winner = make_test_public_key(5);
@@ -775,14 +742,7 @@ mod tests {
         let my_node_id = make_test_public_key(1);
         let bid_storage = BidStorage::new();
 
-        let logic = AuctionLogic::new(
-            dht.clone(),
-            transport,
-            mpc,
-            time,
-            my_node_id,
-            bid_storage,
-        );
+        let logic = AuctionLogic::new(dht.clone(), transport, mpc, time, my_node_id, bid_storage);
 
         let listing_key = make_test_record_key(1);
 
@@ -823,14 +783,7 @@ mod tests {
         // Set MPC to fail
         mpc.set_fail_mode(true).await;
 
-        let logic = AuctionLogic::new(
-            dht,
-            transport,
-            mpc,
-            time,
-            my_node_id,
-            bid_storage,
-        );
+        let logic = AuctionLogic::new(dht, transport, mpc, time, my_node_id, bid_storage);
 
         let result = logic.execute_mpc(0, 3, 100).await;
         assert!(result.is_err());

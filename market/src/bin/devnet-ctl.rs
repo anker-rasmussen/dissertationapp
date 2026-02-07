@@ -53,13 +53,7 @@ fn start_devnet() -> Result<(), String> {
 
     eprintln!("[devnet-ctl] Starting devnet...");
     let output = Command::new("docker")
-        .args([
-            "compose",
-            "-f",
-            compose_path.to_str().unwrap(),
-            "up",
-            "-d",
-        ])
+        .args(["compose", "-f", compose_path.to_str().unwrap(), "up", "-d"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -187,10 +181,7 @@ fn check_status() -> Result<(), String> {
     }
 
     // Count healthy nodes
-    let healthy_count = stdout
-        .lines()
-        .filter(|l| l.contains("healthy"))
-        .count();
+    let healthy_count = stdout.lines().filter(|l| l.contains("healthy")).count();
 
     eprintln!();
     if healthy_count == 5 {
@@ -209,7 +200,10 @@ fn check_status() -> Result<(), String> {
     } else {
         eprintln!();
         eprintln!("[devnet-ctl] WARNING: libipspoof.so not found!");
-        eprintln!("Build with: cd {} && make libipspoof.so", libipspoof.parent().unwrap().display());
+        eprintln!(
+            "Build with: cd {} && make libipspoof.so",
+            libipspoof.parent().unwrap().display()
+        );
     }
 
     Ok(())
@@ -235,12 +229,12 @@ fn wait_for_health(timeout_secs: u64) -> Result<(), String> {
             .map_err(|e| format!("Failed to check health: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let healthy_count = stdout
-            .lines()
-            .filter(|l| l.contains("healthy"))
-            .count();
+        let healthy_count = stdout.lines().filter(|l| l.contains("healthy")).count();
 
-        eprintln!("[devnet-ctl] Health check: {}/5 nodes healthy", healthy_count);
+        eprintln!(
+            "[devnet-ctl] Health check: {}/5 nodes healthy",
+            healthy_count
+        );
 
         if healthy_count >= 5 {
             return Ok(());

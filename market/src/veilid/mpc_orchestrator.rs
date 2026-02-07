@@ -4,16 +4,22 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
-use veilid_core::{PublicKey, RecordKey, RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target, VeilidAPI};
+use veilid_core::{
+    PublicKey, RecordKey, RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target,
+    VeilidAPI,
+};
 
-use crate::config;
-use crate::marketplace::BidIndex;
 use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use super::bid_ops::BidOperations;
 use super::bid_storage::BidStorage;
 use super::dht::DHTOperations;
 use super::mpc::MpcSidecar;
 use super::mpc_routes::MpcRouteManager;
+use crate::config;
+use crate::marketplace::BidIndex;
+
+type RouteManagerMap = Arc<Mutex<HashMap<String, Arc<Mutex<MpcRouteManager>>>>>;
+type VerificationMap = Arc<Mutex<HashMap<String, (PublicKey, u64, Option<bool>)>>>;
 
 /// Orchestrates MPC execution: route exchange, sidecar lifecycle, bid verification.
 ///
@@ -28,9 +34,9 @@ pub struct MpcOrchestrator {
     /// Currently active MPC sidecar (if any)
     active_sidecar: Arc<Mutex<Option<MpcSidecar>>>,
     /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
-    route_managers: Arc<Mutex<HashMap<String, Arc<Mutex<MpcRouteManager>>>>>,
+    route_managers: RouteManagerMap,
     /// Pending verifications: listing_key -> (winner_pubkey, mpc_winning_bid, verified?)
-    pending_verifications: Arc<Mutex<HashMap<String, (PublicKey, u64, Option<bool>)>>>,
+    pending_verifications: VerificationMap,
 }
 
 impl MpcOrchestrator {
@@ -54,12 +60,12 @@ impl MpcOrchestrator {
     }
 
     /// Access to route managers (needed by AuctionCoordinator for message handling)
-    pub fn route_managers(&self) -> &Arc<Mutex<HashMap<String, Arc<Mutex<MpcRouteManager>>>>> {
+    pub fn route_managers(&self) -> &RouteManagerMap {
         &self.route_managers
     }
 
     /// Access to pending verifications (needed by AuctionCoordinator for message handling)
-    pub fn pending_verifications(&self) -> &Arc<Mutex<HashMap<String, (PublicKey, u64, Option<bool>)>>> {
+    pub fn pending_verifications(&self) -> &VerificationMap {
         &self.pending_verifications
     }
 
@@ -81,7 +87,10 @@ impl MpcOrchestrator {
                 0, // Placeholder party ID, will be determined when auction ends
             )));
             managers.insert(key.clone(), route_manager);
-            info!("Created route manager for listing {} to receive route announcements", listing_key);
+            info!(
+                "Created route manager for listing {} to receive route announcements",
+                listing_key
+            );
         }
     }
 
@@ -119,16 +128,29 @@ impl MpcOrchestrator {
 
         match my_party_id {
             Some(party_id) => {
-                info!("I am Party {} in this {}-party auction", party_id, sorted_bidders.len());
+                info!(
+                    "I am Party {} in this {}-party auction",
+                    party_id,
+                    sorted_bidders.len()
+                );
 
                 // Exchange routes with other parties
-                let routes = self.exchange_mpc_routes(listing_key, party_id, &sorted_bidders).await?;
+                let routes = self
+                    .exchange_mpc_routes(listing_key, party_id, &sorted_bidders)
+                    .await?;
 
                 // Wait for all parties to be ready
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
                 // Trigger MPC execution
-                self.execute_mpc_auction(party_id, sorted_bidders.len(), &bid_index, routes, &sorted_bidders).await?;
+                self.execute_mpc_auction(
+                    party_id,
+                    sorted_bidders.len(),
+                    &bid_index,
+                    routes,
+                    &sorted_bidders,
+                )
+                .await?;
             }
             None => {
                 debug!("Not a bidder in this auction, skipping MPC participation");
@@ -145,7 +167,11 @@ impl MpcOrchestrator {
         my_party_id: usize,
         bidders: &[PublicKey],
     ) -> Result<HashMap<usize, RouteId>> {
-        info!("Exchanging MPC routes with {} parties for listing {}", bidders.len(), listing_key);
+        info!(
+            "Exchanging MPC routes with {} parties for listing {}",
+            bidders.len(),
+            listing_key
+        );
 
         // Get existing route manager or create a new one
         let key = listing_key.to_string();
@@ -167,23 +193,29 @@ impl MpcOrchestrator {
             mgr.create_route().await?
         };
 
-        info!("Created Veilid route for Party {}: {}", my_party_id, my_route_id);
+        info!(
+            "Created Veilid route for Party {}: {}",
+            my_party_id, my_route_id
+        );
 
         // Broadcast our route
         {
             let mgr = route_manager.lock().await;
             let my_pubkey = &bidders[my_party_id];
-            mgr.broadcast_route_announcement(listing_key, my_pubkey).await?;
+            mgr.broadcast_route_announcement(listing_key, my_pubkey)
+                .await?;
         }
 
         // Register our own route (so we include ourselves in the assembly)
         {
             let mgr = route_manager.lock().await;
             let my_pubkey = bidders[my_party_id].clone();
-            let my_route_blob = mgr.get_my_route_blob()
+            let my_route_blob = mgr
+                .get_my_route_blob()
                 .ok_or_else(|| anyhow::anyhow!("Route blob not found"))?
                 .clone();
-            mgr.register_route_announcement(my_pubkey, my_route_blob).await?;
+            mgr.register_route_announcement(my_pubkey, my_route_blob)
+                .await?;
         }
 
         // Wait for routes (2s initial + check every 1s up to 5s total)
@@ -219,11 +251,17 @@ impl MpcOrchestrator {
         routes: HashMap<usize, RouteId>,
         all_parties: &[PublicKey],
     ) -> Result<()> {
-        info!("Executing {}-party MPC auction as Party {} (Shamir)", num_parties, party_id);
+        info!(
+            "Executing {}-party MPC auction as Party {} (Shamir)",
+            num_parties, party_id
+        );
 
         // Get my bid value from storage
         let listing_key = &bid_index.listing_key;
-        let (bid_value, _nonce) = self.bid_storage.get_bid(listing_key).await
+        let (bid_value, _nonce) = self
+            .bid_storage
+            .get_bid(listing_key)
+            .await
             .ok_or_else(|| anyhow::anyhow!("Bid value not found in storage"))?;
 
         info!("My bid value: {}", bid_value);
@@ -249,10 +287,14 @@ impl MpcOrchestrator {
         for _ in 0..num_parties {
             hosts_content.push_str("127.0.0.1\n");
         }
-        std::fs::write(&hosts_file_path, &hosts_content)
-            .map_err(|e| anyhow::anyhow!("Failed to write hosts file {:?}: {}", hosts_file_path, e))?;
+        std::fs::write(&hosts_file_path, &hosts_content).map_err(|e| {
+            anyhow::anyhow!("Failed to write hosts file {:?}: {}", hosts_file_path, e)
+        })?;
 
-        info!("Wrote hosts file to {:?} for {} parties", hosts_file_path, num_parties);
+        info!(
+            "Wrote hosts file to {:?} for {} parties",
+            hosts_file_path, num_parties
+        );
 
         // Wait for all parties to be ready
         info!("Waiting 5 seconds for all parties to be ready...");
@@ -273,7 +315,10 @@ impl MpcOrchestrator {
                 let stderr = String::from_utf8_lossy(&result.stderr);
 
                 if result.status.success() {
-                    info!("Successfully compiled auction_n for {} parties", num_parties);
+                    info!(
+                        "Successfully compiled auction_n for {} parties",
+                        num_parties
+                    );
                     if !stdout.is_empty() {
                         info!("Compile output: {}", stdout);
                     }
@@ -282,7 +327,10 @@ impl MpcOrchestrator {
                     if !stderr.is_empty() {
                         error!("Compile errors: {}", stderr);
                     }
-                    return Err(anyhow::anyhow!("Failed to compile MPC program for {} parties", num_parties));
+                    return Err(anyhow::anyhow!(
+                        "Failed to compile MPC program for {} parties",
+                        num_parties
+                    ));
                 }
             }
             Err(e) => {
@@ -291,7 +339,10 @@ impl MpcOrchestrator {
         }
 
         // Execute MP-SPDZ with Shamir party executable (interactive mode: bid via stdin)
-        info!("Executing MP-SPDZ auction_n-{} program (Shamir, interactive)...", num_parties);
+        info!(
+            "Executing MP-SPDZ auction_n-{} program (Shamir, interactive)...",
+            num_parties
+        );
 
         let program_name = format!("auction_n-{}", num_parties);
         let spawn_result = Command::new(format!("{}/shamir-party.x", mp_spdz_dir))
@@ -301,10 +352,10 @@ impl MpcOrchestrator {
             .arg("-N")
             .arg(num_parties.to_string())
             .arg("-OF")
-            .arg(".")  // Output to stdout
+            .arg(".") // Output to stdout
             .arg("-ip")
             .arg(hosts_file_path.to_str().unwrap_or("HOSTS"))
-            .arg("-I")  // Interactive mode: read inputs from stdin
+            .arg("-I") // Interactive mode: read inputs from stdin
             .arg(&program_name)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -322,10 +373,13 @@ impl MpcOrchestrator {
         // Write bid value to stdin, then close the pipe (EOF)
         {
             use std::io::Write;
-            let stdin = child.stdin.take()
+            let stdin = child
+                .stdin
+                .take()
                 .ok_or_else(|| anyhow::anyhow!("Failed to open stdin pipe to shamir-party.x"))?;
             let mut stdin = stdin;
-            stdin.write_all(format!("{}\n", bid_value).as_bytes())
+            stdin
+                .write_all(format!("{}\n", bid_value).as_bytes())
                 .map_err(|e| anyhow::anyhow!("Failed to write bid value to stdin: {}", e))?;
             // stdin is dropped here, sending EOF
         }
@@ -356,7 +410,7 @@ impl MpcOrchestrator {
 
                     for line in stdout.lines() {
                         if line.contains("Winning bid:") {
-                            if let Some(bid_str) = line.split(':').last() {
+                            if let Some(bid_str) = line.split(':').next_back() {
                                 winning_bid = bid_str.trim().parse().ok();
                                 if let Some(bid) = winning_bid {
                                     info!("Parsed winning bid from MPC output: {}", bid);
@@ -364,6 +418,7 @@ impl MpcOrchestrator {
                             }
                         }
                         if line.contains("Winner: Party") {
+                            #[allow(clippy::double_ended_iterator_last)]
                             if let Some(party_str) = line.split("Party").last() {
                                 winner_party_id = party_str.trim().parse().ok();
                                 if let Some(pid) = winner_party_id {
@@ -383,15 +438,28 @@ impl MpcOrchestrator {
                             let key = listing_key.to_string();
 
                             // Store pending verification entry
-                            self.pending_verifications.lock().await
+                            self.pending_verifications
+                                .lock()
+                                .await
                                 .insert(key, (winner_pubkey.clone(), bid, None));
-                            info!("Stored pending verification: winner={}, bid={}", winner_pubkey, bid);
+                            info!(
+                                "Stored pending verification: winner={}, bid={}",
+                                winner_pubkey, bid
+                            );
 
                             // Send WinnerDecryptionRequest to winner via their MPC route (challenge)
-                            info!("Sending challenge (WinnerDecryptionRequest) to winner {}", winner_pubkey);
-                            self.send_winner_challenge(listing_key, &winner_pubkey).await;
+                            info!(
+                                "Sending challenge (WinnerDecryptionRequest) to winner {}",
+                                winner_pubkey
+                            );
+                            self.send_winner_challenge(listing_key, &winner_pubkey)
+                                .await;
                         } else {
-                            error!("Winner party ID {} out of range (only {} parties)", winner_pid, all_parties.len());
+                            error!(
+                                "Winner party ID {} out of range (only {} parties)",
+                                winner_pid,
+                                all_parties.len()
+                            );
                         }
                     } else {
                         warn!("Could not parse winner/bid from MPC output");
@@ -452,7 +520,8 @@ impl MpcOrchestrator {
 
     /// Create a routing context suitable for sending to private routes.
     pub fn safe_routing_context(&self) -> Result<veilid_core::RoutingContext> {
-        self.api.routing_context()
+        self.api
+            .routing_context()
             .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
             .with_safety(SafetySelection::Safe(SafetySpec {
                 preferred_route: None,
@@ -473,8 +542,16 @@ impl MpcOrchestrator {
     }
 
     /// Send decryption hash to auction winner via their MPC route
-    pub async fn send_decryption_hash(&self, listing_key: &RecordKey, winner: &PublicKey, decryption_hash: &str) -> Result<()> {
-        info!("Sending decryption hash to winner {} for listing {}", winner, listing_key);
+    pub async fn send_decryption_hash(
+        &self,
+        listing_key: &RecordKey,
+        winner: &PublicKey,
+        decryption_hash: &str,
+    ) -> Result<()> {
+        info!(
+            "Sending decryption hash to winner {} for listing {}",
+            winner, listing_key
+        );
 
         let message = AuctionMessage::decryption_hash_transfer(
             listing_key.clone(),
@@ -501,32 +578,50 @@ impl MpcOrchestrator {
                 let routing_context = self.safe_routing_context()?;
 
                 let route_display = winner_route.clone();
-                match routing_context.app_message(Target::RouteId(winner_route), data).await {
+                match routing_context
+                    .app_message(Target::RouteId(winner_route), data)
+                    .await
+                {
                     Ok(_) => {
-                        info!("Successfully sent decryption hash to winner via MPC route {}", route_display);
+                        info!(
+                            "Successfully sent decryption hash to winner via MPC route {}",
+                            route_display
+                        );
                         self.cleanup_route_manager(listing_key).await;
-                        return Ok(());
+                        Ok(())
                     }
                     Err(e) => {
                         error!("Failed to send to winner's MPC route: {}", e);
-                        return Err(anyhow::anyhow!("Failed to send decryption hash: {}", e));
+                        Err(anyhow::anyhow!("Failed to send decryption hash: {}", e))
                     }
                 }
             } else {
                 drop(routes);
                 drop(mgr);
                 drop(managers);
-                return Err(anyhow::anyhow!("Winner's MPC route not found in route manager for listing {}", listing_key));
+                Err(anyhow::anyhow!(
+                    "Winner's MPC route not found in route manager for listing {}",
+                    listing_key
+                ))
             }
         } else {
             drop(managers);
-            return Err(anyhow::anyhow!("Route manager not found for listing {}", listing_key));
+            Err(anyhow::anyhow!(
+                "Route manager not found for listing {}",
+                listing_key
+            ))
         }
     }
 
     /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style)
-    pub async fn verify_winner_reveal(&self, listing_key: &RecordKey, winner: &PublicKey, bid_value: u64, nonce: &[u8; 32]) -> bool {
-        use sha2::{Sha256, Digest};
+    pub async fn verify_winner_reveal(
+        &self,
+        listing_key: &RecordKey,
+        winner: &PublicKey,
+        bid_value: u64,
+        nonce: &[u8; 32],
+    ) -> bool {
+        use sha2::{Digest, Sha256};
 
         // 1. Get pending verification to check expected winning bid
         let key = listing_key.to_string();
@@ -534,7 +629,10 @@ impl MpcOrchestrator {
         let expected_bid = match verifications.get(&key) {
             Some((expected_winner, expected_bid, _)) => {
                 if expected_winner != winner {
-                    warn!("Winner mismatch: expected {}, got {}", expected_winner, winner);
+                    warn!(
+                        "Winner mismatch: expected {}, got {}",
+                        expected_winner, winner
+                    );
                     return false;
                 }
                 *expected_bid
@@ -548,7 +646,10 @@ impl MpcOrchestrator {
 
         // 2. Check bid value matches MPC output
         if bid_value != expected_bid {
-            warn!("Bid value mismatch: revealed {} but MPC output was {}", bid_value, expected_bid);
+            warn!(
+                "Bid value mismatch: revealed {} but MPC output was {}",
+                bid_value, expected_bid
+            );
             return false;
         }
 
@@ -575,13 +676,14 @@ impl MpcOrchestrator {
             }
         };
 
-        let winner_bid_record_key = match registry.announcements.iter().find(|(b, _, _)| b == winner) {
-            Some((_, key, _)) => key.clone(),
-            None => {
-                warn!("Winner {} not found in bid registry", winner);
-                return false;
-            }
-        };
+        let winner_bid_record_key =
+            match registry.announcements.iter().find(|(b, _, _)| b == winner) {
+                Some((_, key, _)) => key.clone(),
+                None => {
+                    warn!("Winner {} not found in bid registry", winner);
+                    return false;
+                }
+            };
 
         let bid_record = match bid_ops.fetch_bid(&winner_bid_record_key).await {
             Ok(Some(record)) => record,
@@ -607,7 +709,10 @@ impl MpcOrchestrator {
             return false;
         }
 
-        info!("Commitment verified for winner {} with bid value {}", winner, bid_value);
+        info!(
+            "Commitment verified for winner {} with bid value {}",
+            winner, bid_value
+        );
         true
     }
 
@@ -628,7 +733,10 @@ impl MpcOrchestrator {
         let bidder_list = match registry_data {
             Some(data) => {
                 let registry = BidAnnouncementRegistry::from_bytes(&data)?;
-                info!("Found {} bidders in DHT bid registry", registry.announcements.len());
+                info!(
+                    "Found {} bidders in DHT bid registry",
+                    registry.announcements.len()
+                );
                 registry.announcements
             }
             None => {
@@ -638,7 +746,9 @@ impl MpcOrchestrator {
                     Some(list) => {
                         info!("Found {} bidders in local announcements", list.len());
                         list.iter()
-                            .map(|(bidder, bid_record_key)| (bidder.clone(), bid_record_key.clone(), 0))
+                            .map(|(bidder, bid_record_key)| {
+                                (bidder.clone(), bid_record_key.clone(), 0)
+                            })
                             .collect()
                     }
                     None => {
@@ -651,7 +761,10 @@ impl MpcOrchestrator {
 
         // Fetch each bidder's BidRecord from the DHT
         for (bidder, bid_record_key, _timestamp) in &bidder_list {
-            info!("Fetching bid record for bidder {} at {}", bidder, bid_record_key);
+            info!(
+                "Fetching bid record for bidder {} at {}",
+                bidder, bid_record_key
+            );
 
             match bid_ops.fetch_bid(bid_record_key).await {
                 Ok(Some(bid_record)) => {
@@ -659,7 +772,10 @@ impl MpcOrchestrator {
                     bid_index.add_bid(bid_record);
                 }
                 Ok(None) => {
-                    warn!("No bid record found for bidder {} at {}", bidder, bid_record_key);
+                    warn!(
+                        "No bid record found for bidder {} at {}",
+                        bidder, bid_record_key
+                    );
                 }
                 Err(e) => {
                     warn!("Failed to fetch bid record for bidder {}: {}", bidder, e);
@@ -667,16 +783,17 @@ impl MpcOrchestrator {
             }
         }
 
-        info!("Built BidIndex with {} bids from DHT registry", bid_index.bids.len());
+        info!(
+            "Built BidIndex with {} bids from DHT registry",
+            bid_index.bids.len()
+        );
         Ok(bid_index)
     }
 
     /// Send WinnerDecryptionRequest challenge to winner via their MPC route
     pub async fn send_winner_challenge(&self, listing_key: &RecordKey, winner: &PublicKey) {
-        let message = AuctionMessage::winner_decryption_request(
-            listing_key.clone(),
-            self.my_node_id.clone(),
-        );
+        let message =
+            AuctionMessage::winner_decryption_request(listing_key.clone(), self.my_node_id.clone());
 
         let data = match message.to_bytes() {
             Ok(d) => d,
@@ -706,8 +823,13 @@ impl MpcOrchestrator {
                     }
                 };
 
-                match routing_context.app_message(Target::RouteId(winner_route), data).await {
-                    Ok(_) => info!("Sent WinnerDecryptionRequest challenge to winner via MPC route"),
+                match routing_context
+                    .app_message(Target::RouteId(winner_route), data)
+                    .await
+                {
+                    Ok(_) => {
+                        info!("Sent WinnerDecryptionRequest challenge to winner via MPC route")
+                    }
                     Err(e) => error!("Failed to send challenge to winner: {}", e),
                 }
             } else {

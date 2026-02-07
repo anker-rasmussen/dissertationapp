@@ -364,9 +364,18 @@ mod tests {
         dht.set_subkey(&record, 2, b"two".to_vec()).await.unwrap();
 
         // Read them back
-        assert_eq!(dht.get_subkey(&key, 0).await.unwrap(), Some(b"zero".to_vec()));
-        assert_eq!(dht.get_subkey(&key, 1).await.unwrap(), Some(b"one".to_vec()));
-        assert_eq!(dht.get_subkey(&key, 2).await.unwrap(), Some(b"two".to_vec()));
+        assert_eq!(
+            dht.get_subkey(&key, 0).await.unwrap(),
+            Some(b"zero".to_vec())
+        );
+        assert_eq!(
+            dht.get_subkey(&key, 1).await.unwrap(),
+            Some(b"one".to_vec())
+        );
+        assert_eq!(
+            dht.get_subkey(&key, 2).await.unwrap(),
+            Some(b"two".to_vec())
+        );
         assert_eq!(dht.get_subkey(&key, 3).await.unwrap(), None);
     }
 

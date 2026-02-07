@@ -8,25 +8,15 @@ use tracing::{debug, error, info, warn};
 use veilid_core::{
     api_startup, VeilidAPI, VeilidConfig, VeilidConfigCapabilities, VeilidConfigNetwork,
     VeilidConfigProtectedStore, VeilidConfigProtocol, VeilidConfigRoutingTable, VeilidConfigTCP,
-    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate,
-    VEILID_CAPABILITY_RELAY, VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
+    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate, VEILID_CAPABILITY_RELAY,
+    VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct NodeState {
     pub is_attached: bool,
     pub peer_count: usize,
     pub node_ids: Vec<String>,
-}
-
-impl Default for NodeState {
-    fn default() -> Self {
-        Self {
-            is_attached: false,
-            peer_count: 0,
-            node_ids: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -130,7 +120,7 @@ impl VeilidNode {
                     limit_fully_attached: 6,
                     limit_attached_strong: 4,
                     limit_attached_good: 3,
-                    limit_attached_weak: 2,  // Reach "AttachedWeak" with just 2 good peers
+                    limit_attached_weak: 2, // Reach "AttachedWeak" with just 2 good peers
                     ..Default::default()
                 },
                 protocol: VeilidConfigProtocol {
@@ -155,7 +145,6 @@ impl VeilidNode {
                         path: "ws".to_string(),
                         url: None,
                     },
-                    ..Default::default()
                 },
                 ..Default::default()
             }
@@ -180,7 +169,8 @@ impl VeilidNode {
             VeilidConfigCapabilities::default()
         };
 
-        let namespace = self.data_dir
+        let namespace = self
+            .data_dir
             .file_name()
             .and_then(|s| s.to_str())
             .map(|s| format!("smpc-auction-{}", s))
@@ -188,7 +178,7 @@ impl VeilidNode {
 
         let config = VeilidConfig {
             program_name: "market".into(),
-            namespace: namespace.into(),
+            namespace,
             capabilities,
             protected_store: VeilidConfigProtectedStore {
                 always_use_insecure_storage: self.devnet_config.is_some(),
@@ -215,11 +205,7 @@ impl VeilidNode {
                 VeilidUpdate::Network(network) => {
                     let mut state = state.write();
                     state.peer_count = network.peers.len();
-                    state.node_ids = network
-                        .node_ids
-                        .iter()
-                        .map(|id| id.to_string())
-                        .collect();
+                    state.node_ids = network.node_ids.iter().map(|id| id.to_string()).collect();
                     debug!(
                         "Network update: {} peers, node_ids: {:?}",
                         state.peer_count, state.node_ids
@@ -273,7 +259,9 @@ impl VeilidNode {
     pub async fn detach(&self) -> Result<()> {
         let api = self.api.as_ref().context("Veilid node not started")?;
         info!("Detaching from Veilid network...");
-        api.detach().await.context("Failed to detach from network")?;
+        api.detach()
+            .await
+            .context("Failed to detach from network")?;
         info!("Detached from network");
         Ok(())
     }

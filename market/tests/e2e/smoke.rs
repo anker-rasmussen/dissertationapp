@@ -33,8 +33,10 @@ use veilid_core::PublicKey;
 /// with debug for veilid_core and market crates.
 fn init_test_tracing() {
     let _ = tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info,veilid_core=debug,market=debug")))
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,veilid_core=debug,market=debug")),
+        )
         .with(tracing_subscriber::fmt::layer().with_test_writer())
         .try_init();
 }
@@ -44,14 +46,12 @@ const VEILID_REPO_PATH: &str = "/home/broadcom/Repos/Dissertation/Repos/veilid";
 
 /// Path to libipspoof.so for IP translation in devnet.
 fn libipspoof_path() -> PathBuf {
-    PathBuf::from(VEILID_REPO_PATH)
-        .join(".devcontainer/scripts/libipspoof.so")
+    PathBuf::from(VEILID_REPO_PATH).join(".devcontainer/scripts/libipspoof.so")
 }
 
 /// Path to docker-compose file for devnet.
 fn docker_compose_path() -> PathBuf {
-    PathBuf::from(VEILID_REPO_PATH)
-        .join(".devcontainer/compose/docker-compose.dev.yml")
+    PathBuf::from(VEILID_REPO_PATH).join(".devcontainer/compose/docker-compose.dev.yml")
 }
 
 /// Check if running in fast mode (persistent devnet)
@@ -209,7 +209,8 @@ impl DevnetManager {
 
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let healthy_count = stdout.lines()
+                let healthy_count = stdout
+                    .lines()
                     .filter(|line| line.contains("healthy"))
                     .count();
 
@@ -228,14 +229,12 @@ impl DevnetManager {
             if start.elapsed().as_secs() > timeout_secs {
                 // Print current status for debugging
                 let _ = Command::new("docker")
-                    .args([
-                        "compose",
-                        "-f",
-                        self.compose_path.to_str().unwrap(),
-                        "ps",
-                    ])
+                    .args(["compose", "-f", self.compose_path.to_str().unwrap(), "ps"])
                     .status();
-                anyhow::bail!("Devnet failed to become healthy within {} seconds", timeout_secs);
+                anyhow::bail!(
+                    "Devnet failed to become healthy within {} seconds",
+                    timeout_secs
+                );
             }
 
             std::thread::sleep(Duration::from_secs(5));
@@ -248,10 +247,9 @@ impl DevnetManager {
         let ports = [5160, 5161, 5162, 5163, 5164];
         for port in ports {
             let addr = format!("127.0.0.1:{}", port);
-            if std::net::TcpStream::connect_timeout(
-                &addr.parse().unwrap(),
-                Duration::from_secs(1),
-            ).is_err() {
+            if std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_secs(1))
+                .is_err()
+            {
                 eprintln!("[E2E] Port {} not yet reachable", port);
                 return false;
             }
@@ -280,7 +278,7 @@ impl DevnetManager {
                 "-f",
                 self.compose_path.to_str().unwrap(),
                 "down",
-                "-v",  // Remove volumes
+                "-v", // Remove volumes
                 "--remove-orphans",
             ])
             .stdout(Stdio::piped())
@@ -473,8 +471,7 @@ fn setup_e2e_environment() -> anyhow::Result<DevnetManager> {
 async fn test_e2e_node_attachment() {
     init_test_tracing();
 
-    let _devnet = setup_e2e_environment()
-        .expect("E2E setup failed - check LD_PRELOAD and Docker");
+    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
     // Use offsets 6-39 to stay within libipspoof's MAX_PORT_OFFSET range (40)
     // Devnet uses offsets 0-4 (ports 5160-5164)
@@ -511,14 +508,9 @@ async fn test_e2e_node_attachment() {
 async fn test_e2e_multi_node_connectivity() {
     init_test_tracing();
 
-    let _devnet = setup_e2e_environment()
-        .expect("E2E setup failed - check LD_PRELOAD and Docker");
+    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
-    let mut nodes = vec![
-        TestNode::new(11),
-        TestNode::new(12),
-        TestNode::new(13),
-    ];
+    let mut nodes = vec![TestNode::new(11), TestNode::new(12), TestNode::new(13)];
 
     // Start all nodes
     let result = timeout(Duration::from_secs(180), async {
@@ -556,8 +548,7 @@ async fn test_e2e_multi_node_connectivity() {
 async fn test_e2e_dht_operations() {
     init_test_tracing();
 
-    let _devnet = setup_e2e_environment()
-        .expect("E2E setup failed - check LD_PRELOAD and Docker");
+    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
     let mut node1 = TestNode::new(14);
     let mut node2 = TestNode::new(15);
@@ -628,8 +619,7 @@ async fn test_e2e_dht_operations() {
 async fn test_e2e_real_devnet_3_party_auction() {
     init_test_tracing();
 
-    let _devnet = setup_e2e_environment()
-        .expect("E2E setup failed - check LD_PRELOAD and Docker");
+    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
     let mut seller_node = TestNode::new(20);
     let mut bidder1_node = TestNode::new(21);
@@ -682,13 +672,17 @@ async fn test_e2e_real_devnet_3_party_auction() {
         let auction_end = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600; // 1 hour from now
-        let mut listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
+            .as_secs()
+            + 3600; // 1 hour from now
+        let mut listing =
+            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
         let listing_ops = ListingOperations::new(seller_dht.clone());
-        listing_ops.update_listing(&listing_record, &listing).await?;
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
 
         // Register listing in the SHARED REGISTRY (visible to all nodes on devnet)
         let mut seller_registry = RegistryOperations::new(seller_dht.clone());
@@ -717,20 +711,41 @@ async fn test_e2e_real_devnet_3_party_auction() {
         // Bidder1 fetches the registry to discover listings
         let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone());
         let registry = bidder1_registry.fetch_registry().await?;
-        eprintln!("[E2E] Bidder1 fetched registry with {} listings", registry.listings.len());
+        eprintln!(
+            "[E2E] Bidder1 fetched registry with {} listings",
+            registry.listings.len()
+        );
 
-        assert!(!registry.listings.is_empty(), "Registry should have at least one listing");
-        let found_listing = registry.listings.iter().find(|e| e.key == listing_record.key.to_string());
-        assert!(found_listing.is_some(), "Our listing should be in the registry");
+        assert!(
+            !registry.listings.is_empty(),
+            "Registry should have at least one listing"
+        );
+        let found_listing = registry
+            .listings
+            .iter()
+            .find(|e| e.key == listing_record.key.to_string());
+        assert!(
+            found_listing.is_some(),
+            "Our listing should be in the registry"
+        );
 
         // Bidder1 can also fetch the full listing from the listing's DHT record
         let bidder1_listing_ops = ListingOperations::new(bidder1_dht.clone());
         let retrieved = bidder1_listing_ops.get_listing(&listing_record.key).await?;
-        assert!(retrieved.is_some(), "Listing should be retrievable by bidder1");
+        assert!(
+            retrieved.is_some(),
+            "Listing should be retrievable by bidder1"
+        );
 
         let retrieved_listing = retrieved.unwrap();
-        assert_eq!(retrieved_listing.title, listing.title, "Listing title should match");
-        assert_eq!(retrieved_listing.reserve_price, listing.reserve_price, "Reserve price should match");
+        assert_eq!(
+            retrieved_listing.title, listing.title,
+            "Listing title should match"
+        );
+        assert_eq!(
+            retrieved_listing.reserve_price, listing.reserve_price,
+            "Reserve price should match"
+        );
 
         eprintln!("[E2E] Listing successfully created, registered, and discovered via registry");
 
@@ -763,10 +778,17 @@ async fn test_e2e_real_devnet_3_party_auction() {
             timestamp: now,
             bid_key: seller_bid_record.key.clone(),
         };
-        seller_bid_ops.register_bid(&listing_record, seller_bid).await?;
+        seller_bid_ops
+            .register_bid(&listing_record, seller_bid)
+            .await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller placed their own bid (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller placed their own bid (bid_count={})",
+            listing.bid_count
+        );
 
         // Bidder1 creates their own bid record (they own this)
         let bid1_record = bidder1_dht.create_dht_record().await?;
@@ -781,8 +803,13 @@ async fn test_e2e_real_devnet_3_party_auction() {
         };
         seller_bid_ops.register_bid(&listing_record, bid1).await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller registered bid from Bidder1 (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller registered bid from Bidder1 (bid_count={})",
+            listing.bid_count
+        );
 
         // Bidder2 creates their own bid record
         let bidder2_dht = bidder2_node
@@ -801,8 +828,13 @@ async fn test_e2e_real_devnet_3_party_auction() {
         };
         seller_bid_ops.register_bid(&listing_record, bid2).await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller registered bid from Bidder2 (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller registered bid from Bidder2 (bid_count={})",
+            listing.bid_count
+        );
 
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -811,15 +843,27 @@ async fn test_e2e_real_devnet_3_party_auction() {
         let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
         eprintln!("[E2E] Bid index has {} bids", bid_index.bids.len());
 
-        assert_eq!(bid_index.bids.len(), 3, "Should have 3 bids registered (seller + 2 bidders)");
+        assert_eq!(
+            bid_index.bids.len(),
+            3,
+            "Should have 3 bids registered (seller + 2 bidders)"
+        );
 
         // ========== VERIFY LISTING BID_COUNT FROM ANOTHER NODE ==========
         // Read back the listing from bidder1's perspective to verify bid_count was saved
         let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
-        let verified_listing = bidder1_listing_ops_verify.get_listing(&listing_record.key).await?
+        let verified_listing = bidder1_listing_ops_verify
+            .get_listing(&listing_record.key)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
-        eprintln!("[E2E] Verified listing from bidder1: bid_count={}", verified_listing.bid_count);
-        assert_eq!(verified_listing.bid_count, 3, "Listing bid_count should be 3 after all bids");
+        eprintln!(
+            "[E2E] Verified listing from bidder1: bid_count={}",
+            verified_listing.bid_count
+        );
+        assert_eq!(
+            verified_listing.bid_count, 3,
+            "Listing bid_count should be 3 after all bids"
+        );
 
         eprintln!("[E2E] Full 3-party auction flow completed with 3 bids!");
         eprintln!("[E2E] Listing key: {}", listing_record.key);
@@ -854,8 +898,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
 async fn test_e2e_coordinator_messaging() {
     init_test_tracing();
 
-    let _devnet = setup_e2e_environment()
-        .expect("E2E setup failed - check LD_PRELOAD and Docker");
+    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
     let mut node1 = TestNode::new(30);
     let mut node2 = TestNode::new(31);
@@ -895,7 +938,11 @@ async fn test_e2e_coordinator_messaging() {
 
         // Register a local bid
         coordinator1
-            .register_local_bid(&listing_record.key, node1_id.clone(), bid_record.key.clone())
+            .register_local_bid(
+                &listing_record.key,
+                node1_id.clone(),
+                bid_record.key.clone(),
+            )
             .await;
 
         // Verify bid count
@@ -928,8 +975,7 @@ async fn test_e2e_coordinator_messaging() {
 async fn test_e2e_real_devnet_5_party_auction() {
     init_test_tracing();
 
-    let _devnet = setup_e2e_environment()
-        .expect("E2E setup failed - check LD_PRELOAD and Docker");
+    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
     // 5 test nodes (1 seller + 4 bidders) using offsets 23-27
     let mut seller_node = TestNode::new(23);
@@ -995,13 +1041,17 @@ async fn test_e2e_real_devnet_5_party_auction() {
         let auction_end = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600; // 1 hour from now
-        let mut listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
+            .as_secs()
+            + 3600; // 1 hour from now
+        let mut listing =
+            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
         let listing_ops = ListingOperations::new(seller_dht.clone());
-        listing_ops.update_listing(&listing_record, &listing).await?;
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
 
         // Register listing in the SHARED REGISTRY (visible to all nodes on devnet)
         let mut seller_registry = RegistryOperations::new(seller_dht.clone());
@@ -1027,11 +1077,23 @@ async fn test_e2e_real_devnet_5_party_auction() {
         // Bidder1 fetches the registry to discover listings
         let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone());
         let registry = bidder1_registry.fetch_registry().await?;
-        eprintln!("[E2E] Bidder1 fetched registry with {} listings", registry.listings.len());
+        eprintln!(
+            "[E2E] Bidder1 fetched registry with {} listings",
+            registry.listings.len()
+        );
 
-        assert!(!registry.listings.is_empty(), "Registry should have at least one listing");
-        let found_listing = registry.listings.iter().find(|e| e.key == listing_record.key.to_string());
-        assert!(found_listing.is_some(), "Our listing should be in the registry");
+        assert!(
+            !registry.listings.is_empty(),
+            "Registry should have at least one listing"
+        );
+        let found_listing = registry
+            .listings
+            .iter()
+            .find(|e| e.key == listing_record.key.to_string());
+        assert!(
+            found_listing.is_some(),
+            "Our listing should be in the registry"
+        );
 
         eprintln!("[E2E] Listing successfully created, registered, and discovered via registry");
 
@@ -1054,10 +1116,17 @@ async fn test_e2e_real_devnet_5_party_auction() {
             timestamp: now,
             bid_key: seller_bid_record.key.clone(),
         };
-        seller_bid_ops.register_bid(&listing_record, seller_bid).await?;
+        seller_bid_ops
+            .register_bid(&listing_record, seller_bid)
+            .await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller placed their own bid (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller placed their own bid (bid_count={})",
+            listing.bid_count
+        );
 
         // Bidder1 creates their bid
         let bid1_record = bidder1_dht.create_dht_record().await?;
@@ -1072,8 +1141,13 @@ async fn test_e2e_real_devnet_5_party_auction() {
         };
         seller_bid_ops.register_bid(&listing_record, bid1).await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller registered bid from Bidder1 (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller registered bid from Bidder1 (bid_count={})",
+            listing.bid_count
+        );
 
         // Bidder2 creates their bid
         let bidder2_dht = bidder2_node
@@ -1092,8 +1166,13 @@ async fn test_e2e_real_devnet_5_party_auction() {
         };
         seller_bid_ops.register_bid(&listing_record, bid2).await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller registered bid from Bidder2 (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller registered bid from Bidder2 (bid_count={})",
+            listing.bid_count
+        );
 
         // Bidder3 creates their bid
         let bidder3_dht = bidder3_node
@@ -1112,8 +1191,13 @@ async fn test_e2e_real_devnet_5_party_auction() {
         };
         seller_bid_ops.register_bid(&listing_record, bid3).await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller registered bid from Bidder3 (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller registered bid from Bidder3 (bid_count={})",
+            listing.bid_count
+        );
 
         // Bidder4 creates their bid
         let bidder4_dht = bidder4_node
@@ -1132,8 +1216,13 @@ async fn test_e2e_real_devnet_5_party_auction() {
         };
         seller_bid_ops.register_bid(&listing_record, bid4).await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller registered bid from Bidder4 (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller registered bid from Bidder4 (bid_count={})",
+            listing.bid_count
+        );
 
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1142,14 +1231,26 @@ async fn test_e2e_real_devnet_5_party_auction() {
         let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
         eprintln!("[E2E] Bid index has {} bids", bid_index.bids.len());
 
-        assert_eq!(bid_index.bids.len(), 5, "Should have 5 bids registered (seller + 4 bidders)");
+        assert_eq!(
+            bid_index.bids.len(),
+            5,
+            "Should have 5 bids registered (seller + 4 bidders)"
+        );
 
         // ========== VERIFY LISTING BID_COUNT FROM ANOTHER NODE ==========
         let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
-        let verified_listing = bidder1_listing_ops_verify.get_listing(&listing_record.key).await?
+        let verified_listing = bidder1_listing_ops_verify
+            .get_listing(&listing_record.key)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
-        eprintln!("[E2E] Verified listing from bidder1: bid_count={}", verified_listing.bid_count);
-        assert_eq!(verified_listing.bid_count, 5, "Listing bid_count should be 5 after all bids");
+        eprintln!(
+            "[E2E] Verified listing from bidder1: bid_count={}",
+            verified_listing.bid_count
+        );
+        assert_eq!(
+            verified_listing.bid_count, 5,
+            "Listing bid_count should be 5 after all bids"
+        );
 
         eprintln!("[E2E] Full 5-party auction flow completed with 5 bids!");
         eprintln!("[E2E] Listing key: {}", listing_record.key);
@@ -1187,13 +1288,10 @@ async fn test_e2e_real_devnet_5_party_auction() {
 async fn test_e2e_real_devnet_10_party_auction() {
     init_test_tracing();
 
-    let _devnet = setup_e2e_environment()
-        .expect("E2E setup failed - check LD_PRELOAD and Docker");
+    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
     // 10 test nodes (1 seller + 9 bidders) using offsets 5-14
-    let mut nodes: Vec<TestNode> = (5..=14)
-        .map(|offset| TestNode::new(offset))
-        .collect();
+    let mut nodes: Vec<TestNode> = (5..=14).map(|offset| TestNode::new(offset)).collect();
 
     let result = timeout(Duration::from_secs(600), async {
         // Start all 10 nodes
@@ -1246,13 +1344,17 @@ async fn test_e2e_real_devnet_10_party_auction() {
         let auction_end = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600; // 1 hour from now
-        let mut listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
+            .as_secs()
+            + 3600; // 1 hour from now
+        let mut listing =
+            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
         let listing_ops = ListingOperations::new(seller_dht.clone());
-        listing_ops.update_listing(&listing_record, &listing).await?;
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
 
         // Register listing in the SHARED REGISTRY
         let mut seller_registry = RegistryOperations::new(seller_dht.clone());
@@ -1276,8 +1378,14 @@ async fn test_e2e_real_devnet_10_party_auction() {
             .ok_or_else(|| anyhow::anyhow!("Failed to get bidder1 DHT"))?;
         let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone());
         let registry = bidder1_registry.fetch_registry().await?;
-        eprintln!("[E2E] Bidder1 fetched registry with {} listings", registry.listings.len());
-        assert!(!registry.listings.is_empty(), "Registry should have at least one listing");
+        eprintln!(
+            "[E2E] Bidder1 fetched registry with {} listings",
+            registry.listings.len()
+        );
+        assert!(
+            !registry.listings.is_empty(),
+            "Registry should have at least one listing"
+        );
 
         eprintln!("[E2E] Listing successfully created, registered, and discovered via registry");
 
@@ -1300,10 +1408,17 @@ async fn test_e2e_real_devnet_10_party_auction() {
             timestamp: now,
             bid_key: seller_bid_record.key.clone(),
         };
-        seller_bid_ops.register_bid(&listing_record, seller_bid).await?;
+        seller_bid_ops
+            .register_bid(&listing_record, seller_bid)
+            .await?;
         listing.bid_count += 1;
-        listing_ops.update_listing(&listing_record, &listing).await?;
-        eprintln!("[E2E] Seller placed their own bid (bid_count={})", listing.bid_count);
+        listing_ops
+            .update_listing(&listing_record, &listing)
+            .await?;
+        eprintln!(
+            "[E2E] Seller placed their own bid (bid_count={})",
+            listing.bid_count
+        );
 
         // Each of the 9 bidders places a bid
         for (i, node) in nodes.iter().enumerate().skip(1) {
@@ -1325,8 +1440,13 @@ async fn test_e2e_real_devnet_10_party_auction() {
             };
             seller_bid_ops.register_bid(&listing_record, bid).await?;
             listing.bid_count += 1;
-            listing_ops.update_listing(&listing_record, &listing).await?;
-            eprintln!("[E2E] Seller registered bid from Bidder{} (bid_count={})", i, listing.bid_count);
+            listing_ops
+                .update_listing(&listing_record, &listing)
+                .await?;
+            eprintln!(
+                "[E2E] Seller registered bid from Bidder{} (bid_count={})",
+                i, listing.bid_count
+            );
         }
 
         // Wait for DHT propagation
@@ -1336,14 +1456,26 @@ async fn test_e2e_real_devnet_10_party_auction() {
         let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
         eprintln!("[E2E] Bid index has {} bids", bid_index.bids.len());
 
-        assert_eq!(bid_index.bids.len(), 10, "Should have 10 bids registered (seller + 9 bidders)");
+        assert_eq!(
+            bid_index.bids.len(),
+            10,
+            "Should have 10 bids registered (seller + 9 bidders)"
+        );
 
         // ========== VERIFY LISTING BID_COUNT FROM ANOTHER NODE ==========
         let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
-        let verified_listing = bidder1_listing_ops_verify.get_listing(&listing_record.key).await?
+        let verified_listing = bidder1_listing_ops_verify
+            .get_listing(&listing_record.key)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
-        eprintln!("[E2E] Verified listing from bidder1: bid_count={}", verified_listing.bid_count);
-        assert_eq!(verified_listing.bid_count, 10, "Listing bid_count should be 10 after all bids");
+        eprintln!(
+            "[E2E] Verified listing from bidder1: bid_count={}",
+            verified_listing.bid_count
+        );
+        assert_eq!(
+            verified_listing.bid_count, 10,
+            "Listing bid_count should be 10 after all bids"
+        );
 
         eprintln!("[E2E] Full 10-party auction flow completed with 10 bids!");
         eprintln!("[E2E] Listing key: {}", listing_record.key);

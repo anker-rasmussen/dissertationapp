@@ -55,7 +55,7 @@ impl Bid {
         // Create commitment: H(amount || nonce)
         let mut hasher = Sha256::new();
         hasher.update(amount.to_le_bytes());
-        hasher.update(&nonce);
+        hasher.update(nonce);
         let commitment: [u8; 32] = hasher.finalize().into();
 
         Self {
@@ -194,13 +194,7 @@ mod tests {
         let rng = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let bid = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let bid = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
 
         assert_eq!(bid.amount, 100);
         assert_eq!(bid.timestamp, 1000);
@@ -214,13 +208,7 @@ mod tests {
         let rng = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let bid = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let bid = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
 
         assert!(bid.verify_commitment());
     }
@@ -230,13 +218,8 @@ mod tests {
         let rng = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let mut bid = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let mut bid =
+            Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
         bid.reveal_nonce = None;
 
         assert!(!bid.verify_commitment());
@@ -247,13 +230,8 @@ mod tests {
         let rng = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let mut bid = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let mut bid =
+            Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
         // Tamper with the amount
         bid.amount = 200;
 
@@ -265,13 +243,8 @@ mod tests {
         let rng = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let mut bid = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let mut bid =
+            Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
         // Tamper with the nonce
         bid.reveal_nonce = Some([99u8; 32]);
 
@@ -283,13 +256,7 @@ mod tests {
         let rng = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let bid = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let bid = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
 
         let sealed = bid.sealed();
 
@@ -306,21 +273,9 @@ mod tests {
         let rng2 = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let bid1 = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng1,
-            &time,
-        );
+        let bid1 = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng1, &time);
 
-        let bid2 = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng2,
-            &time,
-        );
+        let bid2 = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng2, &time);
 
         assert_eq!(bid1.commitment, bid2.commitment);
         assert_eq!(bid1.reveal_nonce, bid2.reveal_nonce);
@@ -332,21 +287,9 @@ mod tests {
         let rng2 = MockRandom::new(2);
         let time = MockTime::new(1000);
 
-        let bid1 = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng1,
-            &time,
-        );
+        let bid1 = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng1, &time);
 
-        let bid2 = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng2,
-            &time,
-        );
+        let bid2 = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng2, &time);
 
         assert_ne!(bid1.commitment, bid2.commitment);
         assert_ne!(bid1.reveal_nonce, bid2.reveal_nonce);
@@ -357,13 +300,8 @@ mod tests {
         let rng = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let original = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let original =
+            Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
 
         let cbor = original.to_cbor().unwrap();
         let restored = Bid::from_cbor(&cbor).unwrap();
@@ -381,13 +319,7 @@ mod tests {
         let rng = MockRandom::new(42);
         let time = MockTime::new(1000);
 
-        let bid = Bid::new_with_providers(
-            make_test_key(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let bid = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
         let original = bid.sealed();
 
         let cbor = original.to_cbor().unwrap();
@@ -436,13 +368,8 @@ mod tests {
         let listing_key = make_test_key();
 
         let mut original = BidCollection::new(listing_key.clone());
-        let bid = Bid::new_with_providers(
-            listing_key.clone(),
-            make_test_pubkey(),
-            100,
-            &rng,
-            &time,
-        );
+        let bid =
+            Bid::new_with_providers(listing_key.clone(), make_test_pubkey(), 100, &rng, &time);
         original.add_bid(bid.sealed());
 
         let cbor = original.to_cbor().unwrap();

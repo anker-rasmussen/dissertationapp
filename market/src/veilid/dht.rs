@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tracing::{debug, info};
 use veilid_core::{
-    DHTRecordDescriptor, DHTSchema, KeyPair, RecordKey, SafetySelection, Sequencing, VeilidAPI,
-    ValueSubkeyRangeSet, CRYPTO_KIND_VLD0,
+    DHTRecordDescriptor, DHTSchema, KeyPair, RecordKey, SafetySelection, Sequencing,
+    ValueSubkeyRangeSet, VeilidAPI, CRYPTO_KIND_VLD0,
 };
 
 use crate::config::DHT_SUBKEY_COUNT;
@@ -141,7 +141,12 @@ impl DHTOperations {
     }
 
     /// Set a value at a specific subkey (requires write access)
-    pub async fn set_value_at_subkey(&self, record: &OwnedDHTRecord, subkey: u32, value: Vec<u8>) -> Result<()> {
+    pub async fn set_value_at_subkey(
+        &self,
+        record: &OwnedDHTRecord,
+        subkey: u32,
+        value: Vec<u8>,
+    ) -> Result<()> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record with owner keypair for write access
@@ -174,7 +179,11 @@ impl DHTOperations {
 
     /// Get a value from a specific subkey
     /// Returns None if the value hasn't been set yet
-    pub async fn get_value_at_subkey(&self, key: &RecordKey, subkey: u32) -> Result<Option<Vec<u8>>> {
+    pub async fn get_value_at_subkey(
+        &self,
+        key: &RecordKey,
+        subkey: u32,
+    ) -> Result<Option<Vec<u8>>> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record first

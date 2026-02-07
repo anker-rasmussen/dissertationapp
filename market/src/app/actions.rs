@@ -32,7 +32,7 @@ pub async fn create_and_publish_listing(
     // Generate encryption key and encrypt content
     let key = generate_key();
     let (ciphertext, nonce) = encrypt_content(content, &key)?;
-    let key_hex = hex::encode(&key);
+    let key_hex = hex::encode(key);
 
     // Create DHT record
     let record = dht.create_record().await?;
@@ -85,7 +85,10 @@ pub async fn create_and_publish_listing(
 
     // Automatically place seller's bid at the reserve price
     let listing_key_str = record.key.to_string();
-    info!("Placing seller's reserve bid at {} for listing {}", reserve_price, listing_key_str);
+    info!(
+        "Placing seller's reserve bid at {} for listing {}",
+        reserve_price, listing_key_str
+    );
     if let Err(e) = submit_bid(state, dht, &listing_key_str, reserve_price).await {
         tracing::warn!("Failed to place seller's reserve bid: {}", e);
     } else {
@@ -137,7 +140,8 @@ pub async fn submit_bid(
 
     // Store bid value locally for later reveal
     if let Some(nonce) = bid.reveal_nonce {
-        state.bid_storage
+        state
+            .bid_storage
             .store_bid(&listing_record_key, amount, nonce)
             .await;
         info!("Stored bid value locally for MPC execution");
@@ -171,7 +175,8 @@ pub async fn submit_bid(
     };
 
     // Store bid_key in local storage
-    state.bid_storage
+    state
+        .bid_storage
         .store_bid_key(&listing_record_key, &bid_record.bid_key)
         .await;
     info!("Stored bid key locally for MPC coordination");
@@ -179,7 +184,11 @@ pub async fn submit_bid(
     // Broadcast bid announcement
     if let Some(coordinator) = state.coordinator() {
         coordinator
-            .register_local_bid(&listing_record_key, bidder.clone(), bid_record.bid_key.clone())
+            .register_local_bid(
+                &listing_record_key,
+                bidder.clone(),
+                bid_record.bid_key.clone(),
+            )
             .await;
         info!("Registered bid announcement locally");
 

@@ -57,9 +57,15 @@ async fn test_3_party_all_same_bid_first_wins() {
     let listing = harness.create_listing("Popular Item", 100, 3600).await;
 
     // All bid the same amount, with explicit timestamps
-    harness.place_bid_with_timestamp(0, &listing, 200, 1000).await; // First
-    harness.place_bid_with_timestamp(1, &listing, 200, 2000).await; // Second
-    harness.place_bid_with_timestamp(2, &listing, 200, 3000).await; // Third
+    harness
+        .place_bid_with_timestamp(0, &listing, 200, 1000)
+        .await; // First
+    harness
+        .place_bid_with_timestamp(1, &listing, 200, 2000)
+        .await; // Second
+    harness
+        .place_bid_with_timestamp(2, &listing, 200, 3000)
+        .await; // Third
 
     harness.advance_to_deadline(&listing);
 
@@ -76,9 +82,15 @@ async fn test_3_party_two_way_tie() {
     let listing = harness.create_listing("Contest Item", 100, 3600).await;
 
     // Two parties tie for highest, one party lower
-    harness.place_bid_with_timestamp(0, &listing, 250, 2000).await; // Tied highest, later
-    harness.place_bid_with_timestamp(1, &listing, 250, 1000).await; // Tied highest, earlier
-    harness.place_bid_with_timestamp(2, &listing, 150, 500).await;  // Lower bid
+    harness
+        .place_bid_with_timestamp(0, &listing, 250, 2000)
+        .await; // Tied highest, later
+    harness
+        .place_bid_with_timestamp(1, &listing, 250, 1000)
+        .await; // Tied highest, earlier
+    harness
+        .place_bid_with_timestamp(2, &listing, 150, 500)
+        .await; // Lower bid
 
     harness.advance_to_deadline(&listing);
 
@@ -95,9 +107,15 @@ async fn test_3_party_bid_at_minimum() {
     let listing = harness.create_listing("Budget Item", 100, 3600).await;
 
     // All bid at minimum
-    harness.place_bid_with_timestamp(0, &listing, 100, 1000).await;
-    harness.place_bid_with_timestamp(1, &listing, 100, 2000).await;
-    harness.place_bid_with_timestamp(2, &listing, 100, 3000).await;
+    harness
+        .place_bid_with_timestamp(0, &listing, 100, 1000)
+        .await;
+    harness
+        .place_bid_with_timestamp(1, &listing, 100, 2000)
+        .await;
+    harness
+        .place_bid_with_timestamp(2, &listing, 100, 3000)
+        .await;
 
     harness.advance_to_deadline(&listing);
 
@@ -113,9 +131,9 @@ async fn test_3_party_wide_bid_range() {
 
     let listing = harness.create_listing("Varied Bids Item", 10, 3600).await;
 
-    harness.place_bid(0, &listing, 10).await;      // Minimum
-    harness.place_bid(1, &listing, 10000).await;   // Very high
-    harness.place_bid(2, &listing, 500).await;     // Medium
+    harness.place_bid(0, &listing, 10).await; // Minimum
+    harness.place_bid(1, &listing, 10000).await; // Very high
+    harness.place_bid(2, &listing, 500).await; // Medium
 
     harness.advance_to_deadline(&listing);
 
@@ -133,11 +151,7 @@ async fn test_3_party_listing_watched_by_all() {
 
     // All parties should be watching the listing
     for i in 0..3 {
-        let expired = harness
-            .party(i)
-            .auction_logic
-            .get_expired_listings()
-            .await;
+        let expired = harness.party(i).auction_logic.get_expired_listings().await;
         // Not expired yet
         assert!(expired.is_empty());
     }
@@ -147,11 +161,7 @@ async fn test_3_party_listing_watched_by_all() {
 
     // Now all parties should see it as expired
     for i in 0..3 {
-        let expired = harness
-            .party(i)
-            .auction_logic
-            .get_expired_listings()
-            .await;
+        let expired = harness.party(i).auction_logic.get_expired_listings().await;
         assert_eq!(expired.len(), 1);
     }
 }

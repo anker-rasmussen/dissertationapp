@@ -51,12 +51,23 @@ impl SharedBidRegistry {
         let timestamp = self
             .timestamp_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.bids.write().await.insert(party_id, (bid_value, timestamp));
+        self.bids
+            .write()
+            .await
+            .insert(party_id, (bid_value, timestamp));
     }
 
     /// Register a bid with an explicit timestamp (for tie-break testing).
-    pub async fn register_bid_with_timestamp(&self, party_id: usize, bid_value: u64, timestamp: u64) {
-        self.bids.write().await.insert(party_id, (bid_value, timestamp));
+    pub async fn register_bid_with_timestamp(
+        &self,
+        party_id: usize,
+        bid_value: u64,
+        timestamp: u64,
+    ) {
+        self.bids
+            .write()
+            .await
+            .insert(party_id, (bid_value, timestamp));
     }
 
     /// Calculate the winner based on highest bid.
@@ -244,12 +255,10 @@ impl MpcRunner for MockMpcRunner {
         let strategy = self.winner_strategy.read().await.clone();
         let is_winner = match strategy {
             WinnerStrategy::Fixed(winner_id) => party_id == winner_id,
-            WinnerStrategy::CalculateFromBids => {
-                match self.bid_registry.calculate_winner().await {
-                    Some(winner_id) => party_id == winner_id,
-                    None => false,
-                }
-            }
+            WinnerStrategy::CalculateFromBids => match self.bid_registry.calculate_winner().await {
+                Some(winner_id) => party_id == winner_id,
+                None => false,
+            },
         };
 
         Ok(MpcResult {

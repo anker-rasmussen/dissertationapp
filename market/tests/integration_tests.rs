@@ -7,5 +7,5 @@
 //! Run them with: `cargo nextest run --ignored`
 
 mod common;
-mod integration;
 mod e2e;
+mod integration;

@@ -35,7 +35,11 @@ pub fn encrypt_content(plaintext: &str, key: &ContentKey) -> Result<(Vec<u8>, Co
 
 /// Decrypt content with AES-256-GCM
 /// Returns the plaintext as UTF-8 string
-pub fn decrypt_content(ciphertext: &[u8], key: &ContentKey, nonce: &ContentNonce) -> Result<String> {
+pub fn decrypt_content(
+    ciphertext: &[u8],
+    key: &ContentKey,
+    nonce: &ContentNonce,
+) -> Result<String> {
     let cipher = Aes256Gcm::new(key.into());
     let nonce = Nonce::from_slice(nonce);
 
@@ -45,8 +49,7 @@ pub fn decrypt_content(ciphertext: &[u8], key: &ContentKey, nonce: &ContentNonce
         .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
 
     // Convert to UTF-8 string
-    String::from_utf8(plaintext_bytes)
-        .context("Decrypted content is not valid UTF-8")
+    String::from_utf8(plaintext_bytes).context("Decrypted content is not valid UTF-8")
 }
 
 #[cfg(test)]

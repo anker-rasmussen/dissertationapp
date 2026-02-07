@@ -5,13 +5,15 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use veilid_core::{PublicKey, RecordKey, SafetySelection, Sequencing, Target, VeilidAPI};
 
+use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
+use super::bid_storage::BidStorage;
+use super::dht::{DHTOperations, OwnedDHTRecord};
+use super::listing_ops::ListingOperations;
+use super::mpc_orchestrator::MpcOrchestrator;
 use crate::marketplace::Listing;
 use crate::traits::DhtStore;
-use super::bid_storage::BidStorage;
-use super::mpc_orchestrator::MpcOrchestrator;
-use super::dht::{DHTOperations, OwnedDHTRecord};
-use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
-use super::listing_ops::ListingOperations;
+
+type BidAnnouncementMap = Arc<Mutex<HashMap<String, Vec<(PublicKey, RecordKey)>>>>;
 
 /// Coordinates auction execution: monitors deadlines, triggers MPC
 pub struct AuctionCoordinator {
@@ -23,7 +25,7 @@ pub struct AuctionCoordinator {
     /// Listings we own (as seller): Map<listing_key, OwnedDHTRecord>
     owned_listings: Arc<Mutex<HashMap<RecordKey, OwnedDHTRecord>>>,
     /// Collected bid announcements: Map<listing_key, Vec<(bidder, bid_record_key)>>
-    bid_announcements: Arc<Mutex<HashMap<String, Vec<(PublicKey, RecordKey)>>>>,
+    bid_announcements: BidAnnouncementMap,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
     decryption_keys: Arc<Mutex<HashMap<String, String>>>,
     /// MPC orchestrator (owns sidecar, routes, verifications)
@@ -31,7 +33,13 @@ pub struct AuctionCoordinator {
 }
 
 impl AuctionCoordinator {
-    pub fn new(api: VeilidAPI, dht: DHTOperations, my_node_id: PublicKey, bid_storage: BidStorage, node_offset: u16) -> Self {
+    pub fn new(
+        api: VeilidAPI,
+        dht: DHTOperations,
+        my_node_id: PublicKey,
+        bid_storage: BidStorage,
+        node_offset: u16,
+    ) -> Self {
         let mpc = Arc::new(MpcOrchestrator::new(
             api.clone(),
             dht.clone(),
@@ -70,8 +78,16 @@ impl AuctionCoordinator {
     /// Handle auction coordination messages
     async fn handle_auction_message(&self, message: AuctionMessage) -> Result<()> {
         match message {
-            AuctionMessage::BidAnnouncement { listing_key, bidder, bid_record_key, timestamp } => {
-                info!("Received bid announcement for listing {} from bidder {}", listing_key, bidder);
+            AuctionMessage::BidAnnouncement {
+                listing_key,
+                bidder,
+                bid_record_key,
+                timestamp,
+            } => {
+                info!(
+                    "Received bid announcement for listing {} from bidder {}",
+                    listing_key, bidder
+                );
 
                 // Store the announcement locally
                 let key = listing_key.to_string();
@@ -80,7 +96,10 @@ impl AuctionCoordinator {
 
                 if !list.iter().any(|(b, _)| b == &bidder) {
                     list.push((bidder.clone(), bid_record_key.clone()));
-                    info!("Stored bid announcement, total announcements for this listing: {}", list.len());
+                    info!(
+                        "Stored bid announcement, total announcements for this listing: {}",
+                        list.len()
+                    );
                 }
                 drop(announcements);
 
@@ -103,17 +122,30 @@ impl AuctionCoordinator {
                     let data = registry.to_bytes()?;
                     self.dht.set_value_at_subkey(record, 2, data).await?;
 
-                    info!("Updated DHT bid registry for listing {}, now has {} announcements",
-                          listing_key, registry.announcements.len());
+                    info!(
+                        "Updated DHT bid registry for listing {}, now has {} announcements",
+                        listing_key,
+                        registry.announcements.len()
+                    );
                 }
             }
-            AuctionMessage::WinnerDecryptionRequest { listing_key, winner: _sender, timestamp: _ } => {
-                info!("Received WinnerDecryptionRequest (challenge) for listing {}", listing_key);
+            AuctionMessage::WinnerDecryptionRequest {
+                listing_key,
+                winner: _sender,
+                timestamp: _,
+            } => {
+                info!(
+                    "Received WinnerDecryptionRequest (challenge) for listing {}",
+                    listing_key
+                );
 
                 let bid_data = self.mpc.bid_storage().get_bid(&listing_key).await;
                 match bid_data {
                     Some((bid_value, nonce)) => {
-                        info!("Responding to seller's challenge with bid reveal (value: {})", bid_value);
+                        info!(
+                            "Responding to seller's challenge with bid reveal (value: {})",
+                            bid_value
+                        );
 
                         let key = listing_key.to_string();
                         let managers = self.mpc.route_managers().lock().await;
@@ -128,7 +160,8 @@ impl AuctionCoordinator {
                                 _ => None,
                             };
 
-                            let seller_route = seller_pubkey.as_ref()
+                            let seller_route = seller_pubkey
+                                .as_ref()
                                 .and_then(|seller| routes.get(seller).cloned());
 
                             drop(routes);
@@ -146,7 +179,10 @@ impl AuctionCoordinator {
                                 let data = message.to_bytes()?;
                                 let routing_context = self.mpc.safe_routing_context()?;
 
-                                match routing_context.app_message(Target::RouteId(route_id), data).await {
+                                match routing_context
+                                    .app_message(Target::RouteId(route_id), data)
+                                    .await
+                                {
                                     Ok(_) => {
                                         info!("Sent WinnerBidReveal to seller via MPC route");
                                     }
@@ -158,19 +194,36 @@ impl AuctionCoordinator {
                                 warn!("Seller's MPC route not found, cannot respond to challenge");
                             }
                         } else {
-                            warn!("No route manager for listing {}, cannot respond to challenge", listing_key);
+                            warn!(
+                                "No route manager for listing {}, cannot respond to challenge",
+                                listing_key
+                            );
                         }
                     }
                     None => {
-                        debug!("No bid stored for listing {}, ignoring challenge", listing_key);
+                        debug!(
+                            "No bid stored for listing {}, ignoring challenge",
+                            listing_key
+                        );
                     }
                 }
             }
-            AuctionMessage::DecryptionHashTransfer { listing_key, winner, decryption_hash, timestamp: _ } => {
-                info!("Received decryption hash transfer for listing {} (winner: {})", listing_key, winner);
+            AuctionMessage::DecryptionHashTransfer {
+                listing_key,
+                winner,
+                decryption_hash,
+                timestamp: _,
+            } => {
+                info!(
+                    "Received decryption hash transfer for listing {} (winner: {})",
+                    listing_key, winner
+                );
 
                 if winner == self.my_node_id {
-                    info!("I am the auction winner! Received decryption key: {}", decryption_hash);
+                    info!(
+                        "I am the auction winner! Received decryption key: {}",
+                        decryption_hash
+                    );
 
                     let key = listing_key.to_string();
                     let mut keys = self.decryption_keys.lock().await;
@@ -183,39 +236,72 @@ impl AuctionCoordinator {
                     debug!("Decryption hash transfer not for me, ignoring");
                 }
             }
-            AuctionMessage::MpcRouteAnnouncement { listing_key, party_pubkey, route_blob, timestamp: _ } => {
-                info!("Received MPC route announcement for listing {} from party {}", listing_key, party_pubkey);
+            AuctionMessage::MpcRouteAnnouncement {
+                listing_key,
+                party_pubkey,
+                route_blob,
+                timestamp: _,
+            } => {
+                info!(
+                    "Received MPC route announcement for listing {} from party {}",
+                    listing_key, party_pubkey
+                );
 
                 let key = listing_key.to_string();
                 let managers = self.mpc.route_managers().lock().await;
 
                 if let Some(manager) = managers.get(&key) {
                     let mgr = manager.lock().await;
-                    mgr.register_route_announcement(party_pubkey, route_blob).await?;
+                    mgr.register_route_announcement(party_pubkey, route_blob)
+                        .await?;
                 } else {
                     debug!("Received route for unwatched auction {}", listing_key);
                 }
             }
-            AuctionMessage::WinnerBidReveal { listing_key, winner, bid_value, nonce, timestamp: _ } => {
-                info!("Received WinnerBidReveal for listing {} from winner {}", listing_key, winner);
+            AuctionMessage::WinnerBidReveal {
+                listing_key,
+                winner,
+                bid_value,
+                nonce,
+                timestamp: _,
+            } => {
+                info!(
+                    "Received WinnerBidReveal for listing {} from winner {}",
+                    listing_key, winner
+                );
 
-                let verified = self.mpc.verify_winner_reveal(&listing_key, &winner, bid_value, &nonce).await;
+                let verified = self
+                    .mpc
+                    .verify_winner_reveal(&listing_key, &winner, bid_value, &nonce)
+                    .await;
 
                 // Store verification result
                 let key = listing_key.to_string();
                 {
                     let mut verifications = self.mpc.pending_verifications().lock().await;
-                    verifications.entry(key.clone())
+                    verifications
+                        .entry(key.clone())
                         .and_modify(|(_, _, v)| *v = Some(verified));
                 }
 
                 if verified {
-                    info!("Winner bid VERIFIED for listing {} — sending decryption key immediately", listing_key);
+                    info!(
+                        "Winner bid VERIFIED for listing {} — sending decryption key immediately",
+                        listing_key
+                    );
 
                     let listing_ops = ListingOperations::new(self.dht.clone());
                     match listing_ops.get_listing(&listing_key).await {
                         Ok(Some(listing)) => {
-                            if let Err(e) = self.mpc.send_decryption_hash(&listing_key, &winner, &listing.decryption_key).await {
+                            if let Err(e) = self
+                                .mpc
+                                .send_decryption_hash(
+                                    &listing_key,
+                                    &winner,
+                                    &listing.decryption_key,
+                                )
+                                .await
+                            {
                                 error!("Failed to send decryption key to winner: {}", e);
                             }
                         }
@@ -238,7 +324,10 @@ impl AuctionCoordinator {
     pub async fn watch_listing(&self, listing: Listing) {
         let mut watched = self.watched_listings.lock().await;
         watched.insert(listing.key.clone(), listing.clone());
-        info!("Now watching listing '{}' for auction deadline", listing.title);
+        info!(
+            "Now watching listing '{}' for auction deadline",
+            listing.title
+        );
         drop(watched);
 
         self.mpc.ensure_route_manager(&listing.key).await;
@@ -295,22 +384,33 @@ impl AuctionCoordinator {
             let data = registry.to_bytes()?;
             self.dht.set_value_at_subkey(record, 2, data).await?;
 
-            info!("Added our own bid to DHT registry for listing {}, now has {} announcements",
-                  listing_key, registry.announcements.len());
+            info!(
+                "Added our own bid to DHT registry for listing {}, now has {} announcements",
+                listing_key,
+                registry.announcements.len()
+            );
         }
 
         Ok(())
     }
 
     /// Register a bid announcement locally
-    pub async fn register_local_bid(&self, listing_key: &RecordKey, bidder: PublicKey, bid_record_key: RecordKey) {
+    pub async fn register_local_bid(
+        &self,
+        listing_key: &RecordKey,
+        bidder: PublicKey,
+        bid_record_key: RecordKey,
+    ) {
         let key = listing_key.to_string();
         let mut announcements = self.bid_announcements.lock().await;
         let list = announcements.entry(key).or_insert_with(Vec::new);
 
         if !list.iter().any(|(b, _)| b == &bidder) {
             list.push((bidder, bid_record_key));
-            info!("Registered local bid announcement, total announcements for this listing: {}", list.len());
+            info!(
+                "Registered local bid announcement, total announcements for this listing: {}",
+                list.len()
+            );
         }
     }
 
@@ -330,23 +430,37 @@ impl AuctionCoordinator {
 
     /// Fetch a listing and decrypt its content if we have the decryption key
     pub async fn fetch_and_decrypt_listing(&self, listing_key: &RecordKey) -> Result<String> {
-        let listing_data = self.dht.get_value(listing_key).await
+        let listing_data = self
+            .dht
+            .get_value(listing_key)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch listing: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Listing not found"))?;
 
         let listing = Listing::from_cbor(&listing_data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize listing: {}", e))?;
 
-        let decryption_key = self.get_decryption_key(listing_key).await
-            .ok_or_else(|| anyhow::anyhow!("No decryption key available for this listing. You must win the auction first."))?;
+        let decryption_key = self.get_decryption_key(listing_key).await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No decryption key available for this listing. You must win the auction first."
+            )
+        })?;
 
-        listing.decrypt_content_with_key(&decryption_key)
+        listing
+            .decrypt_content_with_key(&decryption_key)
             .map_err(|e| anyhow::anyhow!("Failed to decrypt listing content: {}", e))
     }
 
     /// Broadcast our bid announcement to all known peers via AppMessage
-    pub async fn broadcast_bid_announcement(&self, listing_key: &RecordKey, bid_record_key: &RecordKey) -> Result<()> {
-        info!("Broadcasting bid announcement for listing {} to all peers", listing_key);
+    pub async fn broadcast_bid_announcement(
+        &self,
+        listing_key: &RecordKey,
+        bid_record_key: &RecordKey,
+    ) -> Result<()> {
+        info!(
+            "Broadcasting bid announcement for listing {} to all peers",
+            listing_key
+        );
 
         let announcement = AuctionMessage::bid_announcement(
             listing_key.clone(),
@@ -356,12 +470,17 @@ impl AuctionCoordinator {
 
         let data = announcement.to_bytes()?;
 
-        let routing_context = self.api.routing_context()
+        let routing_context = self
+            .api
+            .routing_context()
             .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
             .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
             .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
 
-        let state = self.api.get_state().await
+        let state = self
+            .api
+            .get_state()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
 
         let mut sent_count = 0;
@@ -372,21 +491,30 @@ impl AuctionCoordinator {
             info!("Sending bid announcement to peer {:?}", peer.node_ids);
 
             for node_id in &peer.node_ids {
-                match routing_context.app_message(Target::NodeId(node_id.clone()), data.clone()).await {
+                match routing_context
+                    .app_message(Target::NodeId(node_id.clone()), data.clone())
+                    .await
+                {
                     Ok(_) => {
                         info!("Successfully sent bid announcement to peer {}", node_id);
                         sent_count += 1;
                         break;
                     }
                     Err(e) => {
-                        debug!("Failed to send bid announcement to peer node {}: {}", node_id, e);
+                        debug!(
+                            "Failed to send bid announcement to peer node {}: {}",
+                            node_id, e
+                        );
                     }
                 }
             }
         }
 
         if sent_count == 0 {
-            warn!("No peers found to send bid announcement. Network has {} peers", state.network.peers.len());
+            warn!(
+                "No peers found to send bid announcement. Network has {} peers",
+                state.network.peers.len()
+            );
         } else {
             info!("Broadcast completed: sent to {} peers", sent_count);
         }
@@ -409,7 +537,10 @@ impl AuctionCoordinator {
                         info!("Auction deadline reached for listing '{}'", listing.title);
 
                         if let Err(e) = self.handle_auction_end_wrapper(&key, &listing).await {
-                            error!("Failed to handle auction end for '{}': {}", listing.title, e);
+                            error!(
+                                "Failed to handle auction end for '{}': {}",
+                                listing.title, e
+                            );
                         }
 
                         self.watched_listings.lock().await.remove(&key);
@@ -420,14 +551,22 @@ impl AuctionCoordinator {
     }
 
     /// Wrapper that prepares data for MpcOrchestrator::handle_auction_end
-    async fn handle_auction_end_wrapper(&self, listing_key: &RecordKey, listing: &Listing) -> Result<()> {
+    async fn handle_auction_end_wrapper(
+        &self,
+        listing_key: &RecordKey,
+        listing: &Listing,
+    ) -> Result<()> {
         // Check if we have a bid for this listing
         if !self.mpc.bid_storage().has_bid(listing_key).await {
             info!("We didn't bid on this listing, skipping MPC");
             return Ok(());
         }
 
-        let our_bid_key = self.mpc.bid_storage().get_bid_key(listing_key).await
+        let our_bid_key = self
+            .mpc
+            .bid_storage()
+            .get_bid_key(listing_key)
+            .await
             .ok_or_else(|| anyhow::anyhow!("Bid key not found in storage"))?;
 
         info!("We bid on this listing, our bid record: {}", our_bid_key);
@@ -439,11 +578,13 @@ impl AuctionCoordinator {
             announcements.get(&key).cloned()
         };
 
-        let bid_index = self.mpc.discover_bids_from_storage(
-            listing_key,
-            local_announcements.as_ref(),
-        ).await?;
+        let bid_index = self
+            .mpc
+            .discover_bids_from_storage(listing_key, local_announcements.as_ref())
+            .await?;
 
-        self.mpc.handle_auction_end(listing_key, bid_index, &listing.title).await
+        self.mpc
+            .handle_auction_end(listing_key, bid_index, &listing.title)
+            .await
     }
 }

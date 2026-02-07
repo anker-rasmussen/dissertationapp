@@ -79,7 +79,9 @@ async fn test_10_party_all_same_bid() {
 async fn test_10_party_random_winner() {
     let mut harness = MultiPartyHarness::new(10).await;
 
-    let listing = harness.create_listing("Random Winner Item", 100, 3600).await;
+    let listing = harness
+        .create_listing("Random Winner Item", 100, 3600)
+        .await;
 
     // Bids in pseudo-random order, party 4 wins
     let bids = [300, 250, 100, 400, 750, 200, 350, 500, 600, 150];
@@ -118,7 +120,9 @@ async fn test_10_party_all_bids_announced() {
 async fn test_10_party_decryption_key_distribution() {
     let mut harness = MultiPartyHarness::new(10).await;
 
-    let listing = harness.create_listing("Premium Secret Item", 100, 3600).await;
+    let listing = harness
+        .create_listing("Premium Secret Item", 100, 3600)
+        .await;
 
     // Party 6 wins
     let bids = [100, 150, 200, 250, 300, 350, 999, 400, 450, 500];
@@ -152,16 +156,36 @@ async fn test_10_party_multiple_ties() {
 
     // 5 parties tie for highest (500), 5 parties tie for lower (200)
     // Timestamps determine winner among highest bidders
-    harness.place_bid_with_timestamp(0, &listing, 500, 500).await;
-    harness.place_bid_with_timestamp(1, &listing, 200, 100).await;
-    harness.place_bid_with_timestamp(2, &listing, 500, 300).await;
-    harness.place_bid_with_timestamp(3, &listing, 200, 200).await;
-    harness.place_bid_with_timestamp(4, &listing, 500, 100).await; // Earliest high bid
-    harness.place_bid_with_timestamp(5, &listing, 200, 300).await;
-    harness.place_bid_with_timestamp(6, &listing, 500, 400).await;
-    harness.place_bid_with_timestamp(7, &listing, 200, 400).await;
-    harness.place_bid_with_timestamp(8, &listing, 500, 200).await;
-    harness.place_bid_with_timestamp(9, &listing, 200, 500).await;
+    harness
+        .place_bid_with_timestamp(0, &listing, 500, 500)
+        .await;
+    harness
+        .place_bid_with_timestamp(1, &listing, 200, 100)
+        .await;
+    harness
+        .place_bid_with_timestamp(2, &listing, 500, 300)
+        .await;
+    harness
+        .place_bid_with_timestamp(3, &listing, 200, 200)
+        .await;
+    harness
+        .place_bid_with_timestamp(4, &listing, 500, 100)
+        .await; // Earliest high bid
+    harness
+        .place_bid_with_timestamp(5, &listing, 200, 300)
+        .await;
+    harness
+        .place_bid_with_timestamp(6, &listing, 500, 400)
+        .await;
+    harness
+        .place_bid_with_timestamp(7, &listing, 200, 400)
+        .await;
+    harness
+        .place_bid_with_timestamp(8, &listing, 500, 200)
+        .await;
+    harness
+        .place_bid_with_timestamp(9, &listing, 200, 500)
+        .await;
 
     harness.advance_to_deadline(&listing);
 
@@ -173,20 +197,14 @@ async fn test_10_party_multiple_ties() {
 async fn test_10_party_large_bid_values() {
     let mut harness = MultiPartyHarness::new(10).await;
 
-    let listing = harness.create_listing("High Value Item", 1_000_000, 3600).await;
+    let listing = harness
+        .create_listing("High Value Item", 1_000_000, 3600)
+        .await;
 
     // Large bid values (simulating real currency amounts)
     let bids: [u64; 10] = [
-        1_000_000,
-        2_500_000,
-        5_000_000,
-        3_750_000,
-        10_000_000, // Highest
-        7_500_000,
-        4_200_000,
-        6_800_000,
-        8_900_000,
-        1_500_000,
+        1_000_000, 2_500_000, 5_000_000, 3_750_000, 10_000_000, // Highest
+        7_500_000, 4_200_000, 6_800_000, 8_900_000, 1_500_000,
     ];
 
     for (i, &bid) in bids.iter().enumerate() {
@@ -207,12 +225,12 @@ async fn test_10_party_listing_expiration() {
 
     // All parties watching, none expired yet
     for i in 0..10 {
-        let expired = harness
-            .party(i)
-            .auction_logic
-            .get_expired_listings()
-            .await;
-        assert!(expired.is_empty(), "Party {} should see no expired listings", i);
+        let expired = harness.party(i).auction_logic.get_expired_listings().await;
+        assert!(
+            expired.is_empty(),
+            "Party {} should see no expired listings",
+            i
+        );
     }
 
     // All parties bid
@@ -224,11 +242,7 @@ async fn test_10_party_listing_expiration() {
 
     // All parties should now see it as expired
     for i in 0..10 {
-        let expired = harness
-            .party(i)
-            .auction_logic
-            .get_expired_listings()
-            .await;
+        let expired = harness.party(i).auction_logic.get_expired_listings().await;
         assert_eq!(expired.len(), 1, "Party {} should see 1 expired listing", i);
     }
 }

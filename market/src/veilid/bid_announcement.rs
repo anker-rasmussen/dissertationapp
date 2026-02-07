@@ -108,7 +108,12 @@ impl AuctionMessage {
         bidder: PublicKey,
         bid_record_key: RecordKey,
     ) -> Self {
-        Self::bid_announcement_with_time(listing_key, bidder, bid_record_key, &SystemTimeProvider::new())
+        Self::bid_announcement_with_time(
+            listing_key,
+            bidder,
+            bid_record_key,
+            &SystemTimeProvider::new(),
+        )
     }
 
     /// Create a bid announcement with a custom time provider.
@@ -127,10 +132,7 @@ impl AuctionMessage {
     }
 
     /// Create a winner decryption request using system time.
-    pub fn winner_decryption_request(
-        listing_key: RecordKey,
-        winner: PublicKey,
-    ) -> Self {
+    pub fn winner_decryption_request(listing_key: RecordKey, winner: PublicKey) -> Self {
         Self::winner_decryption_request_with_time(listing_key, winner, &SystemTimeProvider::new())
     }
 
@@ -153,7 +155,12 @@ impl AuctionMessage {
         winner: PublicKey,
         decryption_hash: String,
     ) -> Self {
-        Self::decryption_hash_transfer_with_time(listing_key, winner, decryption_hash, &SystemTimeProvider::new())
+        Self::decryption_hash_transfer_with_time(
+            listing_key,
+            winner,
+            decryption_hash,
+            &SystemTimeProvider::new(),
+        )
     }
 
     /// Create a decryption hash transfer with a custom time provider.
@@ -177,7 +184,12 @@ impl AuctionMessage {
         party_pubkey: PublicKey,
         route_blob: RouteBlob,
     ) -> Self {
-        Self::mpc_route_announcement_with_time(listing_key, party_pubkey, route_blob, &SystemTimeProvider::new())
+        Self::mpc_route_announcement_with_time(
+            listing_key,
+            party_pubkey,
+            route_blob,
+            &SystemTimeProvider::new(),
+        )
     }
 
     /// Create an MPC route announcement with a custom time provider.
@@ -202,7 +214,13 @@ impl AuctionMessage {
         bid_value: u64,
         nonce: [u8; 32],
     ) -> Self {
-        Self::winner_bid_reveal_with_time(listing_key, winner, bid_value, nonce, &SystemTimeProvider::new())
+        Self::winner_bid_reveal_with_time(
+            listing_key,
+            winner,
+            bid_value,
+            nonce,
+            &SystemTimeProvider::new(),
+        )
     }
 
     /// Create a winner bid reveal with a custom time provider.

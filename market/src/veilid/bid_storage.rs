@@ -3,12 +3,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use veilid_core::RecordKey;
 
+type BidMap = Arc<RwLock<HashMap<String, (u64, [u8; 32], Option<RecordKey>)>>>;
+
 /// Stores bid values locally so we can reveal them during MPC
 /// This is kept in memory - in production should be encrypted on disk
 #[derive(Clone)]
 pub struct BidStorage {
     // Map: listing_key -> (bid_value, nonce, bid_record_key)
-    bids: Arc<RwLock<HashMap<String, (u64, [u8; 32], Option<RecordKey>)>>>,
+    bids: BidMap,
 }
 
 impl BidStorage {
