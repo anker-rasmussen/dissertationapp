@@ -59,7 +59,7 @@ pub const ROUTE_COLLECTION_INITIAL_WAIT_SECS: u64 = 2;
 pub const ROUTE_COLLECTION_MAX_WAIT_SECS: u64 = 5;
 
 /// Default MP-SPDZ directory path.
-pub const DEFAULT_MP_SPDZ_DIR: &str = "/home/broadcom/Repos/Dissertation/Repos/MP-SPDZ";
+pub const DEFAULT_MP_SPDZ_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../MP-SPDZ");
 
 /// Environment variable for MP-SPDZ directory override.
 pub const MP_SPDZ_DIR_ENV: &str = "MP_SPDZ_DIR";
