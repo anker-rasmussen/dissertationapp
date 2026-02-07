@@ -191,7 +191,7 @@ impl VeilidNode {
             namespace: namespace.into(),
             capabilities,
             protected_store: VeilidConfigProtectedStore {
-                always_use_insecure_storage: true, // TODO: Disable in production
+                always_use_insecure_storage: self.devnet_config.is_some(),
                 directory: protected_store_dir.to_string_lossy().to_string(),
                 ..Default::default()
             },
