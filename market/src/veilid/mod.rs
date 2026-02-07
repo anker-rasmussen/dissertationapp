@@ -7,6 +7,7 @@ pub mod bidder_registry;
 pub mod dht;
 pub mod listing_ops;
 pub mod mpc;
+pub mod mpc_orchestrator;
 pub mod mpc_routes;
 pub mod node;
 pub mod registry;
