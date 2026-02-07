@@ -10,7 +10,8 @@ pub mod random;
 pub mod time;
 pub mod transport;
 
-// Re-export traits
+// Re-export all traits for crate-internal use.
+// The public API surface is controlled by lib.rs re-exports.
 pub use dht::DhtStore;
 pub use process::{MpcResult, MpcRunner};
 pub use random::RandomSource;

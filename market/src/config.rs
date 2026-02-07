@@ -66,3 +66,15 @@ pub const MP_SPDZ_DIR_ENV: &str = "MP_SPDZ_DIR";
 
 /// Environment variable for market node offset.
 pub const MARKET_NODE_OFFSET_ENV: &str = "MARKET_NODE_OFFSET";
+
+/// Return the current Unix timestamp in seconds.
+///
+/// This is a convenience wrapper that avoids the boilerplate of
+/// `SystemTimeProvider::new().now_unix()` in production code paths.
+/// For testable code, prefer accepting a `TimeProvider` parameter instead.
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
