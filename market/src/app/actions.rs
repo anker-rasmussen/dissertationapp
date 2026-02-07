@@ -7,7 +7,7 @@ use market::{
 use tracing::{info, warn};
 use veilid_core::RecordKey;
 
-use crate::app::state::{get_node_state, AUCTION_COORDINATOR, BID_STORAGE};
+use crate::app::state::SharedAppState;
 
 /// Result of creating a listing.
 pub struct CreateListingResult {
@@ -18,6 +18,7 @@ pub struct CreateListingResult {
 /// Create and publish a new auction listing.
 /// The seller automatically bids at the reserve price.
 pub async fn create_and_publish_listing(
+    state: &SharedAppState,
     dht: &DHTOperations,
     title: &str,
     content: &str,
@@ -37,7 +38,7 @@ pub async fn create_and_publish_listing(
     let record = dht.create_record().await?;
 
     // Get seller's public key
-    let node_state = get_node_state();
+    let node_state = state.get_node_state();
     let seller_str = node_state
         .node_ids
         .first()
@@ -74,7 +75,7 @@ pub async fn create_and_publish_listing(
     }
 
     // Register with auction coordinator
-    if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+    if let Some(coordinator) = state.coordinator() {
         if let Err(e) = coordinator.register_owned_listing(record.clone()).await {
             tracing::warn!("Failed to register owned listing with coordinator: {}", e);
         } else {
@@ -85,9 +86,8 @@ pub async fn create_and_publish_listing(
     // Automatically place seller's bid at the reserve price
     let listing_key_str = record.key.to_string();
     info!("Placing seller's reserve bid at {} for listing {}", reserve_price, listing_key_str);
-    if let Err(e) = submit_bid(dht, &listing_key_str, reserve_price).await {
+    if let Err(e) = submit_bid(state, dht, &listing_key_str, reserve_price).await {
         tracing::warn!("Failed to place seller's reserve bid: {}", e);
-        // Continue anyway - listing is still published
     } else {
         info!("Seller's reserve bid placed successfully");
     }
@@ -111,12 +111,13 @@ pub async fn fetch_listing(dht: &DHTOperations, key_str: &str) -> anyhow::Result
 
 /// Submit a bid on a listing.
 pub async fn submit_bid(
+    state: &SharedAppState,
     dht: &DHTOperations,
     listing_key: &str,
     amount: u64,
 ) -> anyhow::Result<String> {
     // Get bidder's public key
-    let node_state = get_node_state();
+    let node_state = state.get_node_state();
     let bidder_str = node_state
         .node_ids
         .first()
@@ -135,13 +136,11 @@ pub async fn submit_bid(
     );
 
     // Store bid value locally for later reveal
-    if let Some(bid_storage) = BID_STORAGE.get() {
-        if let Some(nonce) = bid.reveal_nonce {
-            bid_storage
-                .store_bid(&listing_record_key, amount, nonce)
-                .await;
-            info!("Stored bid value locally for MPC execution");
-        }
+    if let Some(nonce) = bid.reveal_nonce {
+        state.bid_storage
+            .store_bid(&listing_record_key, amount, nonce)
+            .await;
+        info!("Stored bid value locally for MPC execution");
     }
 
     // Create BidRecord for DHT
@@ -172,15 +171,13 @@ pub async fn submit_bid(
     };
 
     // Store bid_key in local storage
-    if let Some(bid_storage) = BID_STORAGE.get() {
-        bid_storage
-            .store_bid_key(&listing_record_key, &bid_record.bid_key)
-            .await;
-        info!("Stored bid key locally for MPC coordination");
-    }
+    state.bid_storage
+        .store_bid_key(&listing_record_key, &bid_record.bid_key)
+        .await;
+    info!("Stored bid key locally for MPC coordination");
 
     // Broadcast bid announcement
-    if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+    if let Some(coordinator) = state.coordinator() {
         coordinator
             .register_local_bid(&listing_record_key, bidder.clone(), bid_record.bid_key.clone())
             .await;
@@ -210,7 +207,7 @@ pub async fn submit_bid(
     // Watch listing for deadline
     let listing_ops = ListingOperations::new(dht.clone());
     if let Some(listing) = listing_ops.get_listing(&listing_record_key).await? {
-        if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+        if let Some(coordinator) = state.coordinator() {
             coordinator.watch_listing(listing).await;
             info!("Watching listing for auction deadline");
         }

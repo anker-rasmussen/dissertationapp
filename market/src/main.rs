@@ -6,11 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use market::{config, DevNetConfig, VeilidNode};
-use parking_lot::RwLock;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::app::{AUCTION_COORDINATOR, BID_STORAGE, NODE};
+use crate::app::{SharedAppState, SHARED_STATE};
 
 fn init_logging() {
     tracing_subscriber::registry()
@@ -134,12 +133,13 @@ fn main() {
     // Preflight: ensure MP-SPDZ artifacts are ready
     ensure_mpspdz_ready();
 
-    // Initialize global state
-    NODE.set(Arc::new(RwLock::new(None))).ok();
-    BID_STORAGE.set(market::BidStorage::new()).ok();
+    // Initialize shared state
+    let app_state = SharedAppState::new(market::BidStorage::new());
+    SHARED_STATE.set(app_state.clone()).ok();
 
     // Start Veilid node in background thread
-    let node_holder = NODE.get().unwrap().clone();
+    let node_holder = app_state.node_holder.clone();
+    let coordinator_holder = app_state.coordinator.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
@@ -188,7 +188,7 @@ fn main() {
                 let state = node.state();
                 if let Some(node_id_str) = state.node_ids.first() {
                     if let Ok(my_node_id) = veilid_core::PublicKey::try_from(node_id_str.as_str()) {
-                        let bid_storage = BID_STORAGE.get().unwrap().clone();
+                        let bid_storage = app_state.bid_storage.clone();
 
                         let node_offset = std::env::var("MARKET_NODE_OFFSET")
                             .ok()
@@ -204,7 +204,7 @@ fn main() {
                         ));
 
                         coordinator.clone().start_monitoring().await;
-                        AUCTION_COORDINATOR.set(coordinator).ok();
+                        *coordinator_holder.write() = Some(coordinator);
                         info!("Auction coordinator started");
                     }
                 }
@@ -221,7 +221,8 @@ fn main() {
                 loop {
                     match rx.recv().await {
                         Some(veilid_core::VeilidUpdate::AppMessage(msg)) => {
-                            if let Some(coordinator) = AUCTION_COORDINATOR.get() {
+                            let coordinator = coordinator_holder.read().clone();
+                            if let Some(coordinator) = coordinator {
                                 if let Err(e) =
                                     coordinator.process_app_message(msg.message().to_vec()).await
                                 {

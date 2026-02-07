@@ -5,4 +5,4 @@ pub mod components;
 pub mod state;
 
 pub use components::app;
-pub use state::{AUCTION_COORDINATOR, BID_STORAGE, NODE};
+pub use state::{SharedAppState, SHARED_STATE};
