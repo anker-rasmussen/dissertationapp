@@ -147,10 +147,9 @@ impl AuctionCoordinator {
                             bid_value
                         );
 
-                        let key = listing_key.to_string();
                         let managers = self.mpc.route_managers().lock().await;
 
-                        if let Some(route_manager) = managers.get(&key) {
+                        if let Some(route_manager) = managers.get(&listing_key) {
                             let mgr = route_manager.lock().await;
                             let routes = mgr.received_routes.lock().await;
 
@@ -247,10 +246,9 @@ impl AuctionCoordinator {
                     listing_key, party_pubkey
                 );
 
-                let key = listing_key.to_string();
                 let managers = self.mpc.route_managers().lock().await;
 
-                if let Some(manager) = managers.get(&key) {
+                if let Some(manager) = managers.get(&listing_key) {
                     let mgr = manager.lock().await;
                     mgr.register_route_announcement(party_pubkey, route_blob)
                         .await?;
@@ -276,12 +274,11 @@ impl AuctionCoordinator {
                     .await;
 
                 // Store verification result
-                let key = listing_key.to_string();
                 {
                     let mut verifications = self.mpc.pending_verifications().lock().await;
                     verifications
-                        .entry(key.clone())
-                        .and_modify(|(_, _, v)| *v = Some(verified));
+                        .entry(listing_key.clone())
+                        .and_modify(|state| state.verified = Some(verified));
                 }
 
                 if verified {

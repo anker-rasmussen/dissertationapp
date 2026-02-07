@@ -6,16 +6,27 @@ use veilid_core::{DHTSchema, KeyPair, RecordKey, CRYPTO_KIND_VLD0};
 use super::dht::DHTOperations;
 use crate::traits::{SystemTimeProvider, TimeProvider};
 
-/// Hardcoded registry keypair for devnet/demo
-/// In production, this should be loaded from a secure shared location
-/// For devnet, all nodes use this same keypair to share the registry
-const DEVNET_REGISTRY_KEYPAIR: &str =
+/// Default registry keypair for devnet/demo.
+/// Override via `VEILID_REGISTRY_KEYPAIR` environment variable.
+/// In production, this should be loaded from a secure shared location.
+const DEFAULT_REGISTRY_KEYPAIR: &str =
     "VLD0:Qz4_xPTDDkwDtIgwuk1AarJTudWkg1hlrMIuQstprzM:o70UeMuq22ZrE-ysnmtN8wthjO0YSRUe6nxn2DnnWeQ";
 
-/// Hardcoded registry record key for devnet/demo
-/// This is the DHT record key where the registry is stored
-/// All nodes use this same record key to access the shared registry
-const DEVNET_REGISTRY_RECORD_KEY: &str = "VLD0:WvPYrb8EnnKOsCQ6MB_inMSnlXyQ6mkXuMa2fh55Dz4";
+/// Default registry record key for devnet/demo.
+/// Override via `VEILID_REGISTRY_RECORD_KEY` environment variable.
+const DEFAULT_REGISTRY_RECORD_KEY: &str = "VLD0:WvPYrb8EnnKOsCQ6MB_inMSnlXyQ6mkXuMa2fh55Dz4";
+
+/// Read the registry keypair from the environment, falling back to the default.
+fn registry_keypair_str() -> String {
+    std::env::var("VEILID_REGISTRY_KEYPAIR")
+        .unwrap_or_else(|_| DEFAULT_REGISTRY_KEYPAIR.to_string())
+}
+
+/// Read the registry record key from the environment, falling back to the default.
+fn registry_record_key_str() -> String {
+    std::env::var("VEILID_REGISTRY_RECORD_KEY")
+        .unwrap_or_else(|_| DEFAULT_REGISTRY_RECORD_KEY.to_string())
+}
 
 /// Listing entry in the registry (minimal info for discovery)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,11 +114,11 @@ impl RegistryOperations {
     /// Uses a hardcoded keypair for devnet to ensure all nodes share the same registry
     /// In production, this should load from a secure shared key management system
     fn get_or_create_registry_keypair(&self) -> Result<KeyPair> {
-        // Use the hardcoded devnet keypair
-        let keypair = KeyPair::try_from(DEVNET_REGISTRY_KEYPAIR)
-            .map_err(|e| anyhow::anyhow!("Failed to parse devnet registry keypair: {}", e))?;
+        let keypair_str = registry_keypair_str();
+        let keypair = KeyPair::try_from(keypair_str.as_str())
+            .map_err(|e| anyhow::anyhow!("Failed to parse registry keypair: {}", e))?;
 
-        debug!("Using hardcoded devnet registry keypair");
+        debug!("Using registry keypair (from env or default)");
         Ok(keypair)
     }
 
@@ -121,9 +132,10 @@ impl RegistryOperations {
         let keypair = self.get_or_create_registry_keypair()?;
         let routing_context = self.dht.get_routing_context_pub()?;
 
-        // Parse the hardcoded registry record key
-        let key = RecordKey::try_from(DEVNET_REGISTRY_RECORD_KEY)
-            .map_err(|e| anyhow::anyhow!("Failed to parse devnet registry record key: {}", e))?;
+        // Parse the registry record key (from env or default)
+        let record_key_str = registry_record_key_str();
+        let key = RecordKey::try_from(record_key_str.as_str())
+            .map_err(|e| anyhow::anyhow!("Failed to parse registry record key: {}", e))?;
 
         // Try to open the existing record first (most common case)
         let is_new = match routing_context
