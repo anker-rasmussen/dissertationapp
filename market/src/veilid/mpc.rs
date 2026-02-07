@@ -93,7 +93,10 @@ impl MpcTunnelProxy {
 
     /// Cleanup resources (no-op since we no longer spawn external processes)
     pub async fn cleanup(&self) {
-        info!("Cleaning up MPC tunnel proxy for Party {}", self.inner.party_id);
+        info!(
+            "Cleaning up MPC tunnel proxy for Party {}",
+            self.inner.party_id
+        );
     }
 
     async fn run_outgoing_proxy(
