@@ -1,4 +1,20 @@
 #![recursion_limit = "256"]
+// ── Clippy lint configuration (strict, like Airbnb for Rust) ──
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+#![warn(clippy::cargo)]
+// Pedantic lints that are too noisy for this codebase
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::doc_markdown)]
+// Cargo lints not relevant (not publishing to crates.io)
+#![allow(clippy::cargo_common_metadata)]
+#![allow(clippy::multiple_crate_versions)]
+// Nursery lints that fire on valid patterns
+#![allow(clippy::redundant_pub_crate)]
+#![allow(clippy::option_if_let_else)]
 
 pub mod config;
 pub mod crypto;
