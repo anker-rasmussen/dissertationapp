@@ -19,7 +19,7 @@ pub use bid_storage::BidStorage;
 pub use bidder_registry::{BidderEntry, BidderRegistry, BidderRegistryOps};
 pub use dht::DHTOperations;
 pub use listing_ops::ListingOperations;
-pub use mpc::MpcSidecar;
+pub use mpc::MpcTunnelProxy;
 pub use mpc_routes::MpcRouteManager;
 pub use node::VeilidNode;
 pub use registry::{ListingRegistry, RegistryEntry, RegistryOperations};
