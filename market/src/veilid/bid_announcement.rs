@@ -2,7 +2,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use veilid_core::{PublicKey, RecordKey, RouteBlob};
 
-use crate::traits::{SystemTimeProvider, TimeProvider};
+use crate::config::now_unix;
+use crate::traits::TimeProvider;
 
 /// Registry of bid announcements stored in DHT (listing subkey 2)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -108,12 +109,12 @@ impl AuctionMessage {
         bidder: PublicKey,
         bid_record_key: RecordKey,
     ) -> Self {
-        Self::bid_announcement_with_time(
+        Self::BidAnnouncement {
             listing_key,
             bidder,
             bid_record_key,
-            &SystemTimeProvider::new(),
-        )
+            timestamp: now_unix(),
+        }
     }
 
     /// Create a bid announcement with a custom time provider.
@@ -133,7 +134,11 @@ impl AuctionMessage {
 
     /// Create a winner decryption request using system time.
     pub fn winner_decryption_request(listing_key: RecordKey, winner: PublicKey) -> Self {
-        Self::winner_decryption_request_with_time(listing_key, winner, &SystemTimeProvider::new())
+        Self::WinnerDecryptionRequest {
+            listing_key,
+            winner,
+            timestamp: now_unix(),
+        }
     }
 
     /// Create a winner decryption request with a custom time provider.
@@ -155,12 +160,12 @@ impl AuctionMessage {
         winner: PublicKey,
         decryption_hash: String,
     ) -> Self {
-        Self::decryption_hash_transfer_with_time(
+        Self::DecryptionHashTransfer {
             listing_key,
             winner,
             decryption_hash,
-            &SystemTimeProvider::new(),
-        )
+            timestamp: now_unix(),
+        }
     }
 
     /// Create a decryption hash transfer with a custom time provider.
@@ -184,12 +189,12 @@ impl AuctionMessage {
         party_pubkey: PublicKey,
         route_blob: RouteBlob,
     ) -> Self {
-        Self::mpc_route_announcement_with_time(
+        Self::MpcRouteAnnouncement {
             listing_key,
             party_pubkey,
             route_blob,
-            &SystemTimeProvider::new(),
-        )
+            timestamp: now_unix(),
+        }
     }
 
     /// Create an MPC route announcement with a custom time provider.
@@ -214,13 +219,13 @@ impl AuctionMessage {
         bid_value: u64,
         nonce: [u8; 32],
     ) -> Self {
-        Self::winner_bid_reveal_with_time(
+        Self::WinnerBidReveal {
             listing_key,
             winner,
             bid_value,
             nonce,
-            &SystemTimeProvider::new(),
-        )
+            timestamp: now_unix(),
+        }
     }
 
     /// Create a winner bid reveal with a custom time provider.

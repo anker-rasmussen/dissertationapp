@@ -33,3 +33,15 @@ pub const DEFAULT_MP_SPDZ_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../.
 
 /// Environment variable for MP-SPDZ directory override.
 pub const MP_SPDZ_DIR_ENV: &str = "MP_SPDZ_DIR";
+
+/// Return the current Unix timestamp in seconds.
+///
+/// This is a convenience wrapper that avoids the boilerplate of
+/// `SystemTimeProvider::new().now_unix()` in production code paths.
+/// For testable code, prefer accepting a `TimeProvider` parameter instead.
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}

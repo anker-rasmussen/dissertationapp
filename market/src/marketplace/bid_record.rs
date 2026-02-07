@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use veilid_core::{PublicKey, RecordKey};
 
-use crate::traits::{SystemTimeProvider, TimeProvider};
+use crate::config::now_unix;
+use crate::traits::TimeProvider;
 
 /// A bid record published to the DHT for auction participation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +64,11 @@ impl BidIndex {
 
     /// Add a bid using the system clock for timestamp
     pub fn add_bid(&mut self, bid: BidRecord) {
-        self.add_bid_with_time(bid, &SystemTimeProvider::new());
+        // Inline timestamp to avoid generic TimeProvider in the production path
+        if !self.bids.iter().any(|b| b.bidder == bid.bidder) {
+            self.bids.push(bid);
+            self.last_updated = now_unix();
+        }
     }
 
     /// Add a bid with a custom time provider for testing
@@ -108,7 +113,10 @@ impl BidIndex {
 
     /// Merge another index into this one
     pub fn merge(&mut self, other: &BidIndex) {
-        self.merge_with_time(other, &SystemTimeProvider::new());
+        for bid in &other.bids {
+            // Use the production add_bid which stamps with now_unix()
+            self.add_bid(bid.clone());
+        }
     }
 
     /// Merge with custom time provider
