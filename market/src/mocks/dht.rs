@@ -61,17 +61,6 @@ struct RecordStorage {
     is_watched: bool,
 }
 
-/// Mock DHT store for testing DHT operations.
-#[derive(Debug, Clone)]
-pub struct MockDht {
-    /// Storage for all records: Map<record_key_string, RecordStorage>
-    storage: Arc<RwLock<HashMap<String, RecordStorage>>>,
-    /// Counter for generating unique record IDs.
-    next_id: Arc<AtomicU64>,
-    /// Whether to simulate failures.
-    fail_mode: Arc<RwLock<Option<MockDhtFailure>>>,
-}
-
 /// Types of failures that can be simulated.
 #[derive(Debug, Clone)]
 pub enum MockDhtFailure {
@@ -85,180 +74,8 @@ pub enum MockDhtFailure {
     OnKey(String),
 }
 
-impl MockDht {
-    /// Create a new mock DHT store.
-    pub fn new() -> Self {
-        Self {
-            storage: Arc::new(RwLock::new(HashMap::new())),
-            next_id: Arc::new(AtomicU64::new(1)),
-            fail_mode: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    /// Set failure mode for testing error handling.
-    pub async fn set_fail_mode(&self, mode: Option<MockDhtFailure>) {
-        *self.fail_mode.write().await = mode;
-    }
-
-    /// Check if current operation should fail.
-    async fn should_fail(&self, is_write: bool, key: Option<&str>) -> bool {
-        let mode = self.fail_mode.read().await;
-        match &*mode {
-            None => false,
-            Some(MockDhtFailure::All) => true,
-            Some(MockDhtFailure::Reads) => !is_write,
-            Some(MockDhtFailure::Writes) => is_write,
-            Some(MockDhtFailure::OnKey(k)) => key.map(|key| key == k).unwrap_or(false),
-        }
-    }
-
-    /// Get a snapshot of all stored data (for test assertions).
-    pub async fn snapshot(&self) -> HashMap<String, HashMap<u32, Vec<u8>>> {
-        let storage = self.storage.read().await;
-        storage
-            .iter()
-            .map(|(k, v)| (k.clone(), v.subkeys.clone()))
-            .collect()
-    }
-
-    /// Check if a specific record exists.
-    pub async fn has_record(&self, key: &RecordKey) -> bool {
-        let storage = self.storage.read().await;
-        storage.contains_key(&key.to_string())
-    }
-
-    /// Get the number of records stored.
-    pub async fn record_count(&self) -> usize {
-        self.storage.read().await.len()
-    }
-}
-
-impl Default for MockDht {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl DhtStore for MockDht {
-    type OwnedRecord = MockOwnedRecord;
-
-    async fn create_record(&self) -> Result<Self::OwnedRecord> {
-        if self.should_fail(true, None).await {
-            return Err(anyhow!("MockDht: simulated create failure"));
-        }
-
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let record = MockOwnedRecord::new(id);
-
-        let mut storage = self.storage.write().await;
-        storage.insert(record.key.to_string(), RecordStorage::default());
-
-        Ok(record)
-    }
-
-    fn record_key(record: &Self::OwnedRecord) -> RecordKey {
-        record.key.clone()
-    }
-
-    async fn get_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
-        self.get_subkey(key, 0).await
-    }
-
-    async fn set_value(&self, record: &Self::OwnedRecord, value: Vec<u8>) -> Result<()> {
-        self.set_subkey(record, 0, value).await
-    }
-
-    async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> Result<Option<Vec<u8>>> {
-        let key_str = key.to_string();
-        if self.should_fail(false, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated read failure"));
-        }
-
-        let storage = self.storage.read().await;
-        Ok(storage
-            .get(&key_str)
-            .and_then(|r| r.subkeys.get(&subkey).cloned()))
-    }
-
-    async fn set_subkey(
-        &self,
-        record: &Self::OwnedRecord,
-        subkey: u32,
-        value: Vec<u8>,
-    ) -> Result<()> {
-        let key_str = record.key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated write failure"));
-        }
-
-        let mut storage = self.storage.write().await;
-        let record_storage = storage
-            .entry(key_str)
-            .or_insert_with(RecordStorage::default);
-        record_storage.subkeys.insert(subkey, value);
-
-        Ok(())
-    }
-
-    async fn delete_record(&self, key: &RecordKey) -> Result<()> {
-        let key_str = key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated delete failure"));
-        }
-
-        let mut storage = self.storage.write().await;
-        storage.remove(&key_str);
-        Ok(())
-    }
-
-    async fn watch_record(&self, key: &RecordKey) -> Result<bool> {
-        let key_str = key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated watch failure"));
-        }
-
-        let mut storage = self.storage.write().await;
-        if let Some(record) = storage.get_mut(&key_str) {
-            let was_watched = record.is_watched;
-            record.is_watched = true;
-            Ok(!was_watched) // Return true if this is a new watch
-        } else {
-            Ok(false)
-        }
-    }
-
-    async fn cancel_watch(&self, key: &RecordKey) -> Result<bool> {
-        let key_str = key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated cancel_watch failure"));
-        }
-
-        let mut storage = self.storage.write().await;
-        if let Some(record) = storage.get_mut(&key_str) {
-            let was_watched = record.is_watched;
-            record.is_watched = false;
-            Ok(was_watched) // Return true if watch was active
-        } else {
-            Ok(false)
-        }
-    }
-}
-
-/// Shared DHT that multiple AuctionLogic instances can use.
-///
-/// This simulates a real DHT network where all parties share the same state.
-/// Each party gets its own "view" of the DHT but reads/writes affect the shared storage.
-#[derive(Debug, Clone)]
-pub struct SharedMockDht {
-    /// The underlying shared storage.
-    inner: Arc<SharedMockDhtInner>,
-    /// The node ID of the party using this DHT view.
-    node_id: PublicKey,
-}
-
 #[derive(Debug)]
-struct SharedMockDhtInner {
+struct MockDhtInner {
     /// Storage for all records: Map<record_key_string, RecordStorage>
     storage: RwLock<HashMap<String, RecordStorage>>,
     /// Counter for generating unique record IDs.
@@ -269,17 +86,36 @@ struct SharedMockDhtInner {
     fail_mode: RwLock<Option<MockDhtFailure>>,
 }
 
+/// Mock DHT store for testing.
+///
+/// Simulates a DHT network where all parties sharing the same underlying
+/// `SharedDhtHandle` see the same state. Each `MockDht` carries a `node_id`
+/// representing the party using this view.
+///
+/// For single-party unit tests, use `MockDht::new()` (defaults to party 0).
+/// For multi-party integration tests, use `SharedDhtHandle` to create views.
+#[derive(Debug, Clone)]
+pub struct MockDht {
+    /// The underlying shared storage.
+    inner: Arc<MockDhtInner>,
+    /// The node ID of the party using this DHT view.
+    node_id: PublicKey,
+}
+
+/// Backward-compatibility alias.
+pub type SharedMockDht = MockDht;
+
 /// Handle to shared DHT storage for creating party views.
 #[derive(Debug, Clone)]
 pub struct SharedDhtHandle {
-    inner: Arc<SharedMockDhtInner>,
+    inner: Arc<MockDhtInner>,
 }
 
 impl SharedDhtHandle {
     /// Create a new shared DHT handle.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(SharedMockDhtInner {
+            inner: Arc::new(MockDhtInner {
                 storage: RwLock::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 record_owners: RwLock::new(HashMap::new()),
@@ -289,8 +125,8 @@ impl SharedDhtHandle {
     }
 
     /// Create a view of the shared DHT for a specific party.
-    pub fn create_party_view(&self, node_id: PublicKey) -> SharedMockDht {
-        SharedMockDht {
+    pub fn create_party_view(&self, node_id: PublicKey) -> MockDht {
+        MockDht {
             inner: self.inner.clone(),
             node_id,
         }
@@ -303,13 +139,28 @@ impl Default for SharedDhtHandle {
     }
 }
 
-impl SharedMockDht {
-    /// Create a new shared DHT with a single party view.
+impl MockDht {
+    /// Create a new single-party mock DHT (uses `make_test_public_key(0)`).
+    ///
+    /// For multi-party tests, use `SharedDhtHandle` instead.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(MockDhtInner {
+                storage: RwLock::new(HashMap::new()),
+                next_id: AtomicU64::new(1),
+                record_owners: RwLock::new(HashMap::new()),
+                fail_mode: RwLock::new(None),
+            }),
+            node_id: make_test_public_key(0),
+        }
+    }
+
+    /// Create a new mock DHT with a specific node ID.
     ///
     /// Use `SharedDhtHandle` when you need multiple parties to share the same DHT.
-    pub fn new(node_id: PublicKey) -> Self {
+    pub fn with_node_id(node_id: PublicKey) -> Self {
         Self {
-            inner: Arc::new(SharedMockDhtInner {
+            inner: Arc::new(MockDhtInner {
                 storage: RwLock::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 record_owners: RwLock::new(HashMap::new()),
@@ -362,13 +213,19 @@ impl SharedMockDht {
     }
 }
 
+impl Default for MockDht {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
-impl DhtStore for SharedMockDht {
+impl DhtStore for MockDht {
     type OwnedRecord = MockOwnedRecord;
 
     async fn create_record(&self) -> Result<Self::OwnedRecord> {
         if self.should_fail(true, None).await {
-            return Err(anyhow!("SharedMockDht: simulated create failure"));
+            return Err(anyhow!("MockDht: simulated create failure"));
         }
 
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
@@ -399,7 +256,7 @@ impl DhtStore for SharedMockDht {
     async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> Result<Option<Vec<u8>>> {
         let key_str = key.to_string();
         if self.should_fail(false, Some(&key_str)).await {
-            return Err(anyhow!("SharedMockDht: simulated read failure"));
+            return Err(anyhow!("MockDht: simulated read failure"));
         }
 
         let storage = self.inner.storage.read().await;
@@ -416,7 +273,7 @@ impl DhtStore for SharedMockDht {
     ) -> Result<()> {
         let key_str = record.key.to_string();
         if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("SharedMockDht: simulated write failure"));
+            return Err(anyhow!("MockDht: simulated write failure"));
         }
 
         let mut storage = self.inner.storage.write().await;
@@ -431,7 +288,7 @@ impl DhtStore for SharedMockDht {
     async fn delete_record(&self, key: &RecordKey) -> Result<()> {
         let key_str = key.to_string();
         if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("SharedMockDht: simulated delete failure"));
+            return Err(anyhow!("MockDht: simulated delete failure"));
         }
 
         let mut storage = self.inner.storage.write().await;
@@ -442,7 +299,7 @@ impl DhtStore for SharedMockDht {
     async fn watch_record(&self, key: &RecordKey) -> Result<bool> {
         let key_str = key.to_string();
         if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("SharedMockDht: simulated watch failure"));
+            return Err(anyhow!("MockDht: simulated watch failure"));
         }
 
         let mut storage = self.inner.storage.write().await;
@@ -458,7 +315,7 @@ impl DhtStore for SharedMockDht {
     async fn cancel_watch(&self, key: &RecordKey) -> Result<bool> {
         let key_str = key.to_string();
         if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("SharedMockDht: simulated cancel_watch failure"));
+            return Err(anyhow!("MockDht: simulated cancel_watch failure"));
         }
 
         let mut storage = self.inner.storage.write().await;
@@ -592,7 +449,7 @@ mod tests {
 
         // Party 1 creates a record
         let record = party1.create_record().await.unwrap();
-        let key = SharedMockDht::record_key(&record);
+        let key = MockDht::record_key(&record);
 
         // Party 1 writes a value
         party1
@@ -634,8 +491,8 @@ mod tests {
         assert_eq!(party1.record_count().await, 2);
 
         // Each can read the other's data
-        let key1 = SharedMockDht::record_key(&record1);
-        let key2 = SharedMockDht::record_key(&record2);
+        let key1 = MockDht::record_key(&record1);
+        let key2 = MockDht::record_key(&record2);
 
         assert_eq!(
             party2.get_value(&key1).await.unwrap(),
