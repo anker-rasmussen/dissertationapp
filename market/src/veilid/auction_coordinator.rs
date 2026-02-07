@@ -1,18 +1,14 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
-use veilid_core::{PublicKey, RecordKey, RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target, VeilidAPI};
+use veilid_core::{PublicKey, RecordKey, SafetySelection, Sequencing, Target, VeilidAPI};
 
-use crate::config;
-use crate::marketplace::{BidIndex, Listing};
+use crate::marketplace::Listing;
 use crate::traits::DhtStore;
-use super::bid_ops::BidOperations;
 use super::bid_storage::BidStorage;
-use super::mpc_routes::MpcRouteManager;
-use super::mpc::MpcSidecar;
+use super::mpc_orchestrator::MpcOrchestrator;
 use super::dht::{DHTOperations, OwnedDHTRecord};
 use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use super::listing_ops::ListingOperations;
@@ -22,41 +18,37 @@ pub struct AuctionCoordinator {
     api: VeilidAPI,
     dht: DHTOperations,
     my_node_id: PublicKey,
-    bid_storage: BidStorage,
-    /// Node offset for port allocation (from MARKET_NODE_OFFSET env var)
-    node_offset: u16,
     /// Listings we're monitoring
     watched_listings: Arc<Mutex<HashMap<RecordKey, Listing>>>,
     /// Listings we own (as seller): Map<listing_key, OwnedDHTRecord>
     owned_listings: Arc<Mutex<HashMap<RecordKey, OwnedDHTRecord>>>,
-    /// Currently active MPC sidecar (if any)
-    active_sidecar: Arc<Mutex<Option<MpcSidecar>>>,
     /// Collected bid announcements: Map<listing_key, Vec<(bidder, bid_record_key)>>
     bid_announcements: Arc<Mutex<HashMap<String, Vec<(PublicKey, RecordKey)>>>>,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
     decryption_keys: Arc<Mutex<HashMap<String, String>>>,
-    /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
-    route_managers: Arc<Mutex<HashMap<String, Arc<Mutex<MpcRouteManager>>>>>,
-    /// Pending verifications: listing_key -> (winner_pubkey, mpc_winning_bid, verified?)
-    /// Used for Danish Sugar Beet style bid verification before releasing decryption key
-    pending_verifications: Arc<Mutex<HashMap<String, (PublicKey, u64, Option<bool>)>>>,
+    /// MPC orchestrator (owns sidecar, routes, verifications)
+    mpc: Arc<MpcOrchestrator>,
 }
 
 impl AuctionCoordinator {
     pub fn new(api: VeilidAPI, dht: DHTOperations, my_node_id: PublicKey, bid_storage: BidStorage, node_offset: u16) -> Self {
+        let mpc = Arc::new(MpcOrchestrator::new(
+            api.clone(),
+            dht.clone(),
+            my_node_id.clone(),
+            bid_storage,
+            node_offset,
+        ));
+
         Self {
             api,
             dht,
             my_node_id,
-            bid_storage,
-            node_offset,
             watched_listings: Arc::new(Mutex::new(HashMap::new())),
             owned_listings: Arc::new(Mutex::new(HashMap::new())),
-            active_sidecar: Arc::new(Mutex::new(None)),
             bid_announcements: Arc::new(Mutex::new(HashMap::new())),
             decryption_keys: Arc::new(Mutex::new(HashMap::new())),
-            route_managers: Arc::new(Mutex::new(HashMap::new())),
-            pending_verifications: Arc::new(Mutex::new(HashMap::new())),
+            mpc,
         }
     }
 
@@ -69,7 +61,7 @@ impl AuctionCoordinator {
         }
 
         // Otherwise, forward to active MPC sidecar
-        if let Some(sidecar) = self.active_sidecar.lock().await.as_ref() {
+        if let Some(sidecar) = self.mpc.active_sidecar().lock().await.as_ref() {
             sidecar.process_message(message).await?;
         }
         Ok(())
@@ -81,24 +73,22 @@ impl AuctionCoordinator {
             AuctionMessage::BidAnnouncement { listing_key, bidder, bid_record_key, timestamp } => {
                 info!("Received bid announcement for listing {} from bidder {}", listing_key, bidder);
 
-                // Store the announcement locally (for backward compatibility)
+                // Store the announcement locally
                 let key = listing_key.to_string();
                 let mut announcements = self.bid_announcements.lock().await;
                 let list = announcements.entry(key.clone()).or_insert_with(Vec::new);
 
-                // Avoid duplicates
                 if !list.iter().any(|(b, _)| b == &bidder) {
                     list.push((bidder.clone(), bid_record_key.clone()));
                     info!("Stored bid announcement, total announcements for this listing: {}", list.len());
                 }
-                drop(announcements); // Release lock
+                drop(announcements);
 
                 // If we own this listing, update DHT bid registry
                 let owned = self.owned_listings.lock().await;
                 if let Some(record) = owned.get(&listing_key) {
                     info!("We own this listing, updating DHT bid registry");
 
-                    // Read current registry
                     let current_data = self.dht.get_value_at_subkey(&listing_key, 2).await?;
                     let mut registry = match current_data {
                         Some(data) => BidAnnouncementRegistry::from_bytes(&data)?,
@@ -108,10 +98,8 @@ impl AuctionCoordinator {
                         }
                     };
 
-                    // Add announcement to registry
                     registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
 
-                    // Write back to DHT
                     let data = registry.to_bytes()?;
                     self.dht.set_value_at_subkey(record, 2, data).await?;
 
@@ -120,27 +108,20 @@ impl AuctionCoordinator {
                 }
             }
             AuctionMessage::WinnerDecryptionRequest { listing_key, winner: _sender, timestamp: _ } => {
-                // Seller-initiated: this is received BY the winner FROM the seller.
-                // The seller is challenging the winner to prove their bid.
                 info!("Received WinnerDecryptionRequest (challenge) for listing {}", listing_key);
 
-                // Look up our bid value + nonce from local storage
-                let bid_data = self.bid_storage.get_bid(&listing_key).await;
+                let bid_data = self.mpc.bid_storage().get_bid(&listing_key).await;
                 match bid_data {
                     Some((bid_value, nonce)) => {
                         info!("Responding to seller's challenge with bid reveal (value: {})", bid_value);
 
-                        // Look up seller's MPC route from route manager
                         let key = listing_key.to_string();
-                        let managers = self.route_managers.lock().await;
+                        let managers = self.mpc.route_managers().lock().await;
 
                         if let Some(route_manager) = managers.get(&key) {
                             let mgr = route_manager.lock().await;
                             let routes = mgr.received_routes.lock().await;
 
-                            // Find the seller's route (the sender of this challenge)
-                            // We need to find any route that isn't ours — the seller is party 0
-                            // We look for routes from the listing seller
                             let listing_ops = ListingOperations::new(self.dht.clone());
                             let seller_pubkey = match listing_ops.get_listing(&listing_key).await {
                                 Ok(Some(listing)) => Some(listing.seller),
@@ -155,7 +136,6 @@ impl AuctionCoordinator {
                             drop(managers);
 
                             if let Some(route_id) = seller_route {
-                                // Send WinnerBidReveal directed to seller's route
                                 let message = AuctionMessage::winner_bid_reveal(
                                     listing_key.clone(),
                                     self.my_node_id.clone(),
@@ -164,8 +144,7 @@ impl AuctionCoordinator {
                                 );
 
                                 let data = message.to_bytes()?;
-
-                                let routing_context = self.safe_routing_context()?;
+                                let routing_context = self.mpc.safe_routing_context()?;
 
                                 match routing_context.app_message(Target::RouteId(route_id), data).await {
                                     Ok(_) => {
@@ -190,19 +169,16 @@ impl AuctionCoordinator {
             AuctionMessage::DecryptionHashTransfer { listing_key, winner, decryption_hash, timestamp: _ } => {
                 info!("Received decryption hash transfer for listing {} (winner: {})", listing_key, winner);
 
-                // Check if we are the winner
                 if winner == self.my_node_id {
                     info!("I am the auction winner! Received decryption key: {}", decryption_hash);
 
-                    // Store the decryption key for this listing
                     let key = listing_key.to_string();
                     let mut keys = self.decryption_keys.lock().await;
                     keys.insert(key, decryption_hash);
                     info!("Stored decryption key for listing {}", listing_key);
 
-                    // Cleanup route manager now that we have the decryption key
                     drop(keys);
-                    self.cleanup_route_manager(&listing_key).await;
+                    self.mpc.cleanup_route_manager(&listing_key).await;
                 } else {
                     debug!("Decryption hash transfer not for me, ignoring");
                 }
@@ -211,7 +187,7 @@ impl AuctionCoordinator {
                 info!("Received MPC route announcement for listing {} from party {}", listing_key, party_pubkey);
 
                 let key = listing_key.to_string();
-                let managers = self.route_managers.lock().await;
+                let managers = self.mpc.route_managers().lock().await;
 
                 if let Some(manager) = managers.get(&key) {
                     let mgr = manager.lock().await;
@@ -221,17 +197,14 @@ impl AuctionCoordinator {
                 }
             }
             AuctionMessage::WinnerBidReveal { listing_key, winner, bid_value, nonce, timestamp: _ } => {
-                // Seller-initiated: this is received BY the seller FROM the winner.
-                // Winner is responding to the seller's challenge with their bid proof.
                 info!("Received WinnerBidReveal for listing {} from winner {}", listing_key, winner);
 
-                // Verify the commitment
-                let verified = self.verify_winner_reveal(&listing_key, &winner, bid_value, &nonce).await;
+                let verified = self.mpc.verify_winner_reveal(&listing_key, &winner, bid_value, &nonce).await;
 
                 // Store verification result
                 let key = listing_key.to_string();
                 {
-                    let mut verifications = self.pending_verifications.lock().await;
+                    let mut verifications = self.mpc.pending_verifications().lock().await;
                     verifications.entry(key.clone())
                         .and_modify(|(_, _, v)| *v = Some(verified));
                 }
@@ -239,11 +212,10 @@ impl AuctionCoordinator {
                 if verified {
                     info!("Winner bid VERIFIED for listing {} — sending decryption key immediately", listing_key);
 
-                    // Immediately send decryption key to winner
                     let listing_ops = ListingOperations::new(self.dht.clone());
                     match listing_ops.get_listing(&listing_key).await {
                         Ok(Some(listing)) => {
-                            if let Err(e) = self.send_decryption_hash(&listing_key, &winner, &listing.decryption_key).await {
+                            if let Err(e) = self.mpc.send_decryption_hash(&listing_key, &winner, &listing.decryption_key).await {
                                 error!("Failed to send decryption key to winner: {}", e);
                             }
                         }
@@ -269,24 +241,10 @@ impl AuctionCoordinator {
         info!("Now watching listing '{}' for auction deadline", listing.title);
         drop(watched);
 
-        // Pre-create route manager for this auction so we can receive route announcements
-        // even before the auction ends. Party ID will be determined later.
-        let key = listing.key.to_string();
-        let mut managers = self.route_managers.lock().await;
-
-        if !managers.contains_key(&key) {
-            let route_manager = Arc::new(Mutex::new(MpcRouteManager::new(
-                self.api.clone(),
-                self.dht.clone(),
-                0, // Placeholder party ID, will be determined when auction ends
-            )));
-            managers.insert(key.clone(), route_manager);
-            info!("Created route manager for listing {} to receive route announcements", listing.key);
-        }
+        self.mpc.ensure_route_manager(&listing.key).await;
     }
 
     /// Register an owned listing (for sellers who created it)
-    /// This allows the seller to update the DHT bid registry
     pub async fn register_owned_listing(&self, record: OwnedDHTRecord) -> Result<()> {
         let key = record.key.clone();
 
@@ -297,14 +255,10 @@ impl AuctionCoordinator {
         self.dht.set_value_at_subkey(&record, 2, data).await?;
         info!("Initialized bid registry for owned listing: {}", key);
 
-        // Store the record for future updates
         let mut owned = self.owned_listings.lock().await;
         owned.insert(key.clone(), record.clone());
         drop(owned);
 
-        // Sellers must also watch their own listing to:
-        // 1. Monitor auction deadline
-        // 2. Create route manager to receive MPC route announcements
         let listing_ops = ListingOperations::new(self.dht.clone());
         if let Ok(Some(listing)) = listing_ops.get_listing(&key).await {
             self.watch_listing(listing).await;
@@ -314,8 +268,7 @@ impl AuctionCoordinator {
         Ok(())
     }
 
-    /// Add our own bid to the DHT registry (for when seller bids on own listing)
-    /// This is needed because we don't receive our own broadcast announcements
+    /// Add our own bid to the DHT registry
     pub async fn add_own_bid_to_registry(
         &self,
         listing_key: &RecordKey,
@@ -328,7 +281,6 @@ impl AuctionCoordinator {
         if let Some(record) = owned.get(listing_key) {
             info!("We own this listing and bid on it, adding our bid to DHT registry");
 
-            // Read current registry
             let current_data = self.dht.get_value_at_subkey(listing_key, 2).await?;
             let mut registry = match current_data {
                 Some(data) => BidAnnouncementRegistry::from_bytes(&data)?,
@@ -338,10 +290,8 @@ impl AuctionCoordinator {
                 }
             };
 
-            // Add our bid to registry
             registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
 
-            // Write back to DHT
             let data = registry.to_bytes()?;
             self.dht.set_value_at_subkey(record, 2, data).await?;
 
@@ -352,13 +302,12 @@ impl AuctionCoordinator {
         Ok(())
     }
 
-    /// Register a bid announcement locally (called when submitting a bid)
+    /// Register a bid announcement locally
     pub async fn register_local_bid(&self, listing_key: &RecordKey, bidder: PublicKey, bid_record_key: RecordKey) {
         let key = listing_key.to_string();
         let mut announcements = self.bid_announcements.lock().await;
         let list = announcements.entry(key).or_insert_with(Vec::new);
 
-        // Avoid duplicates
         if !list.iter().any(|(b, _)| b == &bidder) {
             list.push((bidder, bid_record_key));
             info!("Registered local bid announcement, total announcements for this listing: {}", list.len());
@@ -373,7 +322,6 @@ impl AuctionCoordinator {
     }
 
     /// Check if the current node received a decryption key for a listing
-    /// Returns the decryption key (hex-encoded) if available
     pub async fn get_decryption_key(&self, listing_key: &RecordKey) -> Option<String> {
         let key = listing_key.to_string();
         let keys = self.decryption_keys.lock().await;
@@ -381,10 +329,7 @@ impl AuctionCoordinator {
     }
 
     /// Fetch a listing and decrypt its content if we have the decryption key
-    /// Returns the decrypted content as a UTF-8 string
-    /// Returns error if listing not found, decryption key not available, or decryption fails
     pub async fn fetch_and_decrypt_listing(&self, listing_key: &RecordKey) -> Result<String> {
-        // Fetch the listing from DHT
         let listing_data = self.dht.get_value(listing_key).await
             .map_err(|e| anyhow::anyhow!("Failed to fetch listing: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Listing not found"))?;
@@ -392,105 +337,11 @@ impl AuctionCoordinator {
         let listing = Listing::from_cbor(&listing_data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize listing: {}", e))?;
 
-        // Get the decryption key
         let decryption_key = self.get_decryption_key(listing_key).await
             .ok_or_else(|| anyhow::anyhow!("No decryption key available for this listing. You must win the auction first."))?;
 
-        // Decrypt the content
         listing.decrypt_content_with_key(&decryption_key)
             .map_err(|e| anyhow::anyhow!("Failed to decrypt listing content: {}", e))
-    }
-
-    /// Start background deadline monitoring
-    pub async fn start_monitoring(self: Arc<Self>) {
-        info!("Starting auction deadline monitor");
-
-        tokio::spawn(async move {
-            loop {
-                // Check every 10 seconds
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-                let watched = self.watched_listings.lock().await.clone();
-
-                for (key, listing) in watched {
-                    // Check if auction has ended
-                    if listing.time_remaining() == 0 {
-                        info!("Auction deadline reached for listing '{}'", listing.title);
-
-                        // Check if we're a bidder
-                        if let Err(e) = self.handle_auction_end(&key, &listing).await {
-                            error!("Failed to handle auction end for '{}': {}", listing.title, e);
-                        }
-
-                        // Remove from watched list
-                        self.watched_listings.lock().await.remove(&key);
-                    }
-                }
-            }
-        });
-    }
-
-    /// Handle auction end: coordinate MPC execution
-    async fn handle_auction_end(&self, listing_key: &RecordKey, listing: &Listing) -> Result<()> {
-        info!("Handling auction end for listing '{}'", listing.title);
-
-        // Check if we have a bid for this listing
-        if !self.bid_storage.has_bid(listing_key).await {
-            info!("We didn't bid on this listing, skipping MPC");
-            return Ok(());
-        }
-
-        // Get our bid record key
-        let our_bid_key = self.bid_storage.get_bid_key(listing_key).await
-            .ok_or_else(|| anyhow::anyhow!("Bid key not found in storage"))?;
-
-        info!("We bid on this listing, our bid record: {}", our_bid_key);
-
-        // Discover bids from DHT registry
-        let bid_index = self.discover_bids_from_storage(listing_key).await?;
-
-        if bid_index.bids.is_empty() {
-            warn!("No bids discovered for listing '{}'", listing.title);
-            return Ok(());
-        }
-
-        info!("Discovered {} bids for auction", bid_index.bids.len());
-
-        // Sort bidders by timestamp (seller's auto-bid has earliest timestamp = party 0)
-        let sorted_bidders = bid_index.sorted_bidders();
-
-        // Shamir secret sharing requires at least 3 parties
-        if sorted_bidders.len() < 3 {
-            warn!(
-                "Auction for '{}' has only {} parties, but Shamir requires at least 3. Aborting MPC.",
-                listing.title, sorted_bidders.len()
-            );
-            self.cleanup_route_manager(listing_key).await;
-            return Ok(());
-        }
-
-        // Check if we're a bidder
-        let my_party_id = sorted_bidders.iter().position(|b| b == &self.my_node_id);
-
-        match my_party_id {
-            Some(party_id) => {
-                info!("I am Party {} in this {}-party auction", party_id, sorted_bidders.len());
-
-                // Exchange routes with other parties
-                let routes = self.exchange_mpc_routes(listing_key, party_id, &sorted_bidders).await?;
-
-                // Wait for all parties to be ready
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-                // Trigger MPC execution
-                self.execute_mpc_auction(party_id, sorted_bidders.len(), &bid_index, routes, &sorted_bidders).await?;
-            }
-            None => {
-                debug!("Not a bidder in this auction, skipping MPC participation");
-            }
-        }
-
-        Ok(())
     }
 
     /// Broadcast our bid announcement to all known peers via AppMessage
@@ -505,35 +356,30 @@ impl AuctionCoordinator {
 
         let data = announcement.to_bytes()?;
 
-        // Create routing context for sending messages
         let routing_context = self.api.routing_context()
             .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
             .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
             .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
 
-        // Get all peer node IDs from network state
         let state = self.api.get_state().await
             .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
 
         let mut sent_count = 0;
 
-        // Send to all peers from network state
         info!("Found {} peers to broadcast to", state.network.peers.len());
 
         for peer in &state.network.peers {
             info!("Sending bid announcement to peer {:?}", peer.node_ids);
 
-            // Try each node ID for this peer
             for node_id in &peer.node_ids {
                 match routing_context.app_message(Target::NodeId(node_id.clone()), data.clone()).await {
                     Ok(_) => {
                         info!("Successfully sent bid announcement to peer {}", node_id);
                         sent_count += 1;
-                        break; // Successfully sent to this peer, move to next
+                        break;
                     }
                     Err(e) => {
                         debug!("Failed to send bid announcement to peer node {}: {}", node_id, e);
-                        // Try next node ID for this peer
                     }
                 }
             }
@@ -548,615 +394,56 @@ impl AuctionCoordinator {
         Ok(())
     }
 
-    // NOTE: send_decryption_request removed — replaced by seller-initiated send_winner_challenge
+    /// Start background deadline monitoring
+    pub async fn start_monitoring(self: Arc<Self>) {
+        info!("Starting auction deadline monitor");
 
-    /// Send decryption hash to auction winner via their MPC route
-    async fn send_decryption_hash(&self, listing_key: &RecordKey, winner: &PublicKey, decryption_hash: &str) -> Result<()> {
-        info!("Sending decryption hash to winner {} for listing {}", winner, listing_key);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-        let message = AuctionMessage::decryption_hash_transfer(
-            listing_key.clone(),
-            winner.clone(),
-            decryption_hash.to_string(),
-        );
+                let watched = self.watched_listings.lock().await.clone();
 
-        let data = message.to_bytes()?;
+                for (key, listing) in watched {
+                    if listing.time_remaining() == 0 {
+                        info!("Auction deadline reached for listing '{}'", listing.title);
 
-        // Get the route manager for this listing to look up winner's MPC route
-        let key = listing_key.to_string();
-        let managers = self.route_managers.lock().await;
-
-        if let Some(route_manager) = managers.get(&key) {
-            let mgr = route_manager.lock().await;
-            let routes = mgr.received_routes.lock().await;
-
-            // Look up winner's MPC route that was announced during route exchange
-            if let Some(winner_route) = routes.get(winner) {
-                let winner_route = winner_route.clone();
-                info!("Found winner's MPC route: {}", winner_route);
-                drop(routes);
-                drop(mgr);
-                drop(managers);
-
-                // Send directly to winner's private route
-                let routing_context = self.safe_routing_context()?;
-
-                let route_display = winner_route.clone();
-                match routing_context.app_message(Target::RouteId(winner_route), data).await {
-                    Ok(_) => {
-                        info!("Successfully sent decryption hash to winner via MPC route {}", route_display);
-                        // Cleanup route manager after successfully sending decryption key
-                        self.cleanup_route_manager(listing_key).await;
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        error!("Failed to send to winner's MPC route: {}", e);
-                        return Err(anyhow::anyhow!("Failed to send decryption hash: {}", e));
-                    }
-                }
-            } else {
-                drop(routes);
-                drop(mgr);
-                drop(managers);
-                return Err(anyhow::anyhow!("Winner's MPC route not found in route manager for listing {}", listing_key));
-            }
-        } else {
-            drop(managers);
-            return Err(anyhow::anyhow!("Route manager not found for listing {}", listing_key));
-        }
-    }
-
-    /// Cleanup route manager for a listing (called after decryption key transfer completes)
-    async fn cleanup_route_manager(&self, listing_key: &RecordKey) {
-        let key = listing_key.to_string();
-        let mut managers = self.route_managers.lock().await;
-        if managers.remove(&key).is_some() {
-            info!("Cleaned up route manager for listing {}", listing_key);
-        }
-    }
-
-    // NOTE: broadcast_winner_reveal removed — winner now sends directed WinnerBidReveal
-    // to the seller via their MPC route in response to a WinnerDecryptionRequest challenge
-
-    /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style)
-    async fn verify_winner_reveal(&self, listing_key: &RecordKey, winner: &PublicKey, bid_value: u64, nonce: &[u8; 32]) -> bool {
-        use sha2::{Sha256, Digest};
-
-        // 1. Get pending verification to check expected winning bid
-        let key = listing_key.to_string();
-        let verifications = self.pending_verifications.lock().await;
-        let expected_bid = match verifications.get(&key) {
-            Some((expected_winner, expected_bid, _)) => {
-                // Check winner matches
-                if expected_winner != winner {
-                    warn!("Winner mismatch: expected {}, got {}", expected_winner, winner);
-                    return false;
-                }
-                *expected_bid
-            }
-            None => {
-                warn!("No pending verification found for listing {}", listing_key);
-                return false;
-            }
-        };
-        drop(verifications);
-
-        // 2. Check bid value matches MPC output
-        if bid_value != expected_bid {
-            warn!("Bid value mismatch: revealed {} but MPC output was {}", bid_value, expected_bid);
-            return false;
-        }
-
-        // 3. Fetch winner's BidRecord from DHT to get stored commitment
-        let bid_ops = BidOperations::new(self.dht.clone());
-
-        // Get bid registry to find winner's bid record key
-        let registry_data = match self.dht.get_value_at_subkey(listing_key, 2).await {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                warn!("No bid registry found for listing {}", listing_key);
-                return false;
-            }
-            Err(e) => {
-                warn!("Failed to fetch bid registry: {}", e);
-                return false;
-            }
-        };
-
-        let registry = match BidAnnouncementRegistry::from_bytes(&registry_data) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Failed to parse bid registry: {}", e);
-                return false;
-            }
-        };
-
-        // Find winner's bid record key
-        let winner_bid_record_key = match registry.announcements.iter().find(|(b, _, _)| b == winner) {
-            Some((_, key, _)) => key.clone(),
-            None => {
-                warn!("Winner {} not found in bid registry", winner);
-                return false;
-            }
-        };
-
-        // Fetch the bid record
-        let bid_record = match bid_ops.fetch_bid(&winner_bid_record_key).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                warn!("Winner's bid record not found at {}", winner_bid_record_key);
-                return false;
-            }
-            Err(e) => {
-                warn!("Failed to fetch winner's bid record: {}", e);
-                return false;
-            }
-        };
-
-        // 4. Compute commitment: SHA256(bid_value || nonce)
-        let mut hasher = Sha256::new();
-        hasher.update(bid_value.to_le_bytes());
-        hasher.update(nonce);
-        let computed_commitment: [u8; 32] = hasher.finalize().into();
-
-        // 5. Compare with stored commitment
-        if computed_commitment != bid_record.commitment {
-            warn!("Commitment mismatch for winner {}", winner);
-            return false;
-        }
-
-        info!("Commitment verified for winner {} with bid value {}", winner, bid_value);
-        true
-    }
-
-    /// Discover bids from DHT bid registry (n-party approach)
-    /// Reads from listing's DHT subkey 2 for authoritative bid list
-    async fn discover_bids_from_storage(&self, listing_key: &RecordKey) -> Result<BidIndex> {
-        info!("Discovering bids from DHT bid registry");
-
-        let mut bid_index = BidIndex::new(listing_key.clone());
-        let bid_ops = BidOperations::new(self.dht.clone());
-
-        // Read bid registry from DHT subkey 2
-        let registry_data = self.dht.get_value_at_subkey(listing_key, 2).await?;
-
-        let bidder_list = match registry_data {
-            Some(data) => {
-                let registry = BidAnnouncementRegistry::from_bytes(&data)?;
-                info!("Found {} bidders in DHT bid registry", registry.announcements.len());
-                registry.announcements
-            }
-            None => {
-                info!("No DHT bid registry found, trying local announcements as fallback");
-
-                // Fallback to local announcements for backward compatibility
-                let key = listing_key.to_string();
-                let announcements = self.bid_announcements.lock().await;
-
-                let local_list = match announcements.get(&key) {
-                    Some(list) => {
-                        info!("Found {} bidders in local announcements", list.len());
-                        list.iter()
-                            .map(|(bidder, bid_record_key)| (bidder.clone(), bid_record_key.clone(), 0))
-                            .collect()
-                    }
-                    None => {
-                        info!("No local announcements found either");
-                        Vec::new()
-                    }
-                };
-                drop(announcements);
-                local_list
-            }
-        };
-
-        // Fetch each bidder's BidRecord from the DHT
-        for (bidder, bid_record_key, _timestamp) in &bidder_list {
-            info!("Fetching bid record for bidder {} at {}", bidder, bid_record_key);
-
-            match bid_ops.fetch_bid(bid_record_key).await {
-                Ok(Some(bid_record)) => {
-                    info!("Successfully fetched bid record for bidder {}", bidder);
-                    bid_index.add_bid(bid_record);
-                }
-                Ok(None) => {
-                    warn!("No bid record found for bidder {} at {}", bidder, bid_record_key);
-                }
-                Err(e) => {
-                    warn!("Failed to fetch bid record for bidder {}: {}", bidder, e);
-                }
-            }
-        }
-
-        info!("Built BidIndex with {} bids from DHT registry", bid_index.bids.len());
-        Ok(bid_index)
-    }
-
-    /// Exchange MPC routes with all other bidders
-    async fn exchange_mpc_routes(
-        &self,
-        listing_key: &RecordKey,
-        my_party_id: usize,
-        bidders: &[PublicKey],
-    ) -> Result<HashMap<usize, RouteId>> {
-        info!("Exchanging MPC routes with {} parties for listing {}", bidders.len(), listing_key);
-
-        // Get existing route manager (created when we started watching)
-        // or create a new one if somehow it doesn't exist
-        let key = listing_key.to_string();
-        let route_manager = {
-            let mut managers = self.route_managers.lock().await;
-            managers.entry(key.clone()).or_insert_with(|| {
-                info!("Creating new route manager for listing {} (should have been created earlier)", listing_key);
-                Arc::new(Mutex::new(MpcRouteManager::new(
-                    self.api.clone(),
-                    self.dht.clone(),
-                    my_party_id,
-                )))
-            }).clone()
-        };
-
-        // Create our route
-        let my_route_id = {
-            let mut mgr = route_manager.lock().await;
-            mgr.create_route().await?
-        };
-
-        info!("Created Veilid route for Party {}: {}", my_party_id, my_route_id);
-
-        // Broadcast our route
-        {
-            let mgr = route_manager.lock().await;
-            let my_pubkey = &bidders[my_party_id];
-            mgr.broadcast_route_announcement(listing_key, my_pubkey).await?;
-        }
-
-        // Register our own route (so we include ourselves in the assembly)
-        {
-            let mgr = route_manager.lock().await;
-            let my_pubkey = bidders[my_party_id].clone();
-            let my_route_blob = mgr.get_my_route_blob()
-                .ok_or_else(|| anyhow::anyhow!("Route blob not found"))?
-                .clone();
-            mgr.register_route_announcement(my_pubkey, my_route_blob).await?;
-        }
-
-        // Wait for routes (2s initial + check every 1s up to 5s total)
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        let start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(5);
-
-        loop {
-            let mgr = route_manager.lock().await;
-            let routes = mgr.assemble_party_routes(bidders).await?;
-            drop(mgr);
-
-            let expected = bidders.len();
-            let received = routes.len();
-
-            info!("Route collection: have {}/{} routes", received, expected);
-
-            if received >= expected || start.elapsed() >= max_wait {
-                return Ok(routes);
-            }
-
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-    }
-
-    /// Execute the MPC auction computation using Shamir secret sharing
-    async fn execute_mpc_auction(
-        &self,
-        party_id: usize,
-        num_parties: usize,
-        bid_index: &BidIndex,
-        routes: HashMap<usize, RouteId>,
-        all_parties: &[PublicKey],
-    ) -> Result<()> {
-        info!("Executing {}-party MPC auction as Party {} (Shamir)", num_parties, party_id);
-
-        // Get my bid value from storage
-        let listing_key = &bid_index.listing_key;
-        let (bid_value, _nonce) = self.bid_storage.get_bid(listing_key).await
-            .ok_or_else(|| anyhow::anyhow!("Bid value not found in storage"))?;
-
-        info!("My bid value: {}", bid_value);
-
-        // Start MPC sidecar with the routes
-        let sidecar = MpcSidecar::new(self.api.clone(), party_id, routes, self.node_offset);
-        sidecar.run().await?;
-
-        // Store sidecar so AppMessages can be routed to it
-        *self.active_sidecar.lock().await = Some(sidecar.clone());
-
-        let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
-            .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
-
-        // Generate hosts file in temp dir (MP-SPDZ needs a real file for -ip)
-        let node_id_str = self.my_node_id.to_string();
-        let node_prefix = &node_id_str[5..10]; // Extract first 5 chars after "VLD0:"
-        let hosts_file_name = format!("HOSTS-{}", node_prefix);
-        let hosts_file_path = std::env::temp_dir().join(&hosts_file_name);
-
-        // Write hosts file with all parties as localhost (Veilid handles actual routing)
-        let mut hosts_content = String::new();
-        for _ in 0..num_parties {
-            hosts_content.push_str("127.0.0.1\n");
-        }
-        std::fs::write(&hosts_file_path, &hosts_content)
-            .map_err(|e| anyhow::anyhow!("Failed to write hosts file {:?}: {}", hosts_file_path, e))?;
-
-        info!("Wrote hosts file to {:?} for {} parties", hosts_file_path, num_parties);
-
-        // Wait for all parties to be ready
-        info!("Waiting 5 seconds for all parties to be ready...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-        // Compile MPC program for the specific number of parties (Shamir uses prime field, no -R flag)
-        info!("Compiling auction_n program for {} parties...", num_parties);
-        let compile_output = Command::new(format!("{}/compile.py", mp_spdz_dir))
-            .current_dir(&mp_spdz_dir)
-            .arg("auction_n")
-            .arg("--")
-            .arg(num_parties.to_string())
-            .output();
-
-        match compile_output {
-            Ok(result) => {
-                let stdout = String::from_utf8_lossy(&result.stdout);
-                let stderr = String::from_utf8_lossy(&result.stderr);
-
-                if result.status.success() {
-                    info!("Successfully compiled auction_n for {} parties", num_parties);
-                    if !stdout.is_empty() {
-                        info!("Compile output: {}", stdout);
-                    }
-                } else {
-                    error!("Compilation failed!");
-                    if !stderr.is_empty() {
-                        error!("Compile errors: {}", stderr);
-                    }
-                    return Err(anyhow::anyhow!("Failed to compile MPC program for {} parties", num_parties));
-                }
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Failed to run compile.py: {}", e));
-            }
-        }
-
-        // Execute MP-SPDZ with Shamir party executable (interactive mode: bid via stdin)
-        info!("Executing MP-SPDZ auction_n-{} program (Shamir, interactive)...", num_parties);
-
-        let program_name = format!("auction_n-{}", num_parties);
-        let spawn_result = Command::new(format!("{}/shamir-party.x", mp_spdz_dir))
-            .current_dir(&mp_spdz_dir)
-            .arg("-p")
-            .arg(party_id.to_string())
-            .arg("-N")
-            .arg(num_parties.to_string())
-            .arg("-OF")
-            .arg(".")  // Output to stdout
-            .arg("-ip")
-            .arg(hosts_file_path.to_str().unwrap_or("HOSTS"))
-            .arg("-I")  // Interactive mode: read inputs from stdin
-            .arg(&program_name)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-
-        let mut child = match spawn_result {
-            Ok(child) => child,
-            Err(e) => {
-                let _ = std::fs::remove_file(&hosts_file_path);
-                return Err(anyhow::anyhow!("Failed to spawn shamir-party.x: {}", e));
-            }
-        };
-
-        // Write bid value to stdin, then close the pipe (EOF)
-        {
-            use std::io::Write;
-            let stdin = child.stdin.take()
-                .ok_or_else(|| anyhow::anyhow!("Failed to open stdin pipe to shamir-party.x"))?;
-            let mut stdin = stdin;
-            stdin.write_all(format!("{}\n", bid_value).as_bytes())
-                .map_err(|e| anyhow::anyhow!("Failed to write bid value to stdin: {}", e))?;
-            // stdin is dropped here, sending EOF
-        }
-
-        let output = child.wait_with_output();
-
-        match output {
-            Ok(result) => {
-                let stdout = String::from_utf8_lossy(&result.stdout);
-                let stderr = String::from_utf8_lossy(&result.stderr);
-
-                info!("MP-SPDZ execution completed");
-                info!("Exit code: {:?}", result.status.code());
-
-                if !stdout.is_empty() {
-                    info!("STDOUT:\n{}", stdout);
-                }
-                if !stderr.is_empty() {
-                    warn!("STDERR:\n{}", stderr);
-                }
-
-                let is_seller = party_id == 0;
-
-                if is_seller {
-                    // === SELLER (party 0): Parse winner ID and winning bid ===
-                    let mut winning_bid: Option<u64> = None;
-                    let mut winner_party_id: Option<usize> = None;
-
-                    for line in stdout.lines() {
-                        if line.contains("Winning bid:") {
-                            if let Some(bid_str) = line.split(':').last() {
-                                winning_bid = bid_str.trim().parse().ok();
-                                if let Some(bid) = winning_bid {
-                                    info!("Parsed winning bid from MPC output: {}", bid);
-                                }
-                            }
+                        if let Err(e) = self.handle_auction_end_wrapper(&key, &listing).await {
+                            error!("Failed to handle auction end for '{}': {}", listing.title, e);
                         }
-                        if line.contains("Winner: Party") {
-                            if let Some(party_str) = line.split("Party").last() {
-                                winner_party_id = party_str.trim().parse().ok();
-                                if let Some(pid) = winner_party_id {
-                                    info!("Parsed winner party ID from MPC output: {}", pid);
-                                }
-                            }
-                        }
-                    }
 
-                    if let (Some(bid), Some(winner_pid)) = (winning_bid, winner_party_id) {
-                        if winner_pid == 0 {
-                            // Winner is the seller (reserve price was highest) = no sale
-                            info!("No bidder exceeded the reserve price — no sale");
-                            self.cleanup_route_manager(listing_key).await;
-                        } else if winner_pid < all_parties.len() {
-                            let winner_pubkey = all_parties[winner_pid].clone();
-                            let key = listing_key.to_string();
-
-                            // Store pending verification entry
-                            self.pending_verifications.lock().await
-                                .insert(key, (winner_pubkey.clone(), bid, None));
-                            info!("Stored pending verification: winner={}, bid={}", winner_pubkey, bid);
-
-                            // Send WinnerDecryptionRequest to winner via their MPC route (challenge)
-                            info!("Sending challenge (WinnerDecryptionRequest) to winner {}", winner_pubkey);
-                            self.send_winner_challenge(listing_key, &winner_pubkey).await;
-                        } else {
-                            error!("Winner party ID {} out of range (only {} parties)", winner_pid, all_parties.len());
-                        }
-                    } else {
-                        warn!("Could not parse winner/bid from MPC output");
-                    }
-                } else {
-                    // === BIDDER (party 1..N): Parse only "You won: 0/1" ===
-                    let mut i_won = false;
-
-                    for line in stdout.lines() {
-                        if line.contains("You won:") {
-                            if line.contains("You won: 1") {
-                                i_won = true;
-                                info!("Result: I won the auction!");
-                            } else {
-                                info!("Result: I did not win");
-                            }
-                        }
-                    }
-
-                    if i_won {
-                        // Wait for seller's WinnerDecryptionRequest challenge
-                        info!("I won — waiting for seller's challenge (WinnerDecryptionRequest)");
-                        // Route manager stays active to receive the challenge and send the response
-                    } else {
-                        // Lost — cleanup route manager
-                        info!("I lost — cleaning up route manager");
-                        self.cleanup_route_manager(listing_key).await;
+                        self.watched_listings.lock().await.remove(&key);
                     }
                 }
-
-                // Cleanup sidecar
-                sidecar.cleanup().await;
-                *self.active_sidecar.lock().await = None;
-
-                // Clean up temp hosts file
-                let _ = std::fs::remove_file(&hosts_file_path);
-
-                // NOTE: Route manager is NOT cleaned up here for seller or winner.
-                // Cleanup happens in:
-                // - send_decryption_hash() after successfully sending the key (seller)
-                // - DecryptionHashTransfer handler after receiving the key (winner)
-                // - Losers clean up immediately above.
-
-                Ok(())
             }
-            Err(e) => {
-                error!("Failed to execute MP-SPDZ: {}", e);
-                sidecar.cleanup().await;
-                *self.active_sidecar.lock().await = None;
+        });
+    }
 
-                // Clean up temp hosts file
-                let _ = std::fs::remove_file(&hosts_file_path);
-
-                // On error, cleanup route manager immediately
-                {
-                    let key = bid_index.listing_key.to_string();
-                    let mut managers = self.route_managers.lock().await;
-                    managers.remove(&key);
-                }
-
-                Err(anyhow::anyhow!("MP-SPDZ execution failed: {}", e))
-            }
+    /// Wrapper that prepares data for MpcOrchestrator::handle_auction_end
+    async fn handle_auction_end_wrapper(&self, listing_key: &RecordKey, listing: &Listing) -> Result<()> {
+        // Check if we have a bid for this listing
+        if !self.mpc.bid_storage().has_bid(listing_key).await {
+            info!("We didn't bid on this listing, skipping MPC");
+            return Ok(());
         }
-    }
 
-    /// Create a routing context suitable for sending to private routes.
-    /// Uses Safe routing (matching MPC sidecar) so Veilid doesn't need to look up
-    /// our own node ID in the routing table — Unsafe + RouteId fails with
-    /// "can't look up own node id in routing table" in devnet configurations.
-    fn safe_routing_context(&self) -> Result<veilid_core::RoutingContext> {
-        self.api.routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
-            .with_safety(SafetySelection::Safe(SafetySpec {
-                preferred_route: None,
-                hop_count: 2,
-                stability: Stability::Reliable,
-                sequencing: Sequencing::PreferOrdered,
-            }))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))
-    }
+        let our_bid_key = self.mpc.bid_storage().get_bid_key(listing_key).await
+            .ok_or_else(|| anyhow::anyhow!("Bid key not found in storage"))?;
 
-    /// Send WinnerDecryptionRequest challenge to winner via their MPC route
-    async fn send_winner_challenge(&self, listing_key: &RecordKey, winner: &PublicKey) {
-        let message = AuctionMessage::winner_decryption_request(
-            listing_key.clone(),
-            self.my_node_id.clone(), // sender is the seller
-        );
+        info!("We bid on this listing, our bid record: {}", our_bid_key);
 
-        let data = match message.to_bytes() {
-            Ok(d) => d,
-            Err(e) => {
-                error!("Failed to serialize WinnerDecryptionRequest: {}", e);
-                return;
-            }
+        // Get local announcements as fallback
+        let local_announcements = {
+            let key = listing_key.to_string();
+            let announcements = self.bid_announcements.lock().await;
+            announcements.get(&key).cloned()
         };
 
-        // Look up winner's MPC route
-        let key = listing_key.to_string();
-        let managers = self.route_managers.lock().await;
+        let bid_index = self.mpc.discover_bids_from_storage(
+            listing_key,
+            local_announcements.as_ref(),
+        ).await?;
 
-        if let Some(route_manager) = managers.get(&key) {
-            let mgr = route_manager.lock().await;
-            let routes = mgr.received_routes.lock().await;
-
-            if let Some(winner_route) = routes.get(winner).cloned() {
-                drop(routes);
-                drop(mgr);
-                drop(managers);
-
-                let routing_context = match self.safe_routing_context() {
-                    Ok(ctx) => ctx,
-                    Err(e) => {
-                        error!("Failed to create routing context: {}", e);
-                        return;
-                    }
-                };
-
-                match routing_context.app_message(Target::RouteId(winner_route), data).await {
-                    Ok(_) => info!("Sent WinnerDecryptionRequest challenge to winner via MPC route"),
-                    Err(e) => error!("Failed to send challenge to winner: {}", e),
-                }
-            } else {
-                drop(routes);
-                drop(mgr);
-                drop(managers);
-                warn!("Winner's MPC route not found in route manager");
-            }
-        } else {
-            drop(managers);
-            warn!("Route manager not found for listing {}", listing_key);
-        }
+        self.mpc.handle_auction_end(listing_key, bid_index, &listing.title).await
     }
 }
