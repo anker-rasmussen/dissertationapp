@@ -156,55 +156,30 @@ impl MultiPartyHarness {
 
     /// A party places a bid on a listing.
     pub async fn place_bid(&mut self, party_id: usize, listing: &Listing, amount: u64) {
-        // Create commitment (simplified for testing)
-        let mut commitment = [0u8; 32];
-        commitment[..8].copy_from_slice(&amount.to_le_bytes());
-        commitment[8..16].copy_from_slice(&(party_id as u64).to_le_bytes());
-
         let timestamp = self.time.now_unix();
-
-        // Store bid locally
-        self.parties[party_id]
-            .bid_storage
-            .store_bid(&listing.key, amount, commitment)
+        self.place_bid_inner(party_id, listing, amount, timestamp)
             .await;
-
-        // Create bid record in DHT
-        let bid_record = self.parties[party_id].dht.create_record().await.unwrap();
-        let bid_key = SharedMockDht::record_key(&bid_record);
-
-        let bidder_node_id = self.parties[party_id].node_id.clone();
-
-        let bid = BidRecord {
-            listing_key: listing.key.clone(),
-            bidder: bidder_node_id.clone(),
-            commitment,
-            timestamp,
-            bid_key: bid_key.clone(),
-        };
-
-        // Serialize and store bid record
-        let mut buffer = Vec::new();
-        ciborium::into_writer(&bid, &mut buffer).unwrap();
-        self.parties[party_id]
-            .dht
-            .set_value(&bid_record, buffer)
-            .await
-            .unwrap();
-
-        // Register bid announcement with all parties
-        for p in &self.parties {
-            p.auction_logic
-                .register_bid_announcement(&listing.key, bidder_node_id.clone(), bid_key.clone())
-                .await;
-        }
-
-        // Register bid in shared registry for MPC winner calculation
         self.bid_registry.register_bid(party_id, amount).await;
     }
 
     /// Place a bid with a specific timestamp (for tie-break testing).
     pub async fn place_bid_with_timestamp(
+        &mut self,
+        party_id: usize,
+        listing: &Listing,
+        amount: u64,
+        timestamp: u64,
+    ) {
+        self.place_bid_inner(party_id, listing, amount, timestamp)
+            .await;
+        self.bid_registry
+            .register_bid_with_timestamp(party_id, amount, timestamp)
+            .await;
+    }
+
+    /// Shared implementation for placing a bid: creates commitment, stores in
+    /// DHT, and broadcasts the announcement to all parties.
+    async fn place_bid_inner(
         &mut self,
         party_id: usize,
         listing: &Listing,
@@ -251,11 +226,6 @@ impl MultiPartyHarness {
                 .register_bid_announcement(&listing.key, bidder_node_id.clone(), bid_key.clone())
                 .await;
         }
-
-        // Register bid in shared registry with explicit timestamp
-        self.bid_registry
-            .register_bid_with_timestamp(party_id, amount, timestamp)
-            .await;
     }
 
     /// Advance time past the listing deadline.
