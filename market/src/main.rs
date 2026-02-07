@@ -39,7 +39,7 @@ fn get_data_dir() -> PathBuf {
 ///
 /// Verifies that the MP-SPDZ directory, binary, SSL certs, and compiler exist.
 /// If anything is missing, attempts to run `setup-mpspdz.sh` automatically.
-fn ensure_mpspdz_ready() {
+fn ensure_mpspdz_ready() -> anyhow::Result<()> {
     let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
         .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
     let dir = Path::new(&mp_spdz_dir);
@@ -65,7 +65,7 @@ fn ensure_mpspdz_ready() {
 
     if all_ok {
         info!("MP-SPDZ preflight: all checks passed");
-        return;
+        return Ok(());
     }
 
     // Try to auto-run setup-mpspdz.sh
@@ -93,9 +93,10 @@ fn ensure_mpspdz_ready() {
             match status {
                 Ok(s) if s.success() => {
                     info!("MP-SPDZ setup completed successfully");
+                    Ok(())
                 }
                 Ok(s) => {
-                    panic!(
+                    anyhow::bail!(
                         "MP-SPDZ setup script failed (exit code: {:?}).\n\
                          Run manually: {} --mp-spdz-dir {}",
                         s.code(),
@@ -104,7 +105,7 @@ fn ensure_mpspdz_ready() {
                     );
                 }
                 Err(e) => {
-                    panic!(
+                    anyhow::bail!(
                         "Failed to execute MP-SPDZ setup script: {}\n\
                          Run manually: {} --mp-spdz-dir {}",
                         e,
@@ -115,7 +116,7 @@ fn ensure_mpspdz_ready() {
             }
         }
         None => {
-            panic!(
+            anyhow::bail!(
                 "MP-SPDZ is not ready and setup-mpspdz.sh was not found.\n\
                  Please run the setup script manually:\n\
                    ./setup-mpspdz.sh --mp-spdz-dir {}\n\
@@ -126,12 +127,12 @@ fn ensure_mpspdz_ready() {
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     init_logging();
     info!("Starting SMPC Auction Marketplace");
 
     // Preflight: ensure MP-SPDZ artifacts are ready
-    ensure_mpspdz_ready();
+    ensure_mpspdz_ready()?;
 
     // Initialize shared state
     let app_state = SharedAppState::new(market::BidStorage::new());
@@ -141,7 +142,8 @@ fn main() {
     let node_holder = app_state.node_holder.clone();
     let coordinator_holder = app_state.coordinator.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new()
+            .expect("Failed to create Tokio runtime — cannot start without an async runtime");
         rt.block_on(async move {
             let data_dir = get_data_dir();
             info!("Using data directory: {:?}", data_dir);
@@ -195,8 +197,15 @@ fn main() {
                             .and_then(|s| s.parse::<u16>().ok())
                             .unwrap_or(5);
 
+                        let api = match node.api() {
+                            Some(api) => api.clone(),
+                            None => {
+                                error!("Veilid API not available after successful start");
+                                return;
+                            }
+                        };
                         let coordinator = Arc::new(market::AuctionCoordinator::new(
-                            node.api().unwrap().clone(),
+                            api,
                             dht,
                             my_node_id,
                             bid_storage,
@@ -248,4 +257,6 @@ fn main() {
 
     // Launch Dioxus UI
     dioxus::launch(app::app);
+
+    Ok(())
 }
