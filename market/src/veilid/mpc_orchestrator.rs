@@ -18,8 +18,16 @@ use super::mpc_routes::MpcRouteManager;
 use crate::config;
 use crate::marketplace::BidIndex;
 
-type RouteManagerMap = Arc<Mutex<HashMap<String, Arc<Mutex<MpcRouteManager>>>>>;
-type VerificationMap = Arc<Mutex<HashMap<String, (PublicKey, u64, Option<bool>)>>>;
+type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
+type VerificationMap = Arc<Mutex<HashMap<RecordKey, VerificationState>>>;
+
+/// Named struct replacing the tuple `(PublicKey, u64, Option<bool>)` for pending verifications.
+#[derive(Debug, Clone)]
+pub struct VerificationState {
+    pub winner_pubkey: PublicKey,
+    pub mpc_winning_bid: u64,
+    pub verified: Option<bool>,
+}
 
 /// Orchestrates MPC execution: route exchange, tunnel proxy lifecycle, bid verification.
 ///
@@ -77,7 +85,7 @@ impl MpcOrchestrator {
     /// Pre-create a route manager for an auction so we can receive route announcements
     /// even before the auction ends.
     pub async fn ensure_route_manager(&self, listing_key: &RecordKey) {
-        let key = listing_key.to_string();
+        let key = listing_key.clone();
         let mut managers = self.route_managers.lock().await;
 
         if !managers.contains_key(&key) {
@@ -174,7 +182,7 @@ impl MpcOrchestrator {
         );
 
         // Get existing route manager or create a new one
-        let key = listing_key.to_string();
+        let key = listing_key.clone();
         let route_manager = {
             let mut managers = self.route_managers.lock().await;
             managers.entry(key.clone()).or_insert_with(|| {
@@ -225,9 +233,10 @@ impl MpcOrchestrator {
         let max_wait = std::time::Duration::from_secs(5);
 
         loop {
-            let mgr = route_manager.lock().await;
-            let routes = mgr.assemble_party_routes(bidders).await?;
-            drop(mgr);
+            let routes = {
+                let mgr = route_manager.lock().await;
+                mgr.assemble_party_routes(bidders).await?
+            };
 
             let expected = bidders.len();
             let received = routes.len();
@@ -278,7 +287,7 @@ impl MpcOrchestrator {
 
         // Generate hosts file in temp dir (MP-SPDZ needs a real file for -ip)
         let node_id_str = self.my_node_id.to_string();
-        let node_prefix = &node_id_str[5..10]; // Extract first 5 chars after "VLD0:"
+        let node_prefix = node_id_str.get(5..10).unwrap_or("unknown"); // Extract first 5 chars after "VLD0:"
         let hosts_file_name = format!("HOSTS-{}", node_prefix);
         let hosts_file_path = std::env::temp_dir().join(&hosts_file_name);
 
@@ -435,13 +444,17 @@ impl MpcOrchestrator {
                             self.cleanup_route_manager(listing_key).await;
                         } else if winner_pid < all_parties.len() {
                             let winner_pubkey = all_parties[winner_pid].clone();
-                            let key = listing_key.to_string();
+                            let key = listing_key.clone();
 
                             // Store pending verification entry
                             self.pending_verifications
                                 .lock()
                                 .await
-                                .insert(key, (winner_pubkey.clone(), bid, None));
+                                .insert(key, VerificationState {
+                                    winner_pubkey: winner_pubkey.clone(),
+                                    mpc_winning_bid: bid,
+                                    verified: None,
+                                });
                             info!(
                                 "Stored pending verification: winner={}, bid={}",
                                 winner_pubkey, bid
@@ -508,9 +521,8 @@ impl MpcOrchestrator {
 
                 // On error, cleanup route manager immediately
                 {
-                    let key = bid_index.listing_key.to_string();
                     let mut managers = self.route_managers.lock().await;
-                    managers.remove(&key);
+                    managers.remove(&bid_index.listing_key);
                 }
 
                 Err(anyhow::anyhow!("MP-SPDZ execution failed: {}", e))
@@ -534,7 +546,7 @@ impl MpcOrchestrator {
 
     /// Cleanup route manager for a listing
     pub async fn cleanup_route_manager(&self, listing_key: &RecordKey) {
-        let key = listing_key.to_string();
+        let key = listing_key.clone();
         let mut managers = self.route_managers.lock().await;
         if managers.remove(&key).is_some() {
             info!("Cleaned up route manager for listing {}", listing_key);
@@ -561,55 +573,41 @@ impl MpcOrchestrator {
 
         let data = message.to_bytes()?;
 
-        let key = listing_key.to_string();
-        let managers = self.route_managers.lock().await;
-
-        if let Some(route_manager) = managers.get(&key) {
+        // Look up the winner's route while holding locks, then release before async work
+        let winner_route = {
+            let managers = self.route_managers.lock().await;
+            let route_manager = managers.get(listing_key).ok_or_else(|| {
+                anyhow::anyhow!("Route manager not found for listing {}", listing_key)
+            })?;
             let mgr = route_manager.lock().await;
             let routes = mgr.received_routes.lock().await;
-
-            if let Some(winner_route) = routes.get(winner) {
-                let winner_route = winner_route.clone();
-                info!("Found winner's MPC route: {}", winner_route);
-                drop(routes);
-                drop(mgr);
-                drop(managers);
-
-                let routing_context = self.safe_routing_context()?;
-
-                let route_display = winner_route.clone();
-                match routing_context
-                    .app_message(Target::RouteId(winner_route), data)
-                    .await
-                {
-                    Ok(_) => {
-                        info!(
-                            "Successfully sent decryption hash to winner via MPC route {}",
-                            route_display
-                        );
-                        self.cleanup_route_manager(listing_key).await;
-                        Ok(())
-                    }
-                    Err(e) => {
-                        error!("Failed to send to winner's MPC route: {}", e);
-                        Err(anyhow::anyhow!("Failed to send decryption hash: {}", e))
-                    }
-                }
-            } else {
-                drop(routes);
-                drop(mgr);
-                drop(managers);
-                Err(anyhow::anyhow!(
+            routes.get(winner).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
                     "Winner's MPC route not found in route manager for listing {}",
                     listing_key
-                ))
+                )
+            })?
+        };
+
+        info!("Found winner's MPC route: {}", winner_route);
+        let routing_context = self.safe_routing_context()?;
+
+        match routing_context
+            .app_message(Target::RouteId(winner_route.clone()), data)
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    "Successfully sent decryption hash to winner via MPC route {}",
+                    winner_route
+                );
+                self.cleanup_route_manager(listing_key).await;
+                Ok(())
             }
-        } else {
-            drop(managers);
-            Err(anyhow::anyhow!(
-                "Route manager not found for listing {}",
-                listing_key
-            ))
+            Err(e) => {
+                error!("Failed to send to winner's MPC route: {}", e);
+                Err(anyhow::anyhow!("Failed to send decryption hash: {}", e))
+            }
         }
     }
 
@@ -624,25 +622,25 @@ impl MpcOrchestrator {
         use sha2::{Digest, Sha256};
 
         // 1. Get pending verification to check expected winning bid
-        let key = listing_key.to_string();
-        let verifications = self.pending_verifications.lock().await;
-        let expected_bid = match verifications.get(&key) {
-            Some((expected_winner, expected_bid, _)) => {
-                if expected_winner != winner {
-                    warn!(
-                        "Winner mismatch: expected {}, got {}",
-                        expected_winner, winner
-                    );
+        let expected_bid = {
+            let verifications = self.pending_verifications.lock().await;
+            match verifications.get(listing_key) {
+                Some(state) => {
+                    if &state.winner_pubkey != winner {
+                        warn!(
+                            "Winner mismatch: expected {}, got {}",
+                            state.winner_pubkey, winner
+                        );
+                        return false;
+                    }
+                    state.mpc_winning_bid
+                }
+                None => {
+                    warn!("No pending verification found for listing {}", listing_key);
                     return false;
                 }
-                *expected_bid
-            }
-            None => {
-                warn!("No pending verification found for listing {}", listing_key);
-                return false;
             }
         };
-        drop(verifications);
 
         // 2. Check bid value matches MPC output
         if bid_value != expected_bid {
@@ -803,44 +801,43 @@ impl MpcOrchestrator {
             }
         };
 
-        let key = listing_key.to_string();
-        let managers = self.route_managers.lock().await;
-
-        if let Some(route_manager) = managers.get(&key) {
+        // Look up the winner's route while holding locks, then release before async work
+        let winner_route = {
+            let managers = self.route_managers.lock().await;
+            let route_manager = match managers.get(listing_key) {
+                Some(rm) => rm.clone(),
+                None => {
+                    warn!("Route manager not found for listing {}", listing_key);
+                    return;
+                }
+            };
             let mgr = route_manager.lock().await;
             let routes = mgr.received_routes.lock().await;
-
-            if let Some(winner_route) = routes.get(winner).cloned() {
-                drop(routes);
-                drop(mgr);
-                drop(managers);
-
-                let routing_context = match self.safe_routing_context() {
-                    Ok(ctx) => ctx,
-                    Err(e) => {
-                        error!("Failed to create routing context: {}", e);
-                        return;
-                    }
-                };
-
-                match routing_context
-                    .app_message(Target::RouteId(winner_route), data)
-                    .await
-                {
-                    Ok(_) => {
-                        info!("Sent WinnerDecryptionRequest challenge to winner via MPC route")
-                    }
-                    Err(e) => error!("Failed to send challenge to winner: {}", e),
+            match routes.get(winner).cloned() {
+                Some(route) => route,
+                None => {
+                    warn!("Winner's MPC route not found in route manager");
+                    return;
                 }
-            } else {
-                drop(routes);
-                drop(mgr);
-                drop(managers);
-                warn!("Winner's MPC route not found in route manager");
             }
-        } else {
-            drop(managers);
-            warn!("Route manager not found for listing {}", listing_key);
+        };
+
+        let routing_context = match self.safe_routing_context() {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                error!("Failed to create routing context: {}", e);
+                return;
+            }
+        };
+
+        match routing_context
+            .app_message(Target::RouteId(winner_route), data)
+            .await
+        {
+            Ok(_) => {
+                info!("Sent WinnerDecryptionRequest challenge to winner via MPC route")
+            }
+            Err(e) => error!("Failed to send challenge to winner: {}", e),
         }
     }
 
