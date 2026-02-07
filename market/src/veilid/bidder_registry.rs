@@ -4,7 +4,8 @@ use tracing::{debug, info, warn};
 use veilid_core::{PublicKey, RecordKey};
 
 use super::dht::DHTOperations;
-use crate::traits::{SystemTimeProvider, TimeProvider};
+use crate::config::now_unix;
+use crate::traits::TimeProvider;
 
 /// Registry entry for a bidder on a specific listing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +38,14 @@ impl BidderRegistry {
 
     /// Add a bidder using system time.
     pub fn add_bidder(&mut self, bidder: PublicKey, bid_record_key: RecordKey) {
-        self.add_bidder_with_time(bidder, bid_record_key, &SystemTimeProvider::new());
+        // Avoid duplicates
+        if !self.bidders.iter().any(|b| b.bidder == bidder) {
+            self.bidders.push(BidderEntry {
+                bidder,
+                bid_record_key,
+                timestamp: now_unix(),
+            });
+        }
     }
 
     /// Add a bidder with a custom time provider.
