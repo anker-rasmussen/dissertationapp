@@ -589,7 +589,7 @@ pub fn app() -> Element {
     // Poll node state
     let _state_poller = use_resource(move || async move {
         loop {
-            async_std::task::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             node_state.set(get_node_state());
         }
     });
