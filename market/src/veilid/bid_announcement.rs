@@ -26,15 +26,17 @@ impl BidAnnouncementRegistry {
         }
     }
 
-    /// Serialize to bytes for DHT storage
+    /// Serialize to bytes for DHT storage (CBOR, matching other DHT types)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bid registry: {}", e))
+        let mut buf = Vec::new();
+        ciborium::into_writer(self, &mut buf)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize bid registry: {}", e))?;
+        Ok(buf)
     }
 
     /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data)
+        ciborium::from_reader(data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize bid registry: {}", e))
     }
 }
