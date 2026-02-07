@@ -13,7 +13,7 @@ use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use super::bid_ops::BidOperations;
 use super::bid_storage::BidStorage;
 use super::dht::DHTOperations;
-use super::mpc::MpcSidecar;
+use super::mpc::MpcTunnelProxy;
 use super::mpc_routes::MpcRouteManager;
 use crate::config;
 use crate::marketplace::BidIndex;
@@ -21,7 +21,7 @@ use crate::marketplace::BidIndex;
 type RouteManagerMap = Arc<Mutex<HashMap<String, Arc<Mutex<MpcRouteManager>>>>>;
 type VerificationMap = Arc<Mutex<HashMap<String, (PublicKey, u64, Option<bool>)>>>;
 
-/// Orchestrates MPC execution: route exchange, sidecar lifecycle, bid verification.
+/// Orchestrates MPC execution: route exchange, tunnel proxy lifecycle, bid verification.
 ///
 /// Extracted from `AuctionCoordinator` to separate MPC concerns from auction
 /// coordination (bid announcements, listing management, DHT updates).
@@ -31,8 +31,8 @@ pub struct MpcOrchestrator {
     my_node_id: PublicKey,
     bid_storage: BidStorage,
     node_offset: u16,
-    /// Currently active MPC sidecar (if any)
-    active_sidecar: Arc<Mutex<Option<MpcSidecar>>>,
+    /// Currently active MPC tunnel proxy (if any)
+    active_tunnel_proxy: Arc<Mutex<Option<MpcTunnelProxy>>>,
     /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
     route_managers: RouteManagerMap,
     /// Pending verifications: listing_key -> (winner_pubkey, mpc_winning_bid, verified?)
@@ -53,7 +53,7 @@ impl MpcOrchestrator {
             my_node_id,
             bid_storage,
             node_offset,
-            active_sidecar: Arc::new(Mutex::new(None)),
+            active_tunnel_proxy: Arc::new(Mutex::new(None)),
             route_managers: Arc::new(Mutex::new(HashMap::new())),
             pending_verifications: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -69,9 +69,9 @@ impl MpcOrchestrator {
         &self.pending_verifications
     }
 
-    /// Access to active sidecar (needed by AuctionCoordinator for message forwarding)
-    pub fn active_sidecar(&self) -> &Arc<Mutex<Option<MpcSidecar>>> {
-        &self.active_sidecar
+    /// Access to active tunnel proxy (needed by AuctionCoordinator for message forwarding)
+    pub fn active_tunnel_proxy(&self) -> &Arc<Mutex<Option<MpcTunnelProxy>>> {
+        &self.active_tunnel_proxy
     }
 
     /// Pre-create a route manager for an auction so we can receive route announcements
@@ -266,12 +266,12 @@ impl MpcOrchestrator {
 
         info!("My bid value: {}", bid_value);
 
-        // Start MPC sidecar with the routes
-        let sidecar = MpcSidecar::new(self.api.clone(), party_id, routes, self.node_offset);
-        sidecar.run().await?;
+        // Start MPC tunnel proxy with the routes
+        let tunnel_proxy = MpcTunnelProxy::new(self.api.clone(), party_id, routes, self.node_offset);
+        tunnel_proxy.run().await?;
 
-        // Store sidecar so AppMessages can be routed to it
-        *self.active_sidecar.lock().await = Some(sidecar.clone());
+        // Store tunnel proxy so AppMessages can be routed to it
+        *self.active_tunnel_proxy.lock().await = Some(tunnel_proxy.clone());
 
         let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
             .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
@@ -489,9 +489,9 @@ impl MpcOrchestrator {
                     }
                 }
 
-                // Cleanup sidecar
-                sidecar.cleanup().await;
-                *self.active_sidecar.lock().await = None;
+                // Cleanup tunnel proxy
+                tunnel_proxy.cleanup().await;
+                *self.active_tunnel_proxy.lock().await = None;
 
                 // Clean up temp hosts file
                 let _ = std::fs::remove_file(&hosts_file_path);
@@ -500,8 +500,8 @@ impl MpcOrchestrator {
             }
             Err(e) => {
                 error!("Failed to execute MP-SPDZ: {}", e);
-                sidecar.cleanup().await;
-                *self.active_sidecar.lock().await = None;
+                tunnel_proxy.cleanup().await;
+                *self.active_tunnel_proxy.lock().await = None;
 
                 // Clean up temp hosts file
                 let _ = std::fs::remove_file(&hosts_file_path);

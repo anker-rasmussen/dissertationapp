@@ -22,13 +22,13 @@ enum MpcMessage {
     },
 }
 
-/// Manages the MP-SPDZ sidecar process and network tunneling
+/// Manages TCP tunnel proxying between MP-SPDZ parties over Veilid routes
 #[derive(Clone)]
-pub struct MpcSidecar {
-    inner: Arc<MpcSidecarInner>,
+pub struct MpcTunnelProxy {
+    inner: Arc<MpcTunnelProxyInner>,
 }
 
-struct MpcSidecarInner {
+struct MpcTunnelProxyInner {
     api: VeilidAPI,
     party_id: usize,
     party_routes: HashMap<usize, RouteId>,
@@ -39,7 +39,7 @@ struct MpcSidecarInner {
     sessions: Mutex<HashMap<usize, tokio::net::tcp::OwnedWriteHalf>>,
 }
 
-impl MpcSidecar {
+impl MpcTunnelProxy {
     pub fn new(
         api: VeilidAPI,
         party_id: usize,
@@ -53,12 +53,12 @@ impl MpcSidecar {
         let base_port = 5000 + (node_offset * 10);
 
         info!(
-            "MPC Sidecar for Party {}: using base port {} (node offset {})",
+            "MPC TunnelProxy for Party {}: using base port {} (node offset {})",
             party_id, base_port, node_offset
         );
 
         Self {
-            inner: Arc::new(MpcSidecarInner {
+            inner: Arc::new(MpcTunnelProxyInner {
                 api,
                 party_id,
                 party_routes,
@@ -69,7 +69,7 @@ impl MpcSidecar {
     }
 
     pub async fn run(&self) -> Result<()> {
-        info!("Starting MPC Sidecar for Party {}", self.inner.party_id);
+        info!("Starting MPC TunnelProxy for Party {}", self.inner.party_id);
 
         // Setup outgoing proxies - listen directly on MP-SPDZ ports
         for (&pid, route_id) in &self.inner.party_routes {
@@ -78,11 +78,11 @@ impl MpcSidecar {
             }
 
             let listen_port = self.inner.base_port + (pid as u16);
-            let sidecar = self.clone();
+            let proxy = self.clone();
             let route_id = route_id.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = sidecar.run_outgoing_proxy(listen_port, pid, route_id).await {
+                if let Err(e) = proxy.run_outgoing_proxy(listen_port, pid, route_id).await {
                     error!("Proxy for Party {} failed: {}", pid, e);
                 }
             });
@@ -93,7 +93,7 @@ impl MpcSidecar {
 
     /// Cleanup resources (no-op since we no longer spawn external processes)
     pub async fn cleanup(&self) {
-        info!("Cleaning up MPC sidecar for Party {}", self.inner.party_id);
+        info!("Cleaning up MPC tunnel proxy for Party {}", self.inner.party_id);
     }
 
     async fn run_outgoing_proxy(
@@ -249,14 +249,14 @@ impl MpcSidecar {
                         }
 
                         // Spawn read loop for the "Response" path (Server -> Client)
-                        let sidecar = self.clone();
+                        let proxy = self.clone();
                         let target_pid = source_party_id;
                         let target_route = self.inner.party_routes.get(&target_pid).cloned();
                         let my_pid = self.inner.party_id;
 
                         if let Some(route) = target_route {
                             tokio::spawn(async move {
-                                let ctx = match sidecar.inner.api.routing_context() {
+                                let ctx = match proxy.inner.api.routing_context() {
                                     Ok(c) => c,
                                     Err(_) => return,
                                 };

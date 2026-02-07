@@ -28,7 +28,7 @@ pub struct AuctionCoordinator {
     bid_announcements: BidAnnouncementMap,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
     decryption_keys: Arc<Mutex<HashMap<String, String>>>,
-    /// MPC orchestrator (owns sidecar, routes, verifications)
+    /// MPC orchestrator (owns tunnel proxy, routes, verifications)
     mpc: Arc<MpcOrchestrator>,
 }
 
@@ -68,9 +68,9 @@ impl AuctionCoordinator {
             return Ok(());
         }
 
-        // Otherwise, forward to active MPC sidecar
-        if let Some(sidecar) = self.mpc.active_sidecar().lock().await.as_ref() {
-            sidecar.process_message(message).await?;
+        // Otherwise, forward to active MPC tunnel proxy
+        if let Some(proxy) = self.mpc.active_tunnel_proxy().lock().await.as_ref() {
+            proxy.process_message(message).await?;
         }
         Ok(())
     }

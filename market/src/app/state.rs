@@ -50,6 +50,6 @@ impl SharedAppState {
     }
 }
 
-/// Single static for the main → Dioxus handoff.
-pub static SHARED_STATE: once_cell::sync::OnceCell<SharedAppState> =
-    once_cell::sync::OnceCell::new();
+/// Single static for the main -> Dioxus handoff.
+pub static SHARED_STATE: std::sync::OnceLock<SharedAppState> =
+    std::sync::OnceLock::new();
