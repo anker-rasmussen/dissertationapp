@@ -42,16 +42,26 @@ fn init_test_tracing() {
 }
 
 /// Path to the veilid repository containing devnet infrastructure.
-const VEILID_REPO_PATH: &str = "/home/broadcom/Repos/Dissertation/Repos/veilid";
+/// Uses VEILID_REPO_PATH env var if set, otherwise falls back to
+/// `../../veilid` relative to the crate root (CARGO_MANIFEST_DIR).
+fn veilid_repo_path() -> PathBuf {
+    if let Ok(p) = std::env::var("VEILID_REPO_PATH") {
+        return PathBuf::from(p);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("market/ should have a parent directory")
+        .join("veilid")
+}
 
 /// Path to libipspoof.so for IP translation in devnet.
 fn libipspoof_path() -> PathBuf {
-    PathBuf::from(VEILID_REPO_PATH).join(".devcontainer/scripts/libipspoof.so")
+    veilid_repo_path().join(".devcontainer/scripts/libipspoof.so")
 }
 
 /// Path to docker-compose file for devnet.
 fn docker_compose_path() -> PathBuf {
-    PathBuf::from(VEILID_REPO_PATH).join(".devcontainer/compose/docker-compose.dev.yml")
+    veilid_repo_path().join(".devcontainer/compose/docker-compose.dev.yml")
 }
 
 /// Check if running in fast mode (persistent devnet)
@@ -446,8 +456,9 @@ fn setup_e2e_environment() -> anyhow::Result<DevnetManager> {
     if !devnet.infrastructure_available() {
         anyhow::bail!(
             "Devnet infrastructure not found at {}. \
-             Please ensure the veilid repository is available.",
-            VEILID_REPO_PATH
+             Please ensure the veilid repository is available \
+             or set VEILID_REPO_PATH.",
+            veilid_repo_path().display()
         );
     }
 
@@ -669,13 +680,8 @@ async fn test_e2e_real_devnet_3_party_auction() {
 
         // Create and publish listing to its own DHT record
         let listing_record = seller_dht.create_dht_record().await?;
-        let auction_end = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 3600; // 1 hour from now
         let mut listing =
-            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
+            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
@@ -691,7 +697,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
             title: listing.title.clone(),
             seller: seller_id.to_string(),
             reserve_price: listing.reserve_price,
-            auction_end,
+            auction_end: listing.auction_end,
         };
         seller_registry.register_listing(registry_entry).await?;
         eprintln!("[E2E] Listing registered in shared devnet registry");
@@ -1038,13 +1044,8 @@ async fn test_e2e_real_devnet_5_party_auction() {
 
         // Create and publish listing to its own DHT record
         let listing_record = seller_dht.create_dht_record().await?;
-        let auction_end = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 3600; // 1 hour from now
         let mut listing =
-            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
+            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
@@ -1060,7 +1061,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
             title: listing.title.clone(),
             seller: seller_id.to_string(),
             reserve_price: listing.reserve_price,
-            auction_end,
+            auction_end: listing.auction_end,
         };
         seller_registry.register_listing(registry_entry).await?;
         eprintln!("[E2E] Listing registered in shared devnet registry");
@@ -1341,13 +1342,8 @@ async fn test_e2e_real_devnet_10_party_auction() {
 
         // Create and publish listing to its own DHT record
         let listing_record = seller_dht.create_dht_record().await?;
-        let auction_end = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 3600; // 1 hour from now
         let mut listing =
-            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 60);
+            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
@@ -1363,7 +1359,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
             title: listing.title.clone(),
             seller: seller_id.to_string(),
             reserve_price: listing.reserve_price,
-            auction_end,
+            auction_end: listing.auction_end,
         };
         seller_registry.register_listing(registry_entry).await?;
         eprintln!("[E2E] Listing registered in shared devnet registry");
