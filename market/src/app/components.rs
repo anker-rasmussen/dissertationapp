@@ -7,7 +7,7 @@ use veilid_core::RecordKey;
 use crate::app::actions::{
     create_and_publish_listing, fetch_listing, fetch_registry_listings, submit_bid,
 };
-use crate::app::state::{get_node_state, AUCTION_COORDINATOR, NODE};
+use crate::app::state::{SharedAppState, SHARED_STATE};
 
 /// Display info for a listing in the browser.
 #[derive(Clone, Default, PartialEq)]
@@ -71,6 +71,7 @@ pub fn CreateListingForm(
     is_attached: bool,
     mut known_listings: Signal<Vec<(String, String)>>,
 ) -> Element {
+    let app_state = use_context::<SharedAppState>();
     let mut listing_title = use_signal(String::new);
     let mut listing_content = use_signal(String::new);
     let mut listing_reserve_price = use_signal(|| String::from("10"));
@@ -82,6 +83,7 @@ pub fn CreateListingForm(
         let content = listing_content.read().clone();
         let reserve_price = listing_reserve_price.read().clone();
         let duration = listing_duration.read().clone();
+        let state = app_state.clone();
 
         spawn(async move {
             listing_result.set("Creating listing...".to_string());
@@ -96,33 +98,25 @@ pub fn CreateListingForm(
                 return;
             }
 
-            if let Some(node_holder) = NODE.get() {
-                if let Some(node) = node_holder.read().as_ref() {
-                    if let Some(dht) = node.dht_operations() {
-                        match create_and_publish_listing(&dht, &title, &content, &reserve_price, &duration)
-                            .await
-                        {
-                            Ok(result) => {
-                                listing_result.set(format!(
-                                    "Published '{}'. Key: {}",
-                                    result.title, result.key
-                                ));
-                                known_listings
-                                    .write()
-                                    .push((result.key.clone(), result.title.clone()));
-                                listing_title.set(String::new());
-                                listing_content.set(String::new());
-                            }
-                            Err(e) => listing_result.set(format!("Error: {}", e)),
-                        }
-                    } else {
-                        listing_result.set("Node not started yet".to_string());
+            if let Some(dht) = state.dht_operations() {
+                match create_and_publish_listing(&state, &dht, &title, &content, &reserve_price, &duration)
+                    .await
+                {
+                    Ok(result) => {
+                        listing_result.set(format!(
+                            "Published '{}'. Key: {}",
+                            result.title, result.key
+                        ));
+                        known_listings
+                            .write()
+                            .push((result.key.clone(), result.title.clone()));
+                        listing_title.set(String::new());
+                        listing_content.set(String::new());
                     }
-                } else {
-                    listing_result.set("Node not initialized".to_string());
+                    Err(e) => listing_result.set(format!("Error: {}", e)),
                 }
             } else {
-                listing_result.set("Node holder not found".to_string());
+                listing_result.set("Node not started yet".to_string());
             }
         });
     };
@@ -210,191 +204,183 @@ pub fn ListingBrowser(
     is_attached: bool,
     mut known_listings: Signal<Vec<(String, String)>>,
 ) -> Element {
+    let app_state = use_context::<SharedAppState>();
     let mut browse_key = use_signal(String::new);
     let mut current_listing = use_signal(|| Option::<ListingInfo>::None);
     let mut browse_result = use_signal(String::new);
     let  bid_amount = use_signal(|| String::from("10"));
     let mut bid_result = use_signal(String::new);
 
-    let browse_listing = move |_| {
-        let key_str = browse_key.read().clone();
+    let browse_listing = {
+        let state = app_state.clone();
+        move |_| {
+            let key_str = browse_key.read().clone();
+            let state = state.clone();
 
-        spawn(async move {
-            browse_result.set("Fetching listing...".to_string());
+            spawn(async move {
+                browse_result.set("Fetching listing...".to_string());
 
-            if key_str.is_empty() {
-                browse_result.set("Error: Enter a listing key".to_string());
-                return;
-            }
+                if key_str.is_empty() {
+                    browse_result.set("Error: Enter a listing key".to_string());
+                    return;
+                }
 
-            if let Some(node_holder) = NODE.get() {
-                if let Some(node) = node_holder.read().as_ref() {
-                    if let Some(dht) = node.dht_operations() {
-                        match fetch_listing(&dht, &key_str).await {
-                            Ok(listing) => {
-                                let status = format!("{:?}", listing.status);
-                                let listing_key = listing.key.clone();
+                if let Some(dht) = state.dht_operations() {
+                    match fetch_listing(&dht, &key_str).await {
+                        Ok(listing) => {
+                            let status = format!("{:?}", listing.status);
+                            let listing_key = listing.key.clone();
 
-                                // Query live bid count from coordinator (not the static listing field)
-                                let (bid_count, has_decryption_key) =
-                                    if let Some(coordinator) = AUCTION_COORDINATOR.get() {
-                                        let count = coordinator.get_bid_count(&listing_key).await;
-                                        let has_key = coordinator.get_decryption_key(&listing_key).await.is_some();
-                                        (count, has_key)
-                                    } else {
-                                        (0, false)
-                                    };
-
-                                let info = ListingInfo {
-                                    key: key_str.clone(),
-                                    title: listing.title.clone(),
-                                    reserve_price: listing.reserve_price,
-                                    time_remaining: listing.time_remaining(),
-                                    status,
-                                    bid_count,
-                                    has_decryption_key,
-                                    decrypted_content: None,
+                            let (bid_count, has_decryption_key) =
+                                if let Some(coordinator) = state.coordinator() {
+                                    let count = coordinator.get_bid_count(&listing_key).await;
+                                    let has_key = coordinator.get_decryption_key(&listing_key).await.is_some();
+                                    (count, has_key)
+                                } else {
+                                    (0, false)
                                 };
-                                current_listing.set(Some(info));
-                                browse_result.set("Listing loaded".to_string());
 
-                                let mut listings = known_listings.write();
-                                if !listings.iter().any(|(k, _)| k == &key_str) {
-                                    listings.push((key_str, listing.title));
-                                }
-                            }
-                            Err(e) => {
-                                browse_result.set(format!("Error: {}", e));
-                                current_listing.set(None);
+                            let info = ListingInfo {
+                                key: key_str.clone(),
+                                title: listing.title.clone(),
+                                reserve_price: listing.reserve_price,
+                                time_remaining: listing.time_remaining(),
+                                status,
+                                bid_count,
+                                has_decryption_key,
+                                decrypted_content: None,
+                            };
+                            current_listing.set(Some(info));
+                            browse_result.set("Listing loaded".to_string());
+
+                            let mut listings = known_listings.write();
+                            if !listings.iter().any(|(k, _)| k == &key_str) {
+                                listings.push((key_str, listing.title));
                             }
                         }
-                    } else {
-                        browse_result.set("Node not started yet".to_string());
+                        Err(e) => {
+                            browse_result.set(format!("Error: {}", e));
+                            current_listing.set(None);
+                        }
                     }
                 } else {
-                    browse_result.set("Node not initialized".to_string());
+                    browse_result.set("Node not started yet".to_string());
                 }
-            } else {
-                browse_result.set("Node holder not found".to_string());
-            }
-        });
+            });
+        }
     };
 
-    let submit_bid_handler = move |_| {
-        let listing = current_listing.read().clone();
-        let amount_str = bid_amount.read().clone();
+    let submit_bid_handler = {
+        let state = app_state.clone();
+        move |_| {
+            let listing = current_listing.read().clone();
+            let amount_str = bid_amount.read().clone();
+            let state = state.clone();
 
-        spawn(async move {
-            if listing.is_none() {
-                bid_result.set("Error: No listing selected".to_string());
-                return;
-            }
-
-            let listing = listing.unwrap();
-            let amount: u64 = match amount_str.parse() {
-                Ok(a) => a,
-                Err(_) => {
-                    bid_result.set("Error: Invalid bid amount".to_string());
+            spawn(async move {
+                if listing.is_none() {
+                    bid_result.set("Error: No listing selected".to_string());
                     return;
                 }
-            };
 
-            if amount < listing.reserve_price {
-                bid_result.set(format!("Error: Bid must be at least {}", listing.reserve_price));
-                return;
-            }
-
-            bid_result.set("Submitting bid...".to_string());
-
-            if let Some(node_holder) = NODE.get() {
-                if let Some(node) = node_holder.read().as_ref() {
-                    if let Some(dht) = node.dht_operations() {
-                        match submit_bid(&dht, &listing.key, amount).await {
-                            Ok(msg) => bid_result.set(msg),
-                            Err(e) => bid_result.set(format!("Error: {}", e)),
-                        }
-                    } else {
-                        bid_result.set("Node not started yet".to_string());
+                let listing = listing.unwrap();
+                let amount: u64 = match amount_str.parse() {
+                    Ok(a) => a,
+                    Err(_) => {
+                        bid_result.set("Error: Invalid bid amount".to_string());
+                        return;
                     }
-                } else {
-                    bid_result.set("Node not initialized".to_string());
-                }
-            } else {
-                bid_result.set("Node holder not found".to_string());
-            }
-        });
-    };
+                };
 
-    let decrypt_content_handler = move |_| {
-        let listing_info = current_listing.read().clone();
-
-        spawn(async move {
-            browse_result.set("Decrypting content...".to_string());
-
-            if listing_info.is_none() {
-                browse_result.set("Error: No listing selected".to_string());
-                return;
-            }
-
-            let listing_info = listing_info.unwrap();
-
-            let listing_key = match RecordKey::try_from(listing_info.key.as_str()) {
-                Ok(key) => key,
-                Err(_) => {
-                    browse_result.set("Error: Invalid listing key".to_string());
+                if amount < listing.reserve_price {
+                    bid_result.set(format!("Error: Bid must be at least {}", listing.reserve_price));
                     return;
                 }
-            };
 
-            if let Some(coordinator) = AUCTION_COORDINATOR.get() {
-                match coordinator.fetch_and_decrypt_listing(&listing_key).await {
-                    Ok(plaintext) => {
-                        let mut updated_info = listing_info.clone();
-                        updated_info.decrypted_content = Some(plaintext);
-                        current_listing.set(Some(updated_info));
-                        browse_result.set("Content decrypted successfully!".to_string());
-                    }
-                    Err(e) => {
-                        browse_result.set(format!("Decryption failed: {}", e));
-                    }
-                }
-            } else {
-                browse_result.set("Error: Auction coordinator not available".to_string());
-            }
-        });
-    };
+                bid_result.set("Submitting bid...".to_string());
 
-    let refresh_listings = move |_| {
-        spawn(async move {
-            browse_result.set("Fetching listings from registry...".to_string());
-
-            if let Some(node_holder) = NODE.get() {
-                if let Some(node) = node_holder.read().as_ref() {
-                    if let Some(dht) = node.dht_operations() {
-                        match fetch_registry_listings(&dht).await {
-                            Ok(listings) => {
-                                let count = listings.len();
-                                let mut current = known_listings.write();
-                                for (key, title) in listings {
-                                    if !current.iter().any(|(k, _)| k == &key) {
-                                        current.push((key, title));
-                                    }
-                                }
-                                browse_result
-                                    .set(format!("Found {} listings in registry", count));
-                            }
-                            Err(e) => browse_result.set(format!("Error: {}", e)),
-                        }
-                    } else {
-                        browse_result.set("Node not started yet".to_string());
+                if let Some(dht) = state.dht_operations() {
+                    match submit_bid(&state, &dht, &listing.key, amount).await {
+                        Ok(msg) => bid_result.set(msg),
+                        Err(e) => bid_result.set(format!("Error: {}", e)),
                     }
                 } else {
-                    browse_result.set("Node not initialized".to_string());
+                    bid_result.set("Node not started yet".to_string());
                 }
-            } else {
-                browse_result.set("Node holder not found".to_string());
-            }
-        });
+            });
+        }
+    };
+
+    let decrypt_content_handler = {
+        let state = app_state.clone();
+        move |_| {
+            let listing_info = current_listing.read().clone();
+            let state = state.clone();
+
+            spawn(async move {
+                browse_result.set("Decrypting content...".to_string());
+
+                if listing_info.is_none() {
+                    browse_result.set("Error: No listing selected".to_string());
+                    return;
+                }
+
+                let listing_info = listing_info.unwrap();
+
+                let listing_key = match RecordKey::try_from(listing_info.key.as_str()) {
+                    Ok(key) => key,
+                    Err(_) => {
+                        browse_result.set("Error: Invalid listing key".to_string());
+                        return;
+                    }
+                };
+
+                if let Some(coordinator) = state.coordinator() {
+                    match coordinator.fetch_and_decrypt_listing(&listing_key).await {
+                        Ok(plaintext) => {
+                            let mut updated_info = listing_info.clone();
+                            updated_info.decrypted_content = Some(plaintext);
+                            current_listing.set(Some(updated_info));
+                            browse_result.set("Content decrypted successfully!".to_string());
+                        }
+                        Err(e) => {
+                            browse_result.set(format!("Decryption failed: {}", e));
+                        }
+                    }
+                } else {
+                    browse_result.set("Error: Auction coordinator not available".to_string());
+                }
+            });
+        }
+    };
+
+    let refresh_listings = {
+        let state = app_state.clone();
+        move |_| {
+            let state = state.clone();
+            spawn(async move {
+                browse_result.set("Fetching listings from registry...".to_string());
+
+                if let Some(dht) = state.dht_operations() {
+                    match fetch_registry_listings(&dht).await {
+                        Ok(listings) => {
+                            let count = listings.len();
+                            let mut current = known_listings.write();
+                            for (key, title) in listings {
+                                if !current.iter().any(|(k, _)| k == &key) {
+                                    current.push((key, title));
+                                }
+                            }
+                            browse_result
+                                .set(format!("Found {} listings in registry", count));
+                        }
+                        Err(e) => browse_result.set(format!("Error: {}", e)),
+                    }
+                } else {
+                    browse_result.set("Node not started yet".to_string());
+                }
+            });
+        }
     };
 
     rsx! {
@@ -583,14 +569,21 @@ fn ListingDisplay(
 
 /// Main application component.
 pub fn app() -> Element {
+    // Provide shared state to all child components via Dioxus context
+    let app_state = SHARED_STATE.get().expect("SHARED_STATE must be initialized before launching UI").clone();
+    use_context_provider(|| app_state.clone());
+
     let mut node_state = use_signal(NodeState::default);
     let known_listings: Signal<Vec<(String, String)>> = use_signal(Vec::new);
 
     // Poll node state
-    let _state_poller = use_resource(move || async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            node_state.set(get_node_state());
+    let _state_poller = use_resource(move || {
+        let state = app_state.clone();
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                node_state.set(state.get_node_state());
+            }
         }
     });
 
