@@ -43,9 +43,13 @@ impl SharedAppState {
 
     /// Get DHT operations from the current node (if started).
     pub fn dht_operations(&self) -> Option<market::DHTOperations> {
-        self.node_holder.read().as_ref().and_then(|node| node.dht_operations())
+        self.node_holder
+            .read()
+            .as_ref()
+            .and_then(|node| node.dht_operations())
     }
 }
 
 /// Single static for the main → Dioxus handoff.
-pub static SHARED_STATE: once_cell::sync::OnceCell<SharedAppState> = once_cell::sync::OnceCell::new();
+pub static SHARED_STATE: once_cell::sync::OnceCell<SharedAppState> =
+    once_cell::sync::OnceCell::new();

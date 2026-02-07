@@ -129,6 +129,9 @@ mod tests {
         // rng2's next call will get a different value since counter advanced
         let b = rng2.random_bytes_32();
 
-        assert_ne!(a, b, "Clone shares counter, so values differ after first call");
+        assert_ne!(
+            a, b,
+            "Clone shares counter, so values differ after first call"
+        );
     }
 }

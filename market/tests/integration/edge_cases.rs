@@ -90,7 +90,9 @@ async fn test_long_auction_duration() {
     let mut harness = MultiPartyHarness::new(3).await;
 
     // 30 day auction
-    let listing = harness.create_listing("Long Auction", 100, 30 * 24 * 3600).await;
+    let listing = harness
+        .create_listing("Long Auction", 100, 30 * 24 * 3600)
+        .await;
 
     harness.place_bid(0, &listing, 200).await;
     harness.place_bid(1, &listing, 300).await;
@@ -141,9 +143,15 @@ async fn test_timestamp_edge_exact_tie() {
 
     // All bids at exact same timestamp
     let same_ts = 1000;
-    harness.place_bid_with_timestamp(0, &listing, 500, same_ts).await;
-    harness.place_bid_with_timestamp(1, &listing, 500, same_ts).await;
-    harness.place_bid_with_timestamp(2, &listing, 500, same_ts).await;
+    harness
+        .place_bid_with_timestamp(0, &listing, 500, same_ts)
+        .await;
+    harness
+        .place_bid_with_timestamp(1, &listing, 500, same_ts)
+        .await;
+    harness
+        .place_bid_with_timestamp(2, &listing, 500, same_ts)
+        .await;
 
     harness.advance_to_deadline(&listing);
 
@@ -176,7 +184,9 @@ async fn test_seller_can_bid() {
     let mut harness = MultiPartyHarness::new(3).await;
 
     // Party 0 is the seller (creates listing)
-    let listing = harness.create_listing("Seller Bidding Item", 100, 3600).await;
+    let listing = harness
+        .create_listing("Seller Bidding Item", 100, 3600)
+        .await;
 
     // Seller also bids
     harness.place_bid(0, &listing, 1000).await; // Seller bids highest
@@ -205,8 +215,18 @@ async fn test_bid_storage_persists() {
     assert!(!harness.party(2).bid_storage.has_bid(&listing.key).await);
 
     // Verify bid values
-    let (value0, _) = harness.party(0).bid_storage.get_bid(&listing.key).await.unwrap();
-    let (value1, _) = harness.party(1).bid_storage.get_bid(&listing.key).await.unwrap();
+    let (value0, _) = harness
+        .party(0)
+        .bid_storage
+        .get_bid(&listing.key)
+        .await
+        .unwrap();
+    let (value1, _) = harness
+        .party(1)
+        .bid_storage
+        .get_bid(&listing.key)
+        .await
+        .unwrap();
 
     assert_eq!(value0, 200);
     assert_eq!(value1, 300);

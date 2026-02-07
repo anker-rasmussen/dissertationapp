@@ -60,7 +60,9 @@ async fn test_5_party_first_party_wins() {
 async fn test_5_party_middle_wins() {
     let mut harness = MultiPartyHarness::new(5).await;
 
-    let listing = harness.create_listing("Middle Winner Item", 100, 3600).await;
+    let listing = harness
+        .create_listing("Middle Winner Item", 100, 3600)
+        .await;
 
     harness.place_bid(0, &listing, 100).await;
     harness.place_bid(1, &listing, 200).await;
@@ -99,13 +101,21 @@ async fn test_5_party_all_same_bid() {
 async fn test_5_party_three_way_tie() {
     let mut harness = MultiPartyHarness::new(5).await;
 
-    let listing = harness.create_listing("Three-Way Tie Item", 100, 3600).await;
+    let listing = harness
+        .create_listing("Three-Way Tie Item", 100, 3600)
+        .await;
 
-    harness.place_bid_with_timestamp(0, &listing, 500, 300).await; // Tied, ts=300
-    harness.place_bid_with_timestamp(1, &listing, 500, 100).await; // Tied, ts=100 (earliest)
-    harness.place_bid_with_timestamp(2, &listing, 500, 200).await; // Tied, ts=200
-    harness.place_bid_with_timestamp(3, &listing, 400, 50).await;  // Lower
-    harness.place_bid_with_timestamp(4, &listing, 300, 10).await;  // Lower
+    harness
+        .place_bid_with_timestamp(0, &listing, 500, 300)
+        .await; // Tied, ts=300
+    harness
+        .place_bid_with_timestamp(1, &listing, 500, 100)
+        .await; // Tied, ts=100 (earliest)
+    harness
+        .place_bid_with_timestamp(2, &listing, 500, 200)
+        .await; // Tied, ts=200
+    harness.place_bid_with_timestamp(3, &listing, 400, 50).await; // Lower
+    harness.place_bid_with_timestamp(4, &listing, 300, 10).await; // Lower
 
     harness.advance_to_deadline(&listing);
 

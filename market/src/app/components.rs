@@ -99,14 +99,19 @@ pub fn CreateListingForm(
             }
 
             if let Some(dht) = state.dht_operations() {
-                match create_and_publish_listing(&state, &dht, &title, &content, &reserve_price, &duration)
-                    .await
+                match create_and_publish_listing(
+                    &state,
+                    &dht,
+                    &title,
+                    &content,
+                    &reserve_price,
+                    &duration,
+                )
+                .await
                 {
                     Ok(result) => {
-                        listing_result.set(format!(
-                            "Published '{}'. Key: {}",
-                            result.title, result.key
-                        ));
+                        listing_result
+                            .set(format!("Published '{}'. Key: {}", result.title, result.key));
                         known_listings
                             .write()
                             .push((result.key.clone(), result.title.clone()));
@@ -208,7 +213,7 @@ pub fn ListingBrowser(
     let mut browse_key = use_signal(String::new);
     let mut current_listing = use_signal(|| Option::<ListingInfo>::None);
     let mut browse_result = use_signal(String::new);
-    let  bid_amount = use_signal(|| String::from("10"));
+    let bid_amount = use_signal(|| String::from("10"));
     let mut bid_result = use_signal(String::new);
 
     let browse_listing = {
@@ -231,14 +236,16 @@ pub fn ListingBrowser(
                             let status = format!("{:?}", listing.status);
                             let listing_key = listing.key.clone();
 
-                            let (bid_count, has_decryption_key) =
-                                if let Some(coordinator) = state.coordinator() {
-                                    let count = coordinator.get_bid_count(&listing_key).await;
-                                    let has_key = coordinator.get_decryption_key(&listing_key).await.is_some();
-                                    (count, has_key)
-                                } else {
-                                    (0, false)
-                                };
+                            let (bid_count, has_decryption_key) = if let Some(coordinator) =
+                                state.coordinator()
+                            {
+                                let count = coordinator.get_bid_count(&listing_key).await;
+                                let has_key =
+                                    coordinator.get_decryption_key(&listing_key).await.is_some();
+                                (count, has_key)
+                            } else {
+                                (0, false)
+                            };
 
                             let info = ListingInfo {
                                 key: key_str.clone(),
@@ -293,7 +300,10 @@ pub fn ListingBrowser(
                 };
 
                 if amount < listing.reserve_price {
-                    bid_result.set(format!("Error: Bid must be at least {}", listing.reserve_price));
+                    bid_result.set(format!(
+                        "Error: Bid must be at least {}",
+                        listing.reserve_price
+                    ));
                     return;
                 }
 
@@ -371,8 +381,7 @@ pub fn ListingBrowser(
                                     current.push((key, title));
                                 }
                             }
-                            browse_result
-                                .set(format!("Found {} listings in registry", count));
+                            browse_result.set(format!("Found {} listings in registry", count));
                         }
                         Err(e) => browse_result.set(format!("Error: {}", e)),
                     }
@@ -570,7 +579,10 @@ fn ListingDisplay(
 /// Main application component.
 pub fn app() -> Element {
     // Provide shared state to all child components via Dioxus context
-    let app_state = SHARED_STATE.get().expect("SHARED_STATE must be initialized before launching UI").clone();
+    let app_state = SHARED_STATE
+        .get()
+        .expect("SHARED_STATE must be initialized before launching UI")
+        .clone();
     use_context_provider(|| app_state.clone());
 
     let mut node_state = use_signal(NodeState::default);

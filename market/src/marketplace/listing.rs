@@ -94,11 +94,7 @@ impl Listing {
 
     /// Get time remaining at a specific timestamp
     pub fn time_remaining_at(&self, now: u64) -> u64 {
-        if now >= self.auction_end {
-            0
-        } else {
-            self.auction_end - now
-        }
+        self.auction_end.saturating_sub(now)
     }
 
     /// Decrypt the encrypted content using the provided hex-encoded decryption key
@@ -112,7 +108,8 @@ impl Listing {
 
         // Convert to 32-byte array
         let len = key_bytes.len();
-        let key: ContentKey = key_bytes.try_into()
+        let key: ContentKey = key_bytes
+            .try_into()
             .map_err(|_| anyhow::anyhow!("Key must be 32 bytes, got {} bytes", len))?;
 
         // Decrypt using the crypto module
@@ -204,11 +201,16 @@ impl<T: TimeProvider> ListingBuilder<T> {
             key: self.key.ok_or("key is required")?,
             seller: self.seller.ok_or("seller is required")?,
             title: self.title.ok_or("title is required")?,
-            encrypted_content: self.encrypted_content.ok_or("encrypted_content is required")?,
+            encrypted_content: self
+                .encrypted_content
+                .ok_or("encrypted_content is required")?,
             content_nonce: self.content_nonce.ok_or("content_nonce is required")?,
             decryption_key: self.decryption_key.ok_or("decryption_key is required")?,
             reserve_price: self.reserve_price.ok_or("reserve_price is required")?,
-            auction_end: created_at + self.auction_duration_secs.ok_or("auction_duration is required")?,
+            auction_end: created_at
+                + self
+                    .auction_duration_secs
+                    .ok_or("auction_duration is required")?,
             created_at,
             status: ListingStatus::Active,
             bid_count: 0,
@@ -410,7 +412,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let decrypted = listing.decrypt_content_with_key(&listing.decryption_key).unwrap();
+        let decrypted = listing
+            .decrypt_content_with_key(&listing.decryption_key)
+            .unwrap();
         assert_eq!(decrypted, plaintext);
     }
 

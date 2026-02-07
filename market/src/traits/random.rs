@@ -53,7 +53,10 @@ mod tests {
         rng.fill_bytes(&mut buf);
 
         // Very unlikely to be all zeros after random fill
-        assert!(buf.iter().any(|&b| b != 0), "Buffer should have non-zero bytes");
+        assert!(
+            buf.iter().any(|&b| b != 0),
+            "Buffer should have non-zero bytes"
+        );
     }
 
     #[test]

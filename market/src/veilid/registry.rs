@@ -15,8 +15,7 @@ const DEVNET_REGISTRY_KEYPAIR: &str =
 /// Hardcoded registry record key for devnet/demo
 /// This is the DHT record key where the registry is stored
 /// All nodes use this same record key to access the shared registry
-const DEVNET_REGISTRY_RECORD_KEY: &str =
-    "VLD0:WvPYrb8EnnKOsCQ6MB_inMSnlXyQ6mkXuMa2fh55Dz4";
+const DEVNET_REGISTRY_RECORD_KEY: &str = "VLD0:WvPYrb8EnnKOsCQ6MB_inMSnlXyQ6mkXuMa2fh55Dz4";
 
 /// Listing entry in the registry (minimal info for discovery)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,9 +269,7 @@ impl RegistryOperations {
 
         for attempt in 0..max_retries {
             // Fetch current registry with force_refresh to get latest state from network
-            let value_data = routing_context
-                .get_dht_value(key.clone(), 0, true)
-                .await?;
+            let value_data = routing_context.get_dht_value(key.clone(), 0, true).await?;
 
             let (mut registry, old_seq) = match value_data {
                 Some(v) => {
@@ -286,10 +283,7 @@ impl RegistryOperations {
 
             // Check if listing already exists (no-op if duplicate)
             if registry.listings.iter().any(|e| e.key == entry.key) {
-                info!(
-                    "Listing '{}' already in registry, skipping",
-                    entry.title
-                );
+                info!("Listing '{}' already in registry, skipping", entry.title);
                 return Ok(());
             }
 

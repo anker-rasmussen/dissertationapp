@@ -45,7 +45,11 @@ impl<D: DhtStore> BidOperations<D> {
 
     /// Register a bid in the shared bid index for a listing.
     /// Uses optimistic concurrency control with retry.
-    pub async fn register_bid(&self, listing_record: &D::OwnedRecord, bid: BidRecord) -> Result<()> {
+    pub async fn register_bid(
+        &self,
+        listing_record: &D::OwnedRecord,
+        bid: BidRecord,
+    ) -> Result<()> {
         let listing_key = D::record_key(listing_record);
         let max_retries = BID_REGISTER_MAX_RETRIES;
         let mut retry_delay = std::time::Duration::from_millis(BID_REGISTER_INITIAL_DELAY_MS);
@@ -225,7 +229,9 @@ mod tests {
         let listing_key = MockDht::record_key(&listing_record);
 
         let bid = make_test_bid(listing_key.clone(), 1);
-        ops.register_bid(&listing_record, bid.clone()).await.unwrap();
+        ops.register_bid(&listing_record, bid.clone())
+            .await
+            .unwrap();
         ops.register_bid(&listing_record, bid).await.unwrap(); // Duplicate
 
         let index = ops.fetch_bid_index(&listing_key).await.unwrap();

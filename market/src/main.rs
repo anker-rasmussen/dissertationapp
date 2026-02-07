@@ -223,8 +223,9 @@ fn main() {
                         Some(veilid_core::VeilidUpdate::AppMessage(msg)) => {
                             let coordinator = coordinator_holder.read().clone();
                             if let Some(coordinator) = coordinator {
-                                if let Err(e) =
-                                    coordinator.process_app_message(msg.message().to_vec()).await
+                                if let Err(e) = coordinator
+                                    .process_app_message(msg.message().to_vec())
+                                    .await
                                 {
                                     error!("Failed to process MPC message: {}", e);
                                 }

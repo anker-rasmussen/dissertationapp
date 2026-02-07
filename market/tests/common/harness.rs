@@ -19,8 +19,7 @@ use veilid_core::PublicKey;
 pub struct PartyContext {
     pub party_id: usize,
     pub node_id: PublicKey,
-    pub auction_logic:
-        AuctionLogic<SharedMockDht, MockTransport, MockMpcRunner, MockTime>,
+    pub auction_logic: AuctionLogic<SharedMockDht, MockTransport, MockMpcRunner, MockTime>,
     pub bid_storage: BidStorage,
     pub transport: MockTransport,
     pub dht: SharedMockDht,
@@ -145,11 +144,7 @@ impl MultiPartyHarness {
         // Store listing in shared DHT
         let record = self.parties[0].dht.create_record().await.unwrap();
         let cbor = listing.to_cbor().unwrap();
-        self.parties[0]
-            .dht
-            .set_value(&record, cbor)
-            .await
-            .unwrap();
+        self.parties[0].dht.set_value(&record, cbor).await.unwrap();
 
         // All parties watch the listing
         for party in &self.parties {
@@ -301,11 +296,7 @@ impl MultiPartyHarness {
     }
 
     /// Simulate the winner requesting and receiving the decryption key.
-    pub async fn transfer_decryption_key(
-        &self,
-        listing: &Listing,
-        winner_id: usize,
-    ) {
+    pub async fn transfer_decryption_key(&self, listing: &Listing, winner_id: usize) {
         let winner = &self.parties[winner_id];
 
         // Store decryption key for winner
