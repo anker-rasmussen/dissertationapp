@@ -51,5 +51,4 @@ impl SharedAppState {
 }
 
 /// Single static for the main -> Dioxus handoff.
-pub static SHARED_STATE: std::sync::OnceLock<SharedAppState> =
-    std::sync::OnceLock::new();
+pub static SHARED_STATE: std::sync::OnceLock<SharedAppState> = std::sync::OnceLock::new();

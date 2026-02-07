@@ -121,7 +121,8 @@ fn ensure_mpspdz_ready() -> anyhow::Result<()> {
                  Please run the setup script manually:\n\
                    ./setup-mpspdz.sh --mp-spdz-dir {}\n\
                  Or ensure shamir-party.x, SSL certs, and compile.py exist in {}",
-                mp_spdz_dir, mp_spdz_dir
+                mp_spdz_dir,
+                mp_spdz_dir
             );
         }
     }

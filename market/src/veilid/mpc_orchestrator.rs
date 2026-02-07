@@ -276,7 +276,8 @@ impl MpcOrchestrator {
         info!("My bid value: {}", bid_value);
 
         // Start MPC tunnel proxy with the routes
-        let tunnel_proxy = MpcTunnelProxy::new(self.api.clone(), party_id, routes, self.node_offset);
+        let tunnel_proxy =
+            MpcTunnelProxy::new(self.api.clone(), party_id, routes, self.node_offset);
         tunnel_proxy.run().await?;
 
         // Store tunnel proxy so AppMessages can be routed to it
@@ -447,14 +448,14 @@ impl MpcOrchestrator {
                             let key = listing_key.clone();
 
                             // Store pending verification entry
-                            self.pending_verifications
-                                .lock()
-                                .await
-                                .insert(key, VerificationState {
+                            self.pending_verifications.lock().await.insert(
+                                key,
+                                VerificationState {
                                     winner_pubkey: winner_pubkey.clone(),
                                     mpc_winning_bid: bid,
                                     verified: None,
-                                });
+                                },
+                            );
                             info!(
                                 "Stored pending verification: winner={}, bid={}",
                                 winner_pubkey, bid
