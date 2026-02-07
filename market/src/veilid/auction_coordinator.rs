@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -598,33 +598,12 @@ impl AuctionCoordinator {
                 drop(routes);
                 drop(mgr);
                 drop(managers);
-                warn!("Winner's MPC route not found in route manager");
+                return Err(anyhow::anyhow!("Winner's MPC route not found in route manager for listing {}", listing_key));
             }
         } else {
             drop(managers);
-            warn!("Route manager not found for listing {}", listing_key);
+            return Err(anyhow::anyhow!("Route manager not found for listing {}", listing_key));
         }
-
-        // Fallback: broadcast to all peers if route not found
-        warn!("Using fallback broadcast to all peers");
-        let routing_context = self.api.routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
-            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
-
-        let state = self.api.get_state().await
-            .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
-
-        for peer in &state.network.peers {
-            for node_id in &peer.node_ids {
-                let _ = routing_context.app_message(Target::NodeId(node_id.clone()), data.clone()).await;
-            }
-        }
-
-        // Cleanup route manager after broadcast fallback
-        self.cleanup_route_manager(listing_key).await;
-
-        Ok(())
     }
 
     /// Cleanup route manager for a listing (called after decryption key transfer completes)
@@ -891,31 +870,24 @@ impl AuctionCoordinator {
         // Store sidecar so AppMessages can be routed to it
         *self.active_sidecar.lock().await = Some(sidecar.clone());
 
-        // Write input file for MP-SPDZ
         let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
             .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
 
-        let input_path = format!("{}/Player-Data/Input-P{}-0", mp_spdz_dir, party_id);
-        std::fs::write(&input_path, format!("{}\n", bid_value))
-            .map_err(|e| anyhow::anyhow!("Failed to write input file {}: {}", input_path, e))?;
-
-        info!("Wrote bid value to {}", input_path);
-
-        // Generate hosts file for this node using Veilid node ID prefix
+        // Generate hosts file in temp dir (MP-SPDZ needs a real file for -ip)
         let node_id_str = self.my_node_id.to_string();
         let node_prefix = &node_id_str[5..10]; // Extract first 5 chars after "VLD0:"
         let hosts_file_name = format!("HOSTS-{}", node_prefix);
-        let hosts_file_path = format!("{}/{}", mp_spdz_dir, hosts_file_name);
+        let hosts_file_path = std::env::temp_dir().join(&hosts_file_name);
 
         // Write hosts file with all parties as localhost (Veilid handles actual routing)
         let mut hosts_content = String::new();
         for _ in 0..num_parties {
             hosts_content.push_str("127.0.0.1\n");
         }
-        std::fs::write(&hosts_file_path, hosts_content)
-            .map_err(|e| anyhow::anyhow!("Failed to write hosts file {}: {}", hosts_file_path, e))?;
+        std::fs::write(&hosts_file_path, &hosts_content)
+            .map_err(|e| anyhow::anyhow!("Failed to write hosts file {:?}: {}", hosts_file_path, e))?;
 
-        info!("Wrote hosts file to {} for {} parties", hosts_file_path, num_parties);
+        info!("Wrote hosts file to {:?} for {} parties", hosts_file_path, num_parties);
 
         // Wait for all parties to be ready
         info!("Waiting 5 seconds for all parties to be ready...");
@@ -953,11 +925,11 @@ impl AuctionCoordinator {
             }
         }
 
-        // Execute MP-SPDZ with Shamir party executable
-        info!("Executing MP-SPDZ auction_n-{} program (Shamir)...", num_parties);
+        // Execute MP-SPDZ with Shamir party executable (interactive mode: bid via stdin)
+        info!("Executing MP-SPDZ auction_n-{} program (Shamir, interactive)...", num_parties);
 
         let program_name = format!("auction_n-{}", num_parties);
-        let output = Command::new(format!("{}/shamir-party.x", mp_spdz_dir))
+        let spawn_result = Command::new(format!("{}/shamir-party.x", mp_spdz_dir))
             .current_dir(&mp_spdz_dir)
             .arg("-p")
             .arg(party_id.to_string())
@@ -966,9 +938,34 @@ impl AuctionCoordinator {
             .arg("-OF")
             .arg(".")  // Output to stdout
             .arg("-ip")
-            .arg(&hosts_file_name)  // Use node-specific hosts file
+            .arg(hosts_file_path.to_str().unwrap_or("HOSTS"))
+            .arg("-I")  // Interactive mode: read inputs from stdin
             .arg(&program_name)
-            .output();
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+
+        let mut child = match spawn_result {
+            Ok(child) => child,
+            Err(e) => {
+                let _ = std::fs::remove_file(&hosts_file_path);
+                return Err(anyhow::anyhow!("Failed to spawn shamir-party.x: {}", e));
+            }
+        };
+
+        // Write bid value to stdin, then close the pipe (EOF)
+        {
+            use std::io::Write;
+            let stdin = child.stdin.take()
+                .ok_or_else(|| anyhow::anyhow!("Failed to open stdin pipe to shamir-party.x"))?;
+            let mut stdin = stdin;
+            stdin.write_all(format!("{}\n", bid_value).as_bytes())
+                .map_err(|e| anyhow::anyhow!("Failed to write bid value to stdin: {}", e))?;
+            // stdin is dropped here, sending EOF
+        }
+
+        let output = child.wait_with_output();
 
         match output {
             Ok(result) => {
@@ -1064,6 +1061,9 @@ impl AuctionCoordinator {
                 sidecar.cleanup().await;
                 *self.active_sidecar.lock().await = None;
 
+                // Clean up temp hosts file
+                let _ = std::fs::remove_file(&hosts_file_path);
+
                 // NOTE: Route manager is NOT cleaned up here for seller or winner.
                 // Cleanup happens in:
                 // - send_decryption_hash() after successfully sending the key (seller)
@@ -1076,6 +1076,9 @@ impl AuctionCoordinator {
                 error!("Failed to execute MP-SPDZ: {}", e);
                 sidecar.cleanup().await;
                 *self.active_sidecar.lock().await = None;
+
+                // Clean up temp hosts file
+                let _ = std::fs::remove_file(&hosts_file_path);
 
                 // On error, cleanup route manager immediately
                 {
