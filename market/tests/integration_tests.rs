@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Integration tests for multi-party sealed-bid auctions.
 //!
 //! These tests use the DI-based test harness to simulate multi-party
