@@ -7,14 +7,31 @@ use super::dht::DHTOperations;
 use crate::config::now_unix;
 use crate::traits::TimeProvider;
 
-/// Default registry keypair for devnet/demo.
-/// Override via `VEILID_REGISTRY_KEYPAIR` environment variable.
-/// In production, this should be loaded from a secure shared location.
+/// **DEVNET-ONLY** shared keypair for the listing registry DHT record.
+///
+/// # Security
+///
+/// This keypair is hardcoded in source and grants write access to the shared
+/// listing registry. Anyone who reads the source (or binary) can write to the
+/// registry. This is intentional for the devnet/dissertation demo where all
+/// participants need to register listings in a single shared record.
+///
+/// In a production system, the registry would need per-user write
+/// authorization — e.g., individually signed entries verified by peers, or a
+/// registry service that validates requests before committing writes.
+///
+/// Override via the `VEILID_REGISTRY_KEYPAIR` environment variable to use a
+/// different keypair for isolated deployments or testing.
 const DEFAULT_REGISTRY_KEYPAIR: &str =
     "VLD0:Qz4_xPTDDkwDtIgwuk1AarJTudWkg1hlrMIuQstprzM:o70UeMuq22ZrE-ysnmtN8wthjO0YSRUe6nxn2DnnWeQ";
 
-/// Default registry record key for devnet/demo.
-/// Override via `VEILID_REGISTRY_RECORD_KEY` environment variable.
+/// **DEVNET-ONLY** shared record key for the listing registry.
+///
+/// This is the DHT record address that all nodes use to find the shared
+/// registry. It is derived from [`DEFAULT_REGISTRY_KEYPAIR`] and must stay
+/// in sync with it.
+///
+/// Override via the `VEILID_REGISTRY_RECORD_KEY` environment variable.
 const DEFAULT_REGISTRY_RECORD_KEY: &str = "VLD0:WvPYrb8EnnKOsCQ6MB_inMSnlXyQ6mkXuMa2fh55Dz4";
 
 /// Read the registry keypair from the environment, falling back to the default.
@@ -262,7 +279,14 @@ impl RegistryOperations {
         }
     }
 
-    /// Add a listing to the registry with retry logic for conflict resolution
+    /// Add a listing to the registry with retry logic for conflict resolution.
+    ///
+    /// # Authorization
+    ///
+    /// This method performs **no authorization checks** — any caller with access
+    /// to the shared registry keypair (see [`DEFAULT_REGISTRY_KEYPAIR`]) can
+    /// write arbitrary entries. This is acceptable for the devnet demo but would
+    /// need authenticated write control in production.
     pub async fn register_listing(&mut self, entry: RegistryEntry) -> Result<()> {
         let key = self.get_or_create_registry().await?;
         let routing_context = self.dht.get_routing_context_pub()?;
