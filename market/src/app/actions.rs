@@ -70,9 +70,10 @@ pub async fn create_and_publish_listing(
         auction_end: listing.auction_end,
     };
 
-    if let Err(e) = registry_ops.register_listing(registry_entry).await {
-        tracing::warn!("Failed to register listing in shared registry: {}", e);
-    }
+    registry_ops
+        .register_listing(registry_entry)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to register listing in shared registry: {}", e))?;
 
     // Register with auction coordinator
     if let Some(coordinator) = state.coordinator() {
@@ -89,11 +90,10 @@ pub async fn create_and_publish_listing(
         "Placing seller's reserve bid at {} for listing {}",
         reserve_price, listing_key_str
     );
-    if let Err(e) = submit_bid(state, dht, &listing_key_str, reserve_price).await {
-        tracing::warn!("Failed to place seller's reserve bid: {}", e);
-    } else {
-        info!("Seller's reserve bid placed successfully");
-    }
+    submit_bid(state, dht, &listing_key_str, reserve_price)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to place seller's reserve bid: {}", e))?;
+    info!("Seller's reserve bid placed successfully");
 
     Ok(CreateListingResult {
         key: listing_key_str,
@@ -147,32 +147,24 @@ pub async fn submit_bid(
         info!("Stored bid value locally for MPC execution");
     }
 
-    // Create BidRecord for DHT
+    // Create BidRecord and publish to DHT
     let bid_ops = BidOperations::new(dht.clone());
-    let bid_record_own = bid_ops
-        .publish_bid(BidRecord {
-            listing_key: listing_record_key.clone(),
-            bidder: bidder.clone(),
-            commitment: bid.commitment,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            bid_key: listing_record_key.clone(),
-        })
-        .await?;
-
-    // Update the bid_key with actual DHT key
-    let bid_record = BidRecord {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut bid_record = BidRecord {
         listing_key: listing_record_key.clone(),
         bidder: bidder.clone(),
         commitment: bid.commitment,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        bid_key: bid_record_own.key.clone(),
+        timestamp,
+        // Placeholder — will be updated with the actual DHT key after publish
+        bid_key: listing_record_key.clone(),
     };
+    let bid_record_own = bid_ops.publish_bid(bid_record.clone()).await?;
+
+    // Update bid_key with the actual DHT record key
+    bid_record.bid_key = bid_record_own.key.clone();
 
     // Store bid_key in local storage
     state

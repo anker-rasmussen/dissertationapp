@@ -1,7 +1,8 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use veilid_core::{
@@ -328,7 +329,8 @@ impl MpcOrchestrator {
             .arg("auction_n")
             .arg("--")
             .arg(num_parties.to_string())
-            .output();
+            .output()
+            .await;
 
         match compile_output {
             Ok(result) => {
@@ -392,19 +394,19 @@ impl MpcOrchestrator {
 
         // Write bid value to stdin, then close the pipe (EOF)
         {
-            use std::io::Write;
-            let stdin = child
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child
                 .stdin
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("Failed to open stdin pipe to shamir-party.x"))?;
-            let mut stdin = stdin;
             stdin
                 .write_all(format!("{bid_value}\n").as_bytes())
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to write bid value to stdin: {e}"))?;
             // stdin is dropped here, sending EOF
         }
 
-        let output = child.wait_with_output();
+        let output = child.wait_with_output().await;
 
         match output {
             Ok(result) => {
