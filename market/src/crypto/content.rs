@@ -28,7 +28,7 @@ pub fn encrypt_content(plaintext: &str, key: &ContentKey) -> Result<(Vec<u8>, Co
     // Encrypt the plaintext
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_bytes())
-        .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
 
     Ok((ciphertext, nonce_bytes))
 }
@@ -46,7 +46,7 @@ pub fn decrypt_content(
     // Decrypt the ciphertext
     let plaintext_bytes = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
 
     // Convert to UTF-8 string
     String::from_utf8(plaintext_bytes).context("Decrypted content is not valid UTF-8")

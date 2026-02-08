@@ -22,7 +22,7 @@ pub mod marketplace;
 pub mod traits;
 pub mod veilid;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub mod mocks;
 
 pub use config::*;
@@ -31,7 +31,7 @@ pub use marketplace::{Bid, BidCollection, BidIndex, BidRecord, Listing, ListingS
 pub use traits::{DhtStore, TimeProvider};
 // MessageTransport, MpcRunner, and RandomSource are only needed by
 // AuctionLogic (test simulator) and mock infrastructure.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub use traits::{MessageTransport, MpcRunner, RandomSource};
 pub use veilid::auction_coordinator::AuctionCoordinator;
 pub use veilid::bid_ops::BidOperations;

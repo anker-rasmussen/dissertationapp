@@ -68,7 +68,7 @@ impl MpcTunnelProxy {
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub fn run(&self) -> Result<()> {
         info!("Starting MPC TunnelProxy for Party {}", self.inner.party_id);
 
         // Setup outgoing proxies - listen directly on MP-SPDZ ports
@@ -77,6 +77,7 @@ impl MpcTunnelProxy {
                 continue;
             }
 
+            #[allow(clippy::cast_possible_truncation)] // party count fits in u16
             let listen_port = self.inner.base_port + (pid as u16);
             let proxy = self.clone();
             let route_id = route_id.clone();
@@ -92,7 +93,7 @@ impl MpcTunnelProxy {
     }
 
     /// Cleanup resources (no-op since we no longer spawn external processes)
-    pub async fn cleanup(&self) {
+    pub fn cleanup(&self) {
         info!(
             "Cleaning up MPC tunnel proxy for Party {}",
             self.inner.party_id
@@ -105,10 +106,10 @@ impl MpcTunnelProxy {
         target_pid: usize,
         target_route: RouteId,
     ) -> Result<()> {
-        let addr = format!("127.0.0.1:{}", listen_port);
+        let addr = format!("127.0.0.1:{listen_port}");
         let listener = TcpListener::bind(&addr)
             .await
-            .context(format!("Failed to bind proxy at {}", addr))?;
+            .context(format!("Failed to bind proxy at {addr}"))?;
 
         info!(
             "Listening for MP-SPDZ connection to Party {} on port {}",
@@ -132,14 +133,14 @@ impl MpcTunnelProxy {
                 .inner
                 .api
                 .routing_context()
-                .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
+                .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
                 .with_safety(SafetySelection::Safe(SafetySpec {
                     preferred_route: None,
                     hop_count: 2, // Default
                     stability: Stability::Reliable,
                     sequencing: Sequencing::PreferOrdered,
                 }))
-                .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))?;
 
             // Send Open message
             let open_msg = MpcMessage::Open {
@@ -148,7 +149,7 @@ impl MpcTunnelProxy {
             let data = bincode::serialize(&open_msg)?;
             ctx.app_message(Target::RouteId(target_route.clone()), data)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to send Open: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to send Open: {e}"))?;
 
             // Read loop: TCP -> Veilid
             let ctx_clone = ctx.clone();
@@ -224,8 +225,9 @@ impl MpcTunnelProxy {
                 // I (Sidecar 0) receive OPEN.
                 // I should connect to `localhost:5000` (my MP-SPDZ).
 
+                #[allow(clippy::cast_possible_truncation)] // party count fits in u16
                 let local_target_port = self.inner.base_port + (self.inner.party_id as u16);
-                let addr = format!("127.0.0.1:{}", local_target_port);
+                let addr = format!("127.0.0.1:{local_target_port}");
 
                 match TcpStream::connect(&addr).await {
                     Ok(stream) => {
@@ -259,26 +261,23 @@ impl MpcTunnelProxy {
 
                         if let Some(route) = target_route {
                             tokio::spawn(async move {
-                                let ctx = match proxy.inner.api.routing_context() {
-                                    Ok(c) => c,
-                                    Err(_) => return,
+                                let Ok(ctx) = proxy.inner.api.routing_context() else {
+                                    return;
                                 };
-                                let ctx = match ctx.with_safety(SafetySelection::Safe(SafetySpec {
+                                let Ok(ctx) = ctx.with_safety(SafetySelection::Safe(SafetySpec {
                                     preferred_route: None,
                                     hop_count: 2,
                                     stability: Stability::Reliable,
                                     sequencing: Sequencing::PreferOrdered,
-                                })) {
-                                    Ok(c) => c,
-                                    Err(_) => return,
+                                })) else {
+                                    return;
                                 };
 
                                 let mut buf = vec![0u8; 32000];
                                 loop {
                                     let n = match rd.read(&mut buf).await {
-                                        Ok(0) => break,
+                                        Ok(0) | Err(_) => break,
                                         Ok(n) => n,
-                                        Err(_) => break,
                                     };
 
                                     let msg = MpcMessage::Data {

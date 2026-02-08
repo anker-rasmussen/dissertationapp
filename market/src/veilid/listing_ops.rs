@@ -12,7 +12,7 @@ pub struct ListingOperations<D: DhtStore> {
 }
 
 impl<D: DhtStore> ListingOperations<D> {
-    pub fn new(dht: D) -> Self {
+    pub const fn new(dht: D) -> Self {
         Self { dht }
     }
 
@@ -25,7 +25,7 @@ impl<D: DhtStore> ListingOperations<D> {
         // Serialize the listing to CBOR
         let listing_data = listing
             .to_cbor()
-            .map_err(|e| anyhow::anyhow!("Failed to serialize listing: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize listing: {e}"))?;
 
         // Store the listing in the DHT
         self.dht.set_value(&record, listing_data).await?;
@@ -44,7 +44,7 @@ impl<D: DhtStore> ListingOperations<D> {
         // Serialize the listing to CBOR
         let listing_data = listing
             .to_cbor()
-            .map_err(|e| anyhow::anyhow!("Failed to serialize listing: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize listing: {e}"))?;
 
         // Update the value in the DHT
         self.dht.set_value(record, listing_data).await?;
@@ -62,9 +62,8 @@ impl<D: DhtStore> ListingOperations<D> {
         match data {
             Some(cbor_data) => {
                 // Deserialize from CBOR
-                let listing = Listing::from_cbor(&cbor_data).map_err(|e| {
-                    anyhow::anyhow!("Failed to deserialize listing from DHT: {}", e)
-                })?;
+                let listing = Listing::from_cbor(&cbor_data)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize listing from DHT: {e}"))?;
 
                 info!("Retrieved listing '{}' from DHT", listing.title);
                 Ok(Some(listing))

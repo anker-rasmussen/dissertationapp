@@ -13,7 +13,7 @@ pub struct BidAnnouncementRegistry {
 }
 
 impl BidAnnouncementRegistry {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             announcements: Vec::new(),
         }
@@ -31,14 +31,14 @@ impl BidAnnouncementRegistry {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bid registry: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize bid registry: {e}"))?;
         Ok(buf)
     }
 
     /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         ciborium::from_reader(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid registry: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid registry: {e}"))
     }
 }
 
@@ -248,12 +248,12 @@ impl AuctionMessage {
     /// Serialize to bytes for transmission
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::serialize(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize auction message: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to serialize auction message: {e}"))
     }
 
     /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize auction message: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize auction message: {e}"))
     }
 }

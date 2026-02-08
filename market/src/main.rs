@@ -213,7 +213,7 @@ fn main() -> anyhow::Result<()> {
                             node_offset,
                         ));
 
-                        coordinator.clone().start_monitoring().await;
+                        coordinator.clone().start_monitoring();
                         *coordinator_holder.write() = Some(coordinator);
                         info!("Auction coordinator started");
                     }

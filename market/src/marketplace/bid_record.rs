@@ -28,14 +28,14 @@ impl BidRecord {
     pub fn to_cbor(&self) -> anyhow::Result<Vec<u8>> {
         let mut data = Vec::new();
         ciborium::ser::into_writer(self, &mut data)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bid record: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize bid record: {e}"))?;
         Ok(data)
     }
 
     /// Deserialize from CBOR
     pub fn from_cbor(data: &[u8]) -> anyhow::Result<Self> {
         ciborium::de::from_reader(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid record: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid record: {e}"))
     }
 }
 
@@ -54,7 +54,7 @@ pub struct BidIndex {
 }
 
 impl BidIndex {
-    pub fn new(listing_key: RecordKey) -> Self {
+    pub const fn new(listing_key: RecordKey) -> Self {
         Self {
             listing_key,
             bids: Vec::new(),
@@ -102,17 +102,17 @@ impl BidIndex {
     pub fn to_cbor(&self) -> anyhow::Result<Vec<u8>> {
         let mut data = Vec::new();
         ciborium::ser::into_writer(self, &mut data)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bid index: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize bid index: {e}"))?;
         Ok(data)
     }
 
     pub fn from_cbor(data: &[u8]) -> anyhow::Result<Self> {
         ciborium::de::from_reader(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid index: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid index: {e}"))
     }
 
     /// Merge another index into this one
-    pub fn merge(&mut self, other: &BidIndex) {
+    pub fn merge(&mut self, other: &Self) {
         for bid in &other.bids {
             // Use the production add_bid which stamps with now_unix()
             self.add_bid(bid.clone());
@@ -120,7 +120,7 @@ impl BidIndex {
     }
 
     /// Merge with custom time provider
-    pub fn merge_with_time<T: TimeProvider>(&mut self, other: &BidIndex, time: &T) {
+    pub fn merge_with_time<T: TimeProvider>(&mut self, other: &Self, time: &T) {
         for bid in &other.bids {
             self.add_bid_with_time(bid.clone(), time);
         }

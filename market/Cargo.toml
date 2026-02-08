@@ -16,7 +16,7 @@ path = "src/bin/devnet-ctl.rs"
 
 [features]
 default = []
-test-support = []
+test = []
 
 [dependencies]
 # UI Framework
@@ -56,6 +56,6 @@ hex = "0.4"
 data-encoding = "2.6"
 
 [dev-dependencies]
-market = { path = ".", features = ["test-support"] }
+market = { path = ".", features = ["test"] }
 serial_test = "3.0"  # Run E2E tests sequentially
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

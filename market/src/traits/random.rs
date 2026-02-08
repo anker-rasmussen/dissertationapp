@@ -36,7 +36,7 @@ impl RandomSource for ThreadRng {
 }
 
 impl ThreadRng {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }

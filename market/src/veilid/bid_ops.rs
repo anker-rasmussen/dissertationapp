@@ -13,7 +13,7 @@ pub struct BidOperations<D: DhtStore> {
 }
 
 impl<D: DhtStore> BidOperations<D> {
-    pub fn new(dht: D) -> Self {
+    pub const fn new(dht: D) -> Self {
         Self { dht }
     }
 
@@ -61,12 +61,11 @@ impl<D: DhtStore> BidOperations<D> {
                 .get_subkey(&listing_key, subkeys::BID_INDEX)
                 .await?;
 
-            let mut index = match old_value {
-                Some(data) => BidIndex::from_cbor(&data)?,
-                None => {
-                    debug!("No bid index found, creating new one");
-                    BidIndex::new(listing_key.clone())
-                }
+            let mut index = if let Some(data) = old_value {
+                BidIndex::from_cbor(&data)?
+            } else {
+                debug!("No bid index found, creating new one");
+                BidIndex::new(listing_key.clone())
             };
 
             // Add our bid
@@ -101,32 +100,26 @@ impl<D: DhtStore> BidOperations<D> {
                         continue;
                     }
                     return Err(anyhow::anyhow!(
-                        "Failed to register bid after {} attempts: {}",
-                        max_retries,
-                        e
+                        "Failed to register bid after {max_retries} attempts: {e}"
                     ));
                 }
             }
         }
 
         Err(anyhow::anyhow!(
-            "Failed to register bid after {} retries",
-            max_retries
+            "Failed to register bid after {max_retries} retries"
         ))
     }
 
     /// Fetch the bid index for a listing
     pub async fn fetch_bid_index(&self, listing_key: &RecordKey) -> Result<BidIndex> {
-        match self.dht.get_subkey(listing_key, subkeys::BID_INDEX).await? {
-            Some(data) => {
-                let index = BidIndex::from_cbor(&data)?;
-                debug!("Fetched bid index with {} bids", index.bids.len());
-                Ok(index)
-            }
-            None => {
-                debug!("No bid index found, returning empty");
-                Ok(BidIndex::new(listing_key.clone()))
-            }
+        if let Some(data) = self.dht.get_subkey(listing_key, subkeys::BID_INDEX).await? {
+            let index = BidIndex::from_cbor(&data)?;
+            debug!("Fetched bid index with {} bids", index.bids.len());
+            Ok(index)
+        } else {
+            debug!("No bid index found, returning empty");
+            Ok(BidIndex::new(listing_key.clone()))
         }
     }
 }

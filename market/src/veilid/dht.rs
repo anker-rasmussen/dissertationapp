@@ -27,7 +27,7 @@ pub struct OwnedDHTRecord {
 impl DHTOperations {
     /// Create a new DHT operations instance
     /// For devnet, use unsafe_routing=true to disable private routes
-    pub fn new(api: VeilidAPI, use_unsafe_routing: bool) -> Self {
+    pub const fn new(api: VeilidAPI, use_unsafe_routing: bool) -> Self {
         Self {
             api,
             use_unsafe_routing,
@@ -159,7 +159,7 @@ impl DHTOperations {
         routing_context
             .set_dht_value(record.key.clone(), subkey, value.clone(), None)
             .await
-            .context(format!("Failed to set DHT value at subkey {}", subkey))?;
+            .context(format!("Failed to set DHT value at subkey {subkey}"))?;
 
         info!(
             "Set DHT value for key {}, {} bytes at subkey {}",
@@ -197,7 +197,7 @@ impl DHTOperations {
         let value_data = routing_context
             .get_dht_value(key.clone(), subkey, true)
             .await
-            .context(format!("Failed to get DHT value from subkey {}", subkey))?;
+            .context(format!("Failed to get DHT value from subkey {subkey}"))?;
 
         // Close the record after reading
         routing_context
@@ -205,20 +205,17 @@ impl DHTOperations {
             .await
             .context("Failed to close DHT record")?;
 
-        match value_data {
-            Some(data) => {
-                info!(
-                    "Retrieved DHT value for key {}: {} bytes from subkey {}",
-                    key,
-                    data.data().len(),
-                    subkey
-                );
-                Ok(Some(data.data().to_vec()))
-            }
-            None => {
-                debug!("No value found for key {} at subkey {}", key, subkey);
-                Ok(None)
-            }
+        if let Some(data) = value_data {
+            info!(
+                "Retrieved DHT value for key {}: {} bytes from subkey {}",
+                key,
+                data.data().len(),
+                subkey
+            );
+            Ok(Some(data.data().to_vec()))
+        } else {
+            debug!("No value found for key {} at subkey {}", key, subkey);
+            Ok(None)
         }
     }
 

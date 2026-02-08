@@ -161,7 +161,7 @@ pub struct BidCollection {
 }
 
 impl BidCollection {
-    pub fn new(listing_key: RecordKey) -> Self {
+    pub const fn new(listing_key: RecordKey) -> Self {
         Self {
             listing_key,
             bids: Vec::new(),
