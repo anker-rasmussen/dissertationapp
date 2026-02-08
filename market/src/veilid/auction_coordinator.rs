@@ -416,8 +416,17 @@ impl AuctionCoordinator {
         drop(announcements);
     }
 
-    /// Get the number of bids for a listing from local announcements
+    /// Get the number of bids for a listing from DHT registry (authoritative),
+    /// falling back to local announcements if the DHT read fails.
     pub async fn get_bid_count(&self, listing_key: &RecordKey) -> usize {
+        // Try DHT bid registry first (authoritative source written by seller)
+        if let Ok(Some(data)) = self.dht.get_value_at_subkey(listing_key, 2).await {
+            if let Ok(registry) = BidAnnouncementRegistry::from_bytes(&data) {
+                return registry.announcements.len();
+            }
+        }
+
+        // Fall back to local announcements
         let key = listing_key.to_string();
         let announcements = self.bid_announcements.lock().await;
         announcements.get(&key).map_or(0, std::vec::Vec::len)
