@@ -12,7 +12,7 @@ use veilid_core::{
     VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeState {
     pub is_attached: bool,
     pub peer_count: usize,
@@ -79,6 +79,7 @@ impl VeilidNode {
     /// Configure this node to connect to the local devnet (requires LD_PRELOAD)
     ///
     /// Automatically enables insecure storage for devnet use.
+    #[must_use]
     pub fn with_devnet(mut self, config: DevNetConfig) -> Self {
         self.devnet_config = Some(config);
         self.insecure_storage = true;
@@ -89,18 +90,21 @@ impl VeilidNode {
     ///
     /// In production this should remain `false` (the default).
     /// Devnet mode sets this to `true` automatically via [`with_devnet`].
-    pub fn with_insecure_storage(mut self, insecure: bool) -> Self {
+    #[must_use]
+    pub const fn with_insecure_storage(mut self, insecure: bool) -> Self {
         self.insecure_storage = insecure;
         self
     }
 
     /// Configure this node to connect to the public Veilid network
     /// For production use - connects to real bootstrap nodes on the internet
-    pub fn with_public_network(self) -> Self {
+    #[must_use]
+    pub const fn with_public_network(self) -> Self {
         // Leave devnet_config as None - will use default public network config
         self
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting Veilid node...");
 
@@ -118,7 +122,7 @@ impl VeilidNode {
             // Calculate our port - bind to 127.0.0.1 directly for LocalNetwork routing domain
             // No public_address means we use LocalNetwork for peer discovery
             let port = 5160 + devnet.port_offset;
-            let listen_addr = format!("127.0.0.1:{}", port);
+            let listen_addr = format!("127.0.0.1:{port}");
 
             info!(
                 "Configuring for devnet: key={}, bootstrap={:?}, listen_addr={}",
@@ -157,7 +161,7 @@ impl VeilidNode {
                         connect: true,
                         listen: true,
                         max_connections: 16,
-                        listen_address: listen_addr.clone(),
+                        listen_address: listen_addr,
                         path: "ws".to_string(),
                         url: None,
                     },
@@ -189,8 +193,10 @@ impl VeilidNode {
             .data_dir
             .file_name()
             .and_then(|s| s.to_str())
-            .map(|s| format!("smpc-auction-{}", s))
-            .unwrap_or_else(|| "smpc-auction".to_string());
+            .map_or_else(
+                || "smpc-auction".to_string(),
+                |s| format!("smpc-auction-{s}"),
+            );
 
         let config = VeilidConfig {
             program_name: "market".into(),
@@ -219,17 +225,23 @@ impl VeilidNode {
             // Update internal state synchronously
             match &update {
                 VeilidUpdate::Network(network) => {
-                    let mut state = state.write();
-                    state.peer_count = network.peers.len();
-                    state.node_ids = network.node_ids.iter().map(|id| id.to_string()).collect();
+                    let mut st = state.write();
+                    st.peer_count = network.peers.len();
+                    st.node_ids = network
+                        .node_ids
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect();
+                    let peer_count = st.peer_count;
+                    let node_ids = st.node_ids.clone();
+                    drop(st);
                     debug!(
                         "Network update: {} peers, node_ids: {:?}",
-                        state.peer_count, state.node_ids
+                        peer_count, node_ids
                     );
                 }
                 VeilidUpdate::Attachment(attachment) => {
-                    let mut state = state.write();
-                    state.is_attached = attachment.state.is_attached();
+                    state.write().is_attached = attachment.state.is_attached();
                     info!("Attachment state: {:?}", attachment.state);
                 }
                 VeilidUpdate::AppMessage(msg) => {
@@ -291,7 +303,7 @@ impl VeilidNode {
         Ok(())
     }
 
-    pub fn api(&self) -> Option<&VeilidAPI> {
+    pub const fn api(&self) -> Option<&VeilidAPI> {
         self.api.as_ref()
     }
 

@@ -25,7 +25,7 @@ impl TimeProvider for SystemTimeProvider {
 }
 
 impl SystemTimeProvider {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }

@@ -49,7 +49,7 @@ impl MpcRouteManager {
                 Sequencing::PreferOrdered,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create route: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create route: {e}"))?;
 
         let route_id = route_blob.route_id.clone();
 
@@ -94,15 +94,15 @@ impl MpcRouteManager {
         let routing_context = self
             .api
             .routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
             .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))?;
 
         let state = self
             .api
             .get_state()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to get state: {e}"))?;
 
         let mut sent_count = 0;
         for peer in &state.network.peers {
@@ -111,7 +111,7 @@ impl MpcRouteManager {
                     .app_message(Target::NodeId(node_id.clone()), data.clone())
                     .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         debug!("Sent route announcement to peer {}", node_id);
                         sent_count += 1;
                         break;
@@ -145,11 +145,12 @@ impl MpcRouteManager {
         let _ = self
             .api
             .import_remote_private_route(route_blob.blob.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to import remote route: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to import remote route: {e}"))?;
 
         let route_id = route_blob.route_id.clone();
 
         routes.insert(party_pubkey.clone(), route_id.clone());
+        drop(routes);
         info!(
             "Registered and imported route for party {}: {}",
             party_pubkey, route_id
@@ -185,12 +186,12 @@ impl MpcRouteManager {
     }
 
     /// Get my route ID
-    pub fn get_my_route(&self) -> Option<&RouteId> {
+    pub const fn get_my_route(&self) -> Option<&RouteId> {
         self.my_route_id.as_ref()
     }
 
     /// Get my route blob for sharing
-    pub fn get_my_route_blob(&self) -> Option<&RouteBlob> {
+    pub const fn get_my_route_blob(&self) -> Option<&RouteBlob> {
         self.my_route_blob.as_ref()
     }
 }

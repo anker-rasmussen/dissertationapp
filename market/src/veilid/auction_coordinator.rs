@@ -76,6 +76,7 @@ impl AuctionCoordinator {
     }
 
     /// Handle auction coordination messages
+    #[allow(clippy::too_many_lines)]
     async fn handle_auction_message(&self, message: AuctionMessage) -> Result<()> {
         match message {
             AuctionMessage::BidAnnouncement {
@@ -109,12 +110,11 @@ impl AuctionCoordinator {
                     info!("We own this listing, updating DHT bid registry");
 
                     let current_data = self.dht.get_value_at_subkey(&listing_key, 2).await?;
-                    let mut registry = match current_data {
-                        Some(data) => BidAnnouncementRegistry::from_bytes(&data)?,
-                        None => {
-                            warn!("No existing registry found, creating new one");
-                            BidAnnouncementRegistry::new()
-                        }
+                    let mut registry = if let Some(data) = current_data {
+                        BidAnnouncementRegistry::from_bytes(&data)?
+                    } else {
+                        warn!("No existing registry found, creating new one");
+                        BidAnnouncementRegistry::new()
                     };
 
                     registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
@@ -182,7 +182,7 @@ impl AuctionCoordinator {
                                     .app_message(Target::RouteId(route_id), data)
                                     .await
                                 {
-                                    Ok(_) => {
+                                    Ok(()) => {
                                         info!("Sent WinnerBidReveal to seller via MPC route");
                                     }
                                     Err(e) => {
@@ -249,8 +249,10 @@ impl AuctionCoordinator {
                 let managers = self.mpc.route_managers().lock().await;
 
                 if let Some(manager) = managers.get(&listing_key) {
-                    let mgr = manager.lock().await;
-                    mgr.register_route_announcement(party_pubkey, route_blob)
+                    manager
+                        .lock()
+                        .await
+                        .register_route_announcement(party_pubkey, route_blob)
                         .await?;
                 } else {
                     debug!("Received route for unwatched auction {}", listing_key);
@@ -362,24 +364,26 @@ impl AuctionCoordinator {
         bid_record_key: RecordKey,
         timestamp: u64,
     ) -> Result<()> {
-        let owned = self.owned_listings.lock().await;
+        let record = {
+            let owned = self.owned_listings.lock().await;
+            owned.get(listing_key).cloned()
+        };
 
-        if let Some(record) = owned.get(listing_key) {
+        if let Some(record) = record {
             info!("We own this listing and bid on it, adding our bid to DHT registry");
 
             let current_data = self.dht.get_value_at_subkey(listing_key, 2).await?;
-            let mut registry = match current_data {
-                Some(data) => BidAnnouncementRegistry::from_bytes(&data)?,
-                None => {
-                    warn!("No existing registry found for owned listing, creating new one");
-                    BidAnnouncementRegistry::new()
-                }
+            let mut registry = if let Some(data) = current_data {
+                BidAnnouncementRegistry::from_bytes(&data)?
+            } else {
+                warn!("No existing registry found for owned listing, creating new one");
+                BidAnnouncementRegistry::new()
             };
 
             registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
 
             let data = registry.to_bytes()?;
-            self.dht.set_value_at_subkey(record, 2, data).await?;
+            self.dht.set_value_at_subkey(&record, 2, data).await?;
 
             info!(
                 "Added our own bid to DHT registry for listing {}, now has {} announcements",
@@ -409,13 +413,14 @@ impl AuctionCoordinator {
                 list.len()
             );
         }
+        drop(announcements);
     }
 
     /// Get the number of bids for a listing from local announcements
     pub async fn get_bid_count(&self, listing_key: &RecordKey) -> usize {
         let key = listing_key.to_string();
         let announcements = self.bid_announcements.lock().await;
-        announcements.get(&key).map(|list| list.len()).unwrap_or(0)
+        announcements.get(&key).map_or(0, std::vec::Vec::len)
     }
 
     /// Check if the current node received a decryption key for a listing
@@ -431,11 +436,11 @@ impl AuctionCoordinator {
             .dht
             .get_value(listing_key)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch listing: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to fetch listing: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("Listing not found"))?;
 
         let listing = Listing::from_cbor(&listing_data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize listing: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize listing: {e}"))?;
 
         let decryption_key = self.get_decryption_key(listing_key).await.ok_or_else(|| {
             anyhow::anyhow!(
@@ -445,7 +450,7 @@ impl AuctionCoordinator {
 
         listing
             .decrypt_content_with_key(&decryption_key)
-            .map_err(|e| anyhow::anyhow!("Failed to decrypt listing content: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to decrypt listing content: {e}"))
     }
 
     /// Broadcast our bid announcement to all known peers via AppMessage
@@ -470,15 +475,15 @@ impl AuctionCoordinator {
         let routing_context = self
             .api
             .routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
             .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))?;
 
         let state = self
             .api
             .get_state()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get state: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to get state: {e}"))?;
 
         let mut sent_count = 0;
 
@@ -492,7 +497,7 @@ impl AuctionCoordinator {
                     .app_message(Target::NodeId(node_id.clone()), data.clone())
                     .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         info!("Successfully sent bid announcement to peer {}", node_id);
                         sent_count += 1;
                         break;
@@ -520,7 +525,7 @@ impl AuctionCoordinator {
     }
 
     /// Start background deadline monitoring
-    pub async fn start_monitoring(self: Arc<Self>) {
+    pub fn start_monitoring(self: Arc<Self>) {
         info!("Starting auction deadline monitor");
 
         tokio::spawn(async move {

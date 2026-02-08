@@ -29,7 +29,7 @@ pub struct BidderRegistry {
 }
 
 impl BidderRegistry {
-    pub fn new(listing_key: RecordKey) -> Self {
+    pub const fn new(listing_key: RecordKey) -> Self {
         Self {
             listing_key,
             bidders: Vec::new(),
@@ -68,13 +68,13 @@ impl BidderRegistry {
     pub fn to_cbor(&self) -> Result<Vec<u8>> {
         let mut data = Vec::new();
         ciborium::ser::into_writer(self, &mut data)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bidder registry: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize bidder registry: {e}"))?;
         Ok(data)
     }
 
     pub fn from_cbor(data: &[u8]) -> Result<Self> {
         ciborium::de::from_reader(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize bidder registry: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize bidder registry: {e}"))
     }
 }
 
@@ -84,7 +84,7 @@ pub struct BidderRegistryOps {
 }
 
 impl BidderRegistryOps {
-    pub fn new(dht: DHTOperations) -> Self {
+    pub const fn new(dht: DHTOperations) -> Self {
         Self { dht }
     }
 
@@ -106,21 +106,20 @@ impl BidderRegistryOps {
         let _ = routing_context
             .open_dht_record(listing_key.clone(), None)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to open listing record: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to open listing record: {e}"))?;
 
         for attempt in 0..max_retries {
             // Read current registry
             let old_value = routing_context
                 .get_dht_value(listing_key.clone(), Self::BIDDER_REGISTRY_SUBKEY, true)
                 .await?;
-            let old_seq = old_value.as_ref().map(|v| v.seq());
+            let old_seq = old_value.as_ref().map(veilid_core::ValueData::seq);
 
-            let mut registry = match &old_value {
-                Some(value) => BidderRegistry::from_cbor(value.data())?,
-                None => {
-                    debug!("No bidder registry found, creating new one");
-                    BidderRegistry::new(listing_key.clone())
-                }
+            let mut registry = if let Some(value) = &old_value {
+                BidderRegistry::from_cbor(value.data())?
+            } else {
+                debug!("No bidder registry found, creating new one");
+                BidderRegistry::new(listing_key.clone())
             };
 
             // Add ourselves
@@ -173,9 +172,7 @@ impl BidderRegistryOps {
                     }
                     let _ = routing_context.close_dht_record(listing_key.clone()).await;
                     return Err(anyhow::anyhow!(
-                        "Failed to register bidder after {} attempts: {}",
-                        max_retries,
-                        e
+                        "Failed to register bidder after {max_retries} attempts: {e}"
                     ));
                 }
             }
@@ -183,8 +180,7 @@ impl BidderRegistryOps {
 
         let _ = routing_context.close_dht_record(listing_key.clone()).await;
         Err(anyhow::anyhow!(
-            "Failed to register bidder after {} retries",
-            max_retries
+            "Failed to register bidder after {max_retries} retries"
         ))
     }
 
@@ -197,27 +193,24 @@ impl BidderRegistryOps {
             .await
         {
             Ok(_) => {
-                match routing_context
+                if let Some(value) = routing_context
                     .get_dht_value(listing_key.clone(), Self::BIDDER_REGISTRY_SUBKEY, true)
                     .await?
                 {
-                    Some(value) => {
-                        let registry = BidderRegistry::from_cbor(value.data())?;
-                        info!(
-                            "Fetched bidder registry with {} bidders",
-                            registry.bidders.len()
-                        );
-                        let _ = routing_context.close_dht_record(listing_key.clone()).await;
-                        Ok(registry)
-                    }
-                    None => {
-                        debug!("No bidder registry found");
-                        let _ = routing_context.close_dht_record(listing_key.clone()).await;
-                        Ok(BidderRegistry::new(listing_key.clone()))
-                    }
+                    let registry = BidderRegistry::from_cbor(value.data())?;
+                    info!(
+                        "Fetched bidder registry with {} bidders",
+                        registry.bidders.len()
+                    );
+                    let _ = routing_context.close_dht_record(listing_key.clone()).await;
+                    Ok(registry)
+                } else {
+                    debug!("No bidder registry found");
+                    let _ = routing_context.close_dht_record(listing_key.clone()).await;
+                    Ok(BidderRegistry::new(listing_key.clone()))
                 }
             }
-            Err(e) => Err(anyhow::anyhow!("Failed to open listing record: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Failed to open listing record: {e}")),
         }
     }
 }

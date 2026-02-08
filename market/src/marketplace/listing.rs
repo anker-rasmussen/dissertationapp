@@ -59,12 +59,12 @@ pub struct Listing {
 
 impl Listing {
     /// Create a new listing builder
-    pub fn builder() -> ListingBuilder<SystemTimeProvider> {
+    pub const fn builder() -> ListingBuilder<SystemTimeProvider> {
         ListingBuilder::new(SystemTimeProvider::new())
     }
 
     /// Create a new listing builder with a custom time provider
-    pub fn builder_with_time<T: TimeProvider>(time: T) -> ListingBuilder<T> {
+    pub const fn builder_with_time<T: TimeProvider>(time: T) -> ListingBuilder<T> {
         ListingBuilder::new(time)
     }
 
@@ -84,7 +84,7 @@ impl Listing {
     }
 
     /// Check if the auction has ended at a specific timestamp
-    pub fn has_ended_at(&self, now: u64) -> bool {
+    pub const fn has_ended_at(&self, now: u64) -> bool {
         self.auction_end <= now
     }
 
@@ -94,7 +94,7 @@ impl Listing {
     }
 
     /// Get time remaining at a specific timestamp
-    pub fn time_remaining_at(&self, now: u64) -> u64 {
+    pub const fn time_remaining_at(&self, now: u64) -> u64 {
         self.auction_end.saturating_sub(now)
     }
 
@@ -104,14 +104,14 @@ impl Listing {
         use crate::crypto::{decrypt_content, ContentKey};
 
         // Decode hex string to bytes
-        let key_bytes = hex::decode(decryption_key_hex)
-            .map_err(|e| anyhow::anyhow!("Invalid hex key: {}", e))?;
+        let key_bytes =
+            hex::decode(decryption_key_hex).map_err(|e| anyhow::anyhow!("Invalid hex key: {e}"))?;
 
         // Convert to 32-byte array
         let len = key_bytes.len();
         let key: ContentKey = key_bytes
             .try_into()
-            .map_err(|_| anyhow::anyhow!("Key must be 32 bytes, got {} bytes", len))?;
+            .map_err(|_| anyhow::anyhow!("Key must be 32 bytes, got {len} bytes"))?;
 
         // Decrypt using the crypto module
         decrypt_content(&self.encrypted_content, &key, &self.content_nonce)
@@ -145,7 +145,7 @@ pub struct ListingBuilder<T: TimeProvider> {
 
 impl<T: TimeProvider> ListingBuilder<T> {
     /// Create a new builder with a time provider
-    pub fn new(time: T) -> Self {
+    pub const fn new(time: T) -> Self {
         Self {
             time,
             key: None,
@@ -161,21 +161,25 @@ impl<T: TimeProvider> ListingBuilder<T> {
 }
 
 impl<T: TimeProvider> ListingBuilder<T> {
+    #[must_use]
     pub fn key(mut self, key: RecordKey) -> Self {
         self.key = Some(key);
         self
     }
 
+    #[must_use]
     pub fn seller(mut self, seller: PublicKey) -> Self {
         self.seller = Some(seller);
         self
     }
 
+    #[must_use]
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
     }
 
+    #[must_use]
     pub fn encrypted_content(mut self, content: Vec<u8>, nonce: ContentNonce, key: String) -> Self {
         self.encrypted_content = Some(content);
         self.content_nonce = Some(nonce);
@@ -183,13 +187,15 @@ impl<T: TimeProvider> ListingBuilder<T> {
         self
     }
 
-    pub fn reserve_price(mut self, amount: u64) -> Self {
+    #[must_use]
+    pub const fn reserve_price(mut self, amount: u64) -> Self {
         self.reserve_price = Some(amount);
         self
     }
 
     /// Set auction duration in seconds from now
-    pub fn auction_duration(mut self, seconds: u64) -> Self {
+    #[must_use]
+    pub const fn auction_duration(mut self, seconds: u64) -> Self {
         self.auction_duration_secs = Some(seconds);
         self
     }

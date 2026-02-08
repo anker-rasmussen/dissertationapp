@@ -110,7 +110,7 @@ pub struct RegistryOperations {
 }
 
 impl RegistryOperations {
-    pub fn new(dht: DHTOperations) -> Self {
+    pub const fn new(dht: DHTOperations) -> Self {
         Self {
             dht,
             registry_key: None,
@@ -121,10 +121,10 @@ impl RegistryOperations {
     /// Get the shared registry keypair
     /// Uses a hardcoded keypair for devnet to ensure all nodes share the same registry
     /// In production, this should load from a secure shared key management system
-    fn get_or_create_registry_keypair(&self) -> Result<KeyPair> {
+    fn get_or_create_registry_keypair() -> Result<KeyPair> {
         let keypair_str = registry_keypair_str();
         let keypair = KeyPair::try_from(keypair_str.as_str())
-            .map_err(|e| anyhow::anyhow!("Failed to parse registry keypair: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse registry keypair: {e}"))?;
 
         debug!("Using registry keypair (from env or default)");
         Ok(keypair)
@@ -137,13 +137,13 @@ impl RegistryOperations {
             return Ok(key.clone());
         }
 
-        let keypair = self.get_or_create_registry_keypair()?;
+        let keypair = Self::get_or_create_registry_keypair()?;
         let routing_context = self.dht.get_routing_context_pub()?;
 
         // Parse the registry record key (from env or default)
         let record_key_str = registry_record_key_str();
         let key = RecordKey::try_from(record_key_str.as_str())
-            .map_err(|e| anyhow::anyhow!("Failed to parse registry record key: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse registry record key: {e}"))?;
 
         // Try to open the existing record first (most common case)
         let is_new = match routing_context
@@ -190,10 +190,7 @@ impl RegistryOperations {
                             .await
                             .map_err(|e| {
                                 anyhow::anyhow!(
-                                    "Failed to open or create registry. Open error: {}, Create error: {}, Retry open error: {}",
-                                    open_err,
-                                    create_err,
-                                    e
+                                    "Failed to open or create registry. Open error: {open_err}, Create error: {create_err}, Retry open error: {e}"
                                 )
                             })?;
                         info!("Opened registry at: {} (after race)", key);
@@ -211,7 +208,7 @@ impl RegistryOperations {
             let empty_registry = ListingRegistry::default();
             let data = empty_registry
                 .to_cbor()
-                .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {e}"))?;
             routing_context
                 .set_dht_value(key.clone(), 0, data, None)
                 .await?;
@@ -232,7 +229,7 @@ impl RegistryOperations {
         // Record should already be open from get_or_create_registry
         // If not, open it now
         if !self.record_open {
-            let keypair = self.get_or_create_registry_keypair()?;
+            let keypair = Self::get_or_create_registry_keypair()?;
             let _ = routing_context
                 .open_dht_record(key.clone(), Some(keypair))
                 .await?;
@@ -247,24 +244,21 @@ impl RegistryOperations {
 
         // Don't close the record - keep it open for future operations
 
-        match data {
-            Some(bytes) => {
-                // Handle corrupted data gracefully
-                match ListingRegistry::from_cbor(&bytes) {
-                    Ok(registry) => {
-                        debug!("Fetched registry with {} listings", registry.listings.len());
-                        Ok(registry)
-                    }
-                    Err(e) => {
-                        warn!("Registry data corrupted, returning empty: {}", e);
-                        Ok(ListingRegistry::default())
-                    }
+        if let Some(bytes) = data {
+            // Handle corrupted data gracefully
+            match ListingRegistry::from_cbor(&bytes) {
+                Ok(registry) => {
+                    debug!("Fetched registry with {} listings", registry.listings.len());
+                    Ok(registry)
+                }
+                Err(e) => {
+                    warn!("Registry data corrupted, returning empty: {}", e);
+                    Ok(ListingRegistry::default())
                 }
             }
-            None => {
-                debug!("Registry is empty");
-                Ok(ListingRegistry::default())
-            }
+        } else {
+            debug!("Registry is empty");
+            Ok(ListingRegistry::default())
         }
     }
 
@@ -275,7 +269,7 @@ impl RegistryOperations {
 
         // Record should already be open from get_or_create_registry
         if !self.record_open {
-            let keypair = self.get_or_create_registry_keypair()?;
+            let keypair = Self::get_or_create_registry_keypair()?;
             let _ = routing_context
                 .open_dht_record(key.clone(), Some(keypair))
                 .await?;
@@ -295,7 +289,7 @@ impl RegistryOperations {
                 Some(v) => {
                     let seq = v.seq();
                     let registry = ListingRegistry::from_cbor(v.data())
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize registry: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize registry: {e}"))?;
                     (registry, Some(seq))
                 }
                 None => (ListingRegistry::default(), None),
@@ -313,7 +307,7 @@ impl RegistryOperations {
             // Serialize the updated registry
             let data = registry
                 .to_cbor()
-                .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {e}"))?;
 
             // Write the updated registry (Veilid automatically increments sequence number)
             match routing_context
@@ -362,20 +356,16 @@ impl RegistryOperations {
                         tokio::time::sleep(retry_delay).await;
                         retry_delay *= 2;
                         continue;
-                    } else {
-                        return Err(anyhow::anyhow!(
-                            "Failed to register listing after {} attempts: {}",
-                            max_retries,
-                            e
-                        ));
                     }
+                    return Err(anyhow::anyhow!(
+                        "Failed to register listing after {max_retries} attempts: {e}"
+                    ));
                 }
             }
         }
 
         Err(anyhow::anyhow!(
-            "Failed to register listing after {} attempts",
-            max_retries
+            "Failed to register listing after {max_retries} attempts"
         ))
     }
 }

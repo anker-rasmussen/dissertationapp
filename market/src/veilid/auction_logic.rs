@@ -118,20 +118,20 @@ where
             list.push((bidder, bid_record_key));
             info!("Registered bid announcement, total: {}", list.len());
         }
+        drop(announcements);
     }
 
     /// Get the number of bids for a listing from local announcements.
     pub async fn get_local_bid_count(&self, listing_key: &RecordKey) -> usize {
         let key = listing_key.to_string();
         let announcements = self.bid_announcements.lock().await;
-        announcements.get(&key).map(|list| list.len()).unwrap_or(0)
+        announcements.get(&key).map_or(0, std::vec::Vec::len)
     }
 
     /// Store a received decryption key.
     pub async fn store_decryption_key(&self, listing_key: &RecordKey, key: String) {
         let k = listing_key.to_string();
-        let mut keys = self.decryption_keys.lock().await;
-        keys.insert(k, key);
+        self.decryption_keys.lock().await.insert(k, key);
         info!("Stored decryption key for listing {}", listing_key);
     }
 
@@ -174,26 +174,23 @@ where
             .get_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS)
             .await?;
 
-        let bidder_list: Vec<(PublicKey, RecordKey, u64)> = match registry_data {
-            Some(data) => {
-                let registry = BidAnnouncementRegistry::from_bytes(&data)?;
-                info!(
-                    "Found {} bidders in DHT bid registry",
-                    registry.announcements.len()
-                );
-                registry.announcements
-            }
-            None => {
-                info!("No DHT bid registry found, using local announcements");
-                let key = listing_key.to_string();
-                let announcements = self.bid_announcements.lock().await;
-                match announcements.get(&key) {
-                    Some(list) => list
-                        .iter()
-                        .map(|(bidder, bid_key)| (bidder.clone(), bid_key.clone(), 0))
-                        .collect(),
-                    None => Vec::new(),
-                }
+        let bidder_list: Vec<(PublicKey, RecordKey, u64)> = if let Some(data) = registry_data {
+            let registry = BidAnnouncementRegistry::from_bytes(&data)?;
+            info!(
+                "Found {} bidders in DHT bid registry",
+                registry.announcements.len()
+            );
+            registry.announcements
+        } else {
+            info!("No DHT bid registry found, using local announcements");
+            let key = listing_key.to_string();
+            let announcements = self.bid_announcements.lock().await;
+            match announcements.get(&key) {
+                Some(list) => list
+                    .iter()
+                    .map(|(bidder, bid_key)| (bidder.clone(), bid_key.clone(), 0))
+                    .collect(),
+                None => Vec::new(),
             }
         };
 
@@ -249,7 +246,7 @@ where
         self.mpc.write_input(party_id, bid_value).await?;
 
         // Write hosts file
-        let hosts_name = format!("HOSTS-{}", party_id);
+        let hosts_name = format!("HOSTS-{party_id}");
         self.mpc.write_hosts(&hosts_name, num_parties).await?;
 
         // Compile program
@@ -335,7 +332,7 @@ where
         self.transport
             .send(TransportTarget::Node(winner.clone()), data)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send decryption hash to winner: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send decryption hash to winner: {e}"))?;
 
         info!("Sent decryption hash directly to winner");
         Ok(1)
