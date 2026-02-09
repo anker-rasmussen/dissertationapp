@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use veilid_core::{
     api_startup, VeilidAPI, VeilidConfig, VeilidConfigCapabilities, VeilidConfigNetwork,
     VeilidConfigProtectedStore, VeilidConfigProtocol, VeilidConfigRoutingTable, VeilidConfigTCP,
-    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate, VEILID_CAPABILITY_RELAY,
+    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate,
     VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
@@ -119,14 +119,17 @@ impl VeilidNode {
 
         // Build network config based on whether we're connecting to devnet
         let network_config = if let Some(devnet) = &self.devnet_config {
-            // Calculate our port - bind to 127.0.0.1 directly for LocalNetwork routing domain
-            // No public_address means we use LocalNetwork for peer discovery
+            // Calculate our port and fake global IP to match devnet-ctl config
+            // LD_PRELOAD translates 1.2.3.x <-> 127.0.0.1
             let port = 5160 + devnet.port_offset;
-            let listen_addr = format!("127.0.0.1:{port}");
+            let ip_suffix = devnet.port_offset + 1;
+            let fake_ip = format!("1.2.3.{ip_suffix}");
+            let public_addr = format!("{fake_ip}:{port}");
+            let listen_addr = format!(":{port}");
 
             info!(
-                "Configuring for devnet: key={}, bootstrap={:?}, listen_addr={}",
-                devnet.network_key, devnet.bootstrap_nodes, listen_addr
+                "Configuring for devnet: key={}, bootstrap={:?}, listen={}, public={}",
+                devnet.network_key, devnet.bootstrap_nodes, listen_addr, public_addr
             );
 
             VeilidConfigNetwork {
@@ -148,14 +151,14 @@ impl VeilidNode {
                         enabled: true,
                         socket_pool_size: 0,
                         listen_address: listen_addr.clone(),
-                        public_address: None,
+                        public_address: Some(public_addr.clone()),
                     },
                     tcp: VeilidConfigTCP {
                         connect: true,
                         listen: true,
                         max_connections: 32,
                         listen_address: listen_addr.clone(),
-                        public_address: None,
+                        public_address: Some(public_addr),
                     },
                     ws: VeilidConfigWS {
                         connect: true,
@@ -173,16 +176,13 @@ impl VeilidNode {
             VeilidConfigNetwork::default()
         };
 
-        // For devnet, disable capabilities that are disabled on devnet nodes
-        // Match the bootstrap config: TUNL, SGNL, RLAY, DIAL disabled
+        // For devnet, disable capabilities that don't work with fake IPs (ip_spoof).
+        // RLAY is kept enabled: demo nodes need relay capability for private route creation.
         let capabilities = if self.devnet_config.is_some() {
             VeilidConfigCapabilities {
                 disable: vec![
                     VEILID_CAPABILITY_SIGNAL,
-                    VEILID_CAPABILITY_RELAY,
                     VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
-                    // Note: VEILID_CAPABILITY_TUNNEL is behind feature flag "unstable-tunnels"
-                    // and not available by default, so we don't include it
                 ],
             }
         } else {

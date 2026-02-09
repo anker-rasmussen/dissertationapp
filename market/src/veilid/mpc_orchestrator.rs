@@ -6,8 +6,8 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use veilid_core::{
-    PublicKey, RecordKey, RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target,
-    VeilidAPI,
+    PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, SafetySpec, Sequencing, Stability,
+    Target, VeilidAPI,
 };
 
 use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
@@ -44,6 +44,8 @@ pub struct MpcOrchestrator {
     active_tunnel_proxy: Arc<Mutex<Option<MpcTunnelProxy>>>,
     /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
     route_managers: RouteManagerMap,
+    /// Persistent route reused across auctions (created once, never released).
+    persistent_route: Arc<Mutex<Option<(RouteId, RouteBlob)>>>,
     /// Pending verifications: listing_key -> (winner_pubkey, mpc_winning_bid, verified?)
     pending_verifications: VerificationMap,
 }
@@ -64,6 +66,7 @@ impl MpcOrchestrator {
             node_offset,
             active_tunnel_proxy: Arc::new(Mutex::new(None)),
             route_managers: Arc::new(Mutex::new(HashMap::new())),
+            persistent_route: Arc::new(Mutex::new(None)),
             pending_verifications: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -197,14 +200,33 @@ impl MpcOrchestrator {
             }).clone()
         };
 
-        // Create our route
+        // Reuse persistent route if available, otherwise create and store one.
         let my_route_id = {
-            let mut mgr = route_manager.lock().await;
-            mgr.create_route().await?
+            let existing = self.persistent_route.lock().await.clone();
+            if let Some((route_id, route_blob)) = existing {
+                info!(
+                    "Reusing persistent route {} for Party {}",
+                    route_id, my_party_id
+                );
+                route_manager
+                    .lock()
+                    .await
+                    .set_existing_route(route_id.clone(), route_blob);
+                route_id
+            } else {
+                let mut mgr = route_manager.lock().await;
+                let route_id = mgr.create_route().await?;
+                let blob = mgr.get_my_route_blob().cloned();
+                drop(mgr);
+                if let Some(blob) = blob {
+                    *self.persistent_route.lock().await = Some((route_id.clone(), blob));
+                }
+                route_id
+            }
         };
 
         info!(
-            "Created Veilid route for Party {}: {}",
+            "Using Veilid route for Party {}: {}",
             my_party_id, my_route_id
         );
 

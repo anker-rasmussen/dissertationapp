@@ -361,7 +361,35 @@ impl AuctionCoordinator {
             } => {
                 let mut ops = self.registry_ops.lock().await;
                 let existing = ops.master_registry_key();
-                if existing.is_none() {
+                let should_adopt = match &existing {
+                    None => true,
+                    Some(current) if *current == registry_key => false, // duplicate
+                    Some(current) => {
+                        // Different key (likely different encryption component).
+                        // Use deterministic tiebreaker: lowest key string wins, so all
+                        // nodes converge on the same record + encryption key.
+                        if registry_key.to_string() < current.to_string() {
+                            info!(
+                                "Switching to lower announced registry key: {} (was {})",
+                                registry_key, current
+                            );
+                            // Close/delete the old record so local store doesn't
+                            // return data encrypted with the wrong key.
+                            if let Err(e) = ops.close_and_delete_registry().await {
+                                warn!("Failed to clean up old registry: {}", e);
+                            }
+                            true
+                        } else {
+                            debug!(
+                                "Keeping current lower registry key over announced: {}",
+                                registry_key
+                            );
+                            false
+                        }
+                    }
+                };
+
+                if should_adopt {
                     info!(
                         "Received RegistryAnnouncement, setting master registry key: {}",
                         registry_key
@@ -390,13 +418,6 @@ impl AuctionCoordinator {
                             }
                         }
                     }
-                } else if existing.as_ref() == Some(&registry_key) {
-                    debug!("Received duplicate RegistryAnnouncement, ignoring");
-                } else {
-                    debug!(
-                        "Received RegistryAnnouncement with different key {}, keeping first-write-wins key",
-                        registry_key
-                    );
                 }
                 drop(ops);
             }

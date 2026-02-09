@@ -53,6 +53,7 @@ rand = "0.8"  # Random number generation
 # Utilities
 parking_lot = "0.12"
 dirs = "6.0"
+libc = "0.2"
 hex = "0.4"
 data-encoding = "2.6"
 

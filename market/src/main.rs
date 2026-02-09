@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use market::{config, DevNetConfig, VeilidNode};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::app::{SharedAppState, SHARED_STATE};
@@ -170,19 +170,21 @@ fn main() -> anyhow::Result<()> {
                 return;
             }
 
-            // Wait for network to stabilize
-            info!("Waiting for network to stabilize...");
+            // Wait briefly for node identity (available shortly after start).
+            // Don't wait for full attachment — the coordinator's DHT activity
+            // generates the network traffic Veilid needs to progress to AttachedWeak.
+            info!("Waiting for node identity...");
             let mut retries = 0;
             loop {
                 let state = node.state();
-                if state.is_attached {
-                    info!("Node attached and ready");
+                if !state.node_ids.is_empty() {
+                    info!("Node identity ready: {:?}", state.node_ids);
                     break;
                 }
                 retries += 1;
-                if retries > 30 {
-                    error!("Timeout waiting for network attachment");
-                    break;
+                if retries > 10 {
+                    error!("Node identity not available after 10s");
+                    return;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
@@ -219,6 +221,25 @@ fn main() -> anyhow::Result<()> {
                         coordinator.clone().start_monitoring();
                         *coordinator_holder.write() = Some(coordinator.clone());
                         info!("Auction coordinator started");
+
+                        // Auto-create master registry (any node can create it; first wins)
+                        // Immediately broadcast the key so other nodes converge.
+                        let coord_for_registry = coordinator.clone();
+                        tokio::spawn(async move {
+                            match coord_for_registry.ensure_master_registry().await {
+                                Ok(key) => {
+                                    info!("Master registry ready: {key}");
+                                    // Broadcast immediately so other nodes can adopt our key
+                                    // before creating their own (avoids encryption key mismatch).
+                                    if let Err(e) =
+                                        coord_for_registry.broadcast_registry_announcement().await
+                                    {
+                                        debug!("Initial registry broadcast failed (will retry): {e}");
+                                    }
+                                }
+                                Err(e) => warn!("Failed to create master registry (will retry via peer broadcast): {e}"),
+                            }
+                        });
                     }
                 }
             }

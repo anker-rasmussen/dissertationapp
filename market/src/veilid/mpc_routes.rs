@@ -33,34 +33,61 @@ impl MpcRouteManager {
         }
     }
 
-    /// Create a private route for this party
+    /// Set a pre-existing route for reuse across auctions.
+    pub fn set_existing_route(&mut self, route_id: RouteId, route_blob: RouteBlob) {
+        self.my_route_id = Some(route_id);
+        self.my_route_blob = Some(route_blob);
+    }
+
+    /// Create a private route for this party (retries on transient failures).
     pub async fn create_route(&mut self) -> Result<RouteId> {
         if let Some(route) = &self.my_route_id {
             return Ok(route.clone());
         }
 
-        // Create a private route for receiving MPC traffic
-        // Use reliable sequencing for MPC (order matters)
-        let route_blob = self
-            .api
-            .new_custom_private_route(
-                &[CRYPTO_KIND_VLD0],
-                Stability::Reliable,
-                Sequencing::PreferOrdered,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create route: {e}"))?;
+        // Retry up to 6 times with 3s between attempts (~15s max wait).
+        // `TryAgain` is common on small devnets where the routing table
+        // hasn't yet discovered enough relay-capable peers.
+        let mut last_err = String::new();
+        for attempt in 0..6 {
+            if attempt > 0 {
+                warn!(
+                    "Route creation attempt {} failed ({}), retrying in 3s...",
+                    attempt, last_err
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
 
-        let route_id = route_blob.route_id.clone();
+            match self
+                .api
+                .new_custom_private_route(
+                    &[CRYPTO_KIND_VLD0],
+                    Stability::Reliable,
+                    Sequencing::PreferOrdered,
+                )
+                .await
+            {
+                Ok(route_blob) => {
+                    let route_id = route_blob.route_id.clone();
+                    info!(
+                        "Created Veilid route for MPC Party {}: {} (attempt {})",
+                        self.party_id,
+                        route_id,
+                        attempt + 1
+                    );
+                    self.my_route_id = Some(route_id.clone());
+                    self.my_route_blob = Some(route_blob);
+                    return Ok(route_id);
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                }
+            }
+        }
 
-        info!(
-            "Created Veilid route for MPC Party {}: {}",
-            self.party_id, route_id
-        );
-
-        self.my_route_id = Some(route_id.clone());
-        self.my_route_blob = Some(route_blob);
-        Ok(route_id)
+        Err(anyhow::anyhow!(
+            "Failed to create route after 6 attempts: {last_err}"
+        ))
     }
 
     /// Broadcast this party's route announcement to all peers

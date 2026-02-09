@@ -242,6 +242,19 @@ impl RegistryOperations {
         self.master_registry_key = Some(key);
     }
 
+    /// Close and delete the current master registry record from local store.
+    ///
+    /// Used when switching to a different node's registry key (different encryption key).
+    pub async fn close_and_delete_registry(&mut self) -> Result<()> {
+        if let Some(key) = self.master_registry_key.take() {
+            let routing_context = self.dht.get_routing_context_pub()?;
+            let _ = routing_context.close_dht_record(key.clone()).await;
+            let _ = routing_context.delete_dht_record(key.clone()).await;
+            debug!("Closed and deleted old registry record: {}", key);
+        }
+        Ok(())
+    }
+
     /// Register a seller in the master registry.
     /// Retries on concurrent-write conflicts.
     #[allow(clippy::too_many_lines)]
