@@ -10,6 +10,7 @@ use super::bid_storage::BidStorage;
 use super::dht::{DHTOperations, OwnedDHTRecord};
 use super::listing_ops::ListingOperations;
 use super::mpc_orchestrator::MpcOrchestrator;
+use super::registry::{RegistryEntry, RegistryOperations};
 use crate::marketplace::Listing;
 use crate::traits::DhtStore;
 
@@ -20,6 +21,8 @@ pub struct AuctionCoordinator {
     api: VeilidAPI,
     dht: DHTOperations,
     my_node_id: PublicKey,
+    /// Per-seller registry operations (shared via Arc<Mutex>)
+    registry_ops: Arc<Mutex<RegistryOperations>>,
     /// Listings we're monitoring
     watched_listings: Arc<Mutex<HashMap<RecordKey, Listing>>>,
     /// Listings we own (as seller): Map<listing_key, OwnedDHTRecord>
@@ -30,6 +33,9 @@ pub struct AuctionCoordinator {
     decryption_keys: Arc<Mutex<HashMap<String, String>>>,
     /// MPC orchestrator (owns tunnel proxy, routes, verifications)
     mpc: Arc<MpcOrchestrator>,
+    /// Buffered SellerRegistrations received before the registry key was known.
+    /// Replayed once a `RegistryAnnouncement` sets the key.
+    pending_seller_registrations: Arc<Mutex<Vec<(PublicKey, RecordKey)>>>,
 }
 
 impl AuctionCoordinator {
@@ -39,6 +45,7 @@ impl AuctionCoordinator {
         my_node_id: PublicKey,
         bid_storage: BidStorage,
         node_offset: u16,
+        network_key: &str,
     ) -> Self {
         let mpc = Arc::new(MpcOrchestrator::new(
             api.clone(),
@@ -48,15 +55,22 @@ impl AuctionCoordinator {
             node_offset,
         ));
 
+        let registry_ops = Arc::new(Mutex::new(RegistryOperations::new(
+            dht.clone(),
+            network_key,
+        )));
+
         Self {
             api,
             dht,
             my_node_id,
+            registry_ops,
             watched_listings: Arc::new(Mutex::new(HashMap::new())),
             owned_listings: Arc::new(Mutex::new(HashMap::new())),
             bid_announcements: Arc::new(Mutex::new(HashMap::new())),
             decryption_keys: Arc::new(Mutex::new(HashMap::new())),
             mpc,
+            pending_seller_registrations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -315,6 +329,77 @@ impl AuctionCoordinator {
                     warn!("Winner bid verification FAILED for listing {} — withholding decryption key", listing_key);
                 }
             }
+            AuctionMessage::SellerRegistration {
+                seller_pubkey,
+                catalog_key,
+                timestamp: _,
+            } => {
+                info!(
+                    "Received SellerRegistration from {} with catalog {}",
+                    seller_pubkey, catalog_key
+                );
+                let mut ops = self.registry_ops.lock().await;
+                if ops.master_registry_key().is_some() {
+                    if let Err(e) = ops
+                        .register_seller(&seller_pubkey.to_string(), &catalog_key.to_string())
+                        .await
+                    {
+                        warn!("Failed to register seller {}: {}", seller_pubkey, e);
+                    }
+                } else {
+                    info!(
+                        "Master registry key not yet known, buffering SellerRegistration from {}",
+                        seller_pubkey
+                    );
+                    let mut pending = self.pending_seller_registrations.lock().await;
+                    pending.push((seller_pubkey, catalog_key));
+                }
+            }
+            AuctionMessage::RegistryAnnouncement {
+                registry_key,
+                timestamp: _,
+            } => {
+                let mut ops = self.registry_ops.lock().await;
+                let existing = ops.master_registry_key();
+                if existing.is_none() {
+                    info!(
+                        "Received RegistryAnnouncement, setting master registry key: {}",
+                        registry_key
+                    );
+                    ops.set_master_registry_key(registry_key);
+
+                    // Replay any SellerRegistrations that arrived before we knew the key
+                    let pending = {
+                        let mut buf = self.pending_seller_registrations.lock().await;
+                        std::mem::take(&mut *buf)
+                    };
+                    if !pending.is_empty() {
+                        info!("Replaying {} buffered SellerRegistrations", pending.len());
+                        for (seller_pubkey, catalog_key) in pending {
+                            if let Err(e) = ops
+                                .register_seller(
+                                    &seller_pubkey.to_string(),
+                                    &catalog_key.to_string(),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    "Failed to register buffered seller {}: {}",
+                                    seller_pubkey, e
+                                );
+                            }
+                        }
+                    }
+                } else if existing.as_ref() == Some(&registry_key) {
+                    debug!("Received duplicate RegistryAnnouncement, ignoring");
+                } else {
+                    debug!(
+                        "Received RegistryAnnouncement with different key {}, keeping first-write-wins key",
+                        registry_key
+                    );
+                }
+                drop(ops);
+            }
         }
         Ok(())
     }
@@ -533,13 +618,112 @@ impl AuctionCoordinator {
         Ok(())
     }
 
-    /// Start background deadline monitoring
+    /// Broadcast a message to all known peers.
+    async fn broadcast_message(&self, data: &[u8]) -> Result<usize> {
+        let routing_context = self
+            .api
+            .routing_context()
+            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
+            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
+            .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))?;
+
+        let state = self
+            .api
+            .get_state()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get state: {e}"))?;
+
+        let mut sent_count = 0;
+        for peer in &state.network.peers {
+            for node_id in &peer.node_ids {
+                match routing_context
+                    .app_message(Target::NodeId(node_id.clone()), data.to_vec())
+                    .await
+                {
+                    Ok(()) => {
+                        sent_count += 1;
+                        break;
+                    }
+                    Err(e) => {
+                        debug!("Failed to send to peer {}: {}", node_id, e);
+                    }
+                }
+            }
+        }
+        Ok(sent_count)
+    }
+
+    /// Ensure the master registry is available (create or use already-known key).
+    pub async fn ensure_master_registry(&self) -> Result<RecordKey> {
+        let mut ops = self.registry_ops.lock().await;
+        ops.ensure_master_registry().await
+    }
+
+    /// Broadcast a `SellerRegistration` to all peers.
+    pub async fn broadcast_seller_registration(&self, catalog_key: &RecordKey) -> Result<()> {
+        info!(
+            "Broadcasting SellerRegistration with catalog {}",
+            catalog_key
+        );
+        let msg = AuctionMessage::seller_registration(self.my_node_id.clone(), catalog_key.clone());
+        let data = msg.to_bytes()?;
+        let sent = self.broadcast_message(&data).await?;
+        info!("Sent SellerRegistration to {} peers", sent);
+        Ok(())
+    }
+
+    /// Broadcast the master registry DHT key to all peers.
+    ///
+    /// If the registry key is not yet known, this is a no-op.
+    pub async fn broadcast_registry_announcement(&self) -> Result<()> {
+        let key = {
+            let ops = self.registry_ops.lock().await;
+            ops.master_registry_key()
+        };
+        let Some(registry_key) = key else {
+            debug!("No master registry key to broadcast");
+            return Ok(());
+        };
+        info!(
+            "Broadcasting RegistryAnnouncement with key {}",
+            registry_key
+        );
+        let msg = AuctionMessage::registry_announcement(registry_key);
+        let data = msg.to_bytes()?;
+        let sent = self.broadcast_message(&data).await?;
+        info!("Sent RegistryAnnouncement to {} peers", sent);
+        Ok(())
+    }
+
+    /// Get a reference to the shared registry operations.
+    pub const fn registry_ops(&self) -> &Arc<Mutex<RegistryOperations>> {
+        &self.registry_ops
+    }
+
+    /// Fetch all listings via two-hop discovery. Delegates to `registry_ops`.
+    pub async fn fetch_all_listings(&self) -> Result<Vec<RegistryEntry>> {
+        let ops = self.registry_ops.lock().await;
+        ops.fetch_all_listings().await
+    }
+
+    /// Start background deadline monitoring.
     pub fn start_monitoring(self: Arc<Self>) {
         info!("Starting auction deadline monitor");
 
         tokio::spawn(async move {
+            let mut tick_count: u32 = 0;
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                tick_count = tick_count.wrapping_add(1);
+
+                // Re-broadcast registry key for late joiners:
+                // every tick for the first 6 ticks (~60s), then every 3rd tick (~30s)
+                let should_broadcast = tick_count <= 6 || tick_count % 3 == 0;
+                if should_broadcast {
+                    if let Err(e) = self.broadcast_registry_announcement().await {
+                        debug!("Periodic registry broadcast failed: {}", e);
+                    }
+                }
 
                 let watched = self.watched_listings.lock().await.clone();
 

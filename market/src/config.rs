@@ -28,6 +28,17 @@ pub mod subkeys {
     pub const BIDDER_REGISTRY: u32 = 3;
 }
 
+/// Default network key for shared-keypair registry derivation.
+pub const DEFAULT_NETWORK_KEY: &str = "development-network-2025";
+
+/// Environment variable to override the network key.
+pub const MARKET_NETWORK_KEY_ENV: &str = "MARKET_NETWORK_KEY";
+
+/// Return the network key used for shared-keypair derivation.
+pub fn network_key() -> String {
+    std::env::var(MARKET_NETWORK_KEY_ENV).unwrap_or_else(|_| DEFAULT_NETWORK_KEY.to_string())
+}
+
 /// Default MP-SPDZ directory path.
 pub const DEFAULT_MP_SPDZ_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../MP-SPDZ");
 

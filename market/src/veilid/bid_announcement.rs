@@ -100,6 +100,22 @@ pub enum AuctionMessage {
         /// Timestamp of reveal
         timestamp: u64,
     },
+    /// Seller announces their catalog for registration in the master registry
+    SellerRegistration {
+        /// Seller's public key
+        seller_pubkey: PublicKey,
+        /// DHT key of the seller's catalog record
+        catalog_key: RecordKey,
+        /// Timestamp of registration
+        timestamp: u64,
+    },
+    /// Announce the master registry DHT key so all nodes share one record
+    RegistryAnnouncement {
+        /// DHT key of the master registry record
+        registry_key: RecordKey,
+        /// Timestamp of announcement
+        timestamp: u64,
+    },
 }
 
 impl AuctionMessage {
@@ -245,6 +261,47 @@ impl AuctionMessage {
         }
     }
 
+    /// Create a seller registration using system time.
+    pub fn seller_registration(seller_pubkey: PublicKey, catalog_key: RecordKey) -> Self {
+        Self::SellerRegistration {
+            seller_pubkey,
+            catalog_key,
+            timestamp: now_unix(),
+        }
+    }
+
+    /// Create a seller registration with a custom time provider.
+    pub fn seller_registration_with_time<T: TimeProvider>(
+        seller_pubkey: PublicKey,
+        catalog_key: RecordKey,
+        time: &T,
+    ) -> Self {
+        Self::SellerRegistration {
+            seller_pubkey,
+            catalog_key,
+            timestamp: time.now_unix(),
+        }
+    }
+
+    /// Create a registry announcement using system time.
+    pub fn registry_announcement(registry_key: RecordKey) -> Self {
+        Self::RegistryAnnouncement {
+            registry_key,
+            timestamp: now_unix(),
+        }
+    }
+
+    /// Create a registry announcement with a custom time provider.
+    pub fn registry_announcement_with_time<T: TimeProvider>(
+        registry_key: RecordKey,
+        time: &T,
+    ) -> Self {
+        Self::RegistryAnnouncement {
+            registry_key,
+            timestamp: time.now_unix(),
+        }
+    }
+
     /// Serialize to bytes for transmission
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::serialize(self)
@@ -255,5 +312,62 @@ impl AuctionMessage {
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize auction message: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mocks::MockTime;
+
+    fn test_pubkey() -> PublicKey {
+        crate::mocks::dht::make_test_public_key(42)
+    }
+
+    fn test_record_key() -> RecordKey {
+        crate::mocks::dht::make_test_record_key(99)
+    }
+
+    #[test]
+    fn registry_announcement_bincode_roundtrip() {
+        let msg = AuctionMessage::registry_announcement_with_time(
+            test_record_key(),
+            &MockTime::new(5000),
+        );
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
+        match decoded {
+            AuctionMessage::RegistryAnnouncement {
+                registry_key,
+                timestamp,
+            } => {
+                assert_eq!(registry_key, test_record_key());
+                assert_eq!(timestamp, 5000);
+            }
+            _ => panic!("Expected RegistryAnnouncement"),
+        }
+    }
+
+    #[test]
+    fn seller_registration_bincode_roundtrip() {
+        let msg = AuctionMessage::seller_registration_with_time(
+            test_pubkey(),
+            test_record_key(),
+            &MockTime::new(3000),
+        );
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
+        match decoded {
+            AuctionMessage::SellerRegistration {
+                seller_pubkey,
+                catalog_key,
+                timestamp,
+            } => {
+                assert_eq!(seller_pubkey, test_pubkey());
+                assert_eq!(catalog_key, test_record_key());
+                assert_eq!(timestamp, 3000);
+            }
+            _ => panic!("Expected SellerRegistration"),
+        }
     }
 }

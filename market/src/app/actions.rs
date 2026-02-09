@@ -1,8 +1,8 @@
 //! Business logic for auction operations.
 
 use market::{
-    encrypt_content, generate_key, Bid, BidOperations, BidRecord, DHTOperations, DhtStore, Listing,
-    ListingOperations, RegistryEntry, RegistryOperations,
+    encrypt_content, generate_key, Bid, BidOperations, BidRecord, CatalogEntry, DHTOperations,
+    DhtStore, Listing, ListingOperations,
 };
 use tracing::{info, warn};
 use veilid_core::RecordKey;
@@ -60,23 +60,61 @@ pub async fn create_and_publish_listing(
     let listing_ops = ListingOperations::new(dht.clone());
     listing_ops.update_listing(&record, &listing).await?;
 
-    // Register in the shared listing registry
-    let mut registry_ops = RegistryOperations::new(dht.clone());
-    let registry_entry = RegistryEntry {
-        key: record.key.to_string(),
-        title: title.to_string(),
-        seller: seller.to_string(),
-        reserve_price,
-        auction_end: listing.auction_end,
-    };
-
-    registry_ops
-        .register_listing(registry_entry)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to register listing in shared registry: {}", e))?;
-
-    // Register with auction coordinator
+    // Register with auction coordinator and per-seller catalog
     if let Some(coordinator) = state.coordinator() {
+        // Ensure the master registry exists (creates on first listing)
+        let _registry_key = coordinator
+            .ensure_master_registry()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to ensure master registry: {e}"))?;
+
+        // Ensure seller has a catalog DHT record
+        let catalog_key = {
+            let mut ops = coordinator.registry_ops().lock().await;
+            ops.get_or_create_seller_catalog(&seller.to_string())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create seller catalog: {}", e))?
+        };
+
+        // Add listing to seller's own catalog
+        {
+            let ops = coordinator.registry_ops().lock().await;
+            ops.add_listing_to_catalog(CatalogEntry {
+                listing_key: record.key.to_string(),
+                title: title.to_string(),
+                reserve_price,
+                auction_end: listing.auction_end,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to add listing to catalog: {}", e))?;
+        }
+
+        // Register seller directly in the master registry (shared keypair)
+        {
+            let mut ops = coordinator.registry_ops().lock().await;
+            if let Err(e) = ops
+                .register_seller(&seller.to_string(), &catalog_key.to_string())
+                .await
+            {
+                tracing::warn!("Failed to register seller in master registry: {}", e);
+            }
+        }
+
+        // Broadcast registry key AFTER DHT writes complete, so peers can read
+        // the populated registry immediately upon learning the key
+        if let Err(e) = coordinator.broadcast_registry_announcement().await {
+            tracing::warn!("Failed to broadcast registry announcement: {}", e);
+        }
+
+        // Also broadcast seller registration for real-time peer notification
+        if let Err(e) = coordinator
+            .broadcast_seller_registration(&catalog_key)
+            .await
+        {
+            tracing::warn!("Failed to broadcast seller registration: {}", e);
+        }
+
+        // Register owned listing with coordinator (for bid tracking / MPC)
         if let Err(e) = coordinator.register_owned_listing(record.clone()).await {
             tracing::warn!("Failed to register owned listing with coordinator: {}", e);
         } else {
@@ -221,14 +259,18 @@ pub async fn submit_bid(
     ))
 }
 
-/// Fetch all listings from the shared registry.
-pub async fn fetch_registry_listings(dht: &DHTOperations) -> anyhow::Result<Vec<(String, String)>> {
-    let mut registry_ops = RegistryOperations::new(dht.clone());
-    let registry = registry_ops.fetch_registry().await?;
+/// Fetch all listings via two-hop discovery (master registry → seller catalogs).
+///
+/// Returns an empty list if the coordinator is unavailable or the registry key
+/// has not been received yet (no `RegistryAnnouncement` from a peer).
+pub async fn fetch_registry_listings(
+    state: &SharedAppState,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let coordinator = match state.coordinator() {
+        Some(c) => c,
+        None => return Ok(Vec::new()),
+    };
 
-    Ok(registry
-        .listings
-        .into_iter()
-        .map(|e| (e.key, e.title))
-        .collect())
+    let listings = coordinator.fetch_all_listings().await?;
+    Ok(listings.into_iter().map(|e| (e.key, e.title)).collect())
 }

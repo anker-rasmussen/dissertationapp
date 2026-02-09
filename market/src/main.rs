@@ -1,4 +1,5 @@
 //! SMPC Auction Marketplace - Main entry point.
+#![recursion_limit = "512"]
 
 mod app;
 
@@ -205,16 +206,18 @@ fn main() -> anyhow::Result<()> {
                                 return;
                             }
                         };
+                        let network_key = market::config::network_key();
                         let coordinator = Arc::new(market::AuctionCoordinator::new(
                             api,
                             dht,
                             my_node_id,
                             bid_storage,
                             node_offset,
+                            &network_key,
                         ));
 
                         coordinator.clone().start_monitoring();
-                        *coordinator_holder.write() = Some(coordinator);
+                        *coordinator_holder.write() = Some(coordinator.clone());
                         info!("Auction coordinator started");
                     }
                 }

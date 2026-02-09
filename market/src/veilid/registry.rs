@@ -1,98 +1,128 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
-use veilid_core::{DHTSchema, KeyPair, RecordKey, CRYPTO_KIND_VLD0};
+use veilid_core::{
+    BareKeyPair, BarePublicKey, BareSecretKey, DHTSchema, KeyPair, RecordKey, CRYPTO_KIND_VLD0,
+};
 
-use super::dht::DHTOperations;
+use super::dht::{DHTOperations, OwnedDHTRecord};
 use crate::config::now_unix;
 use crate::traits::TimeProvider;
 
-/// **DEVNET-ONLY** shared keypair for the listing registry DHT record.
+/// Derive a deterministic VLD0 keypair from the network key.
 ///
-/// # Security
-///
-/// This keypair is hardcoded in source and grants write access to the shared
-/// listing registry. Anyone who reads the source (or binary) can write to the
-/// registry. This is intentional for the devnet/dissertation demo where all
-/// participants need to register listings in a single shared record.
-///
-/// In a production system, the registry would need per-user write
-/// authorization — e.g., individually signed entries verified by peers, or a
-/// registry service that validates requests before committing writes.
-///
-/// Override via the `VEILID_REGISTRY_KEYPAIR` environment variable to use a
-/// different keypair for isolated deployments or testing.
-const DEFAULT_REGISTRY_KEYPAIR: &str =
-    "VLD0:Qz4_xPTDDkwDtIgwuk1AarJTudWkg1hlrMIuQstprzM:o70UeMuq22ZrE-ysnmtN8wthjO0YSRUe6nxn2DnnWeQ";
+/// All nodes on the same network derive the same keypair, enabling any node
+/// to create or write to the shared master registry DHT record.
+fn derive_registry_keypair(network_key: &str) -> KeyPair {
+    let mut hasher = Sha256::new();
+    hasher.update(b"smpc-auction-market-registry:");
+    hasher.update(network_key.as_bytes());
+    let seed: [u8; 32] = hasher.finalize().into();
 
-/// **DEVNET-ONLY** shared record key for the listing registry.
-///
-/// This is the DHT record address that all nodes use to find the shared
-/// registry. It is derived from [`DEFAULT_REGISTRY_KEYPAIR`] and must stay
-/// in sync with it.
-///
-/// Override via the `VEILID_REGISTRY_RECORD_KEY` environment variable.
-const DEFAULT_REGISTRY_RECORD_KEY: &str = "VLD0:WvPYrb8EnnKOsCQ6MB_inMSnlXyQ6mkXuMa2fh55Dz4";
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let verifying_key = signing_key.verifying_key();
 
-/// Read the registry keypair from the environment, falling back to the default.
-fn registry_keypair_str() -> String {
-    std::env::var("VEILID_REGISTRY_KEYPAIR")
-        .unwrap_or_else(|_| DEFAULT_REGISTRY_KEYPAIR.to_string())
+    let bare_pub = BarePublicKey::new(&verifying_key.to_bytes());
+    let bare_sec = BareSecretKey::new(&signing_key.to_bytes());
+    KeyPair::new(CRYPTO_KIND_VLD0, BareKeyPair::new(bare_pub, bare_sec))
 }
 
-/// Read the registry record key from the environment, falling back to the default.
-fn registry_record_key_str() -> String {
-    std::env::var("VEILID_REGISTRY_RECORD_KEY")
-        .unwrap_or_else(|_| DEFAULT_REGISTRY_RECORD_KEY.to_string())
-}
+// ── Data structures ──────────────────────────────────────────────────
 
-/// Listing entry in the registry (minimal info for discovery)
+/// Entry in the master registry — one per seller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegistryEntry {
-    /// DHT key of the listing
-    pub key: String,
-    /// Title for quick display
-    pub title: String,
-    /// Seller's public key
-    pub seller: String,
-    /// Reserve price
-    pub reserve_price: u64,
-    /// When the auction ends (unix timestamp)
-    pub auction_end: u64,
+pub struct SellerEntry {
+    /// Seller's public key (string form).
+    pub seller_pubkey: String,
+    /// DHT key of the seller's catalog record.
+    pub catalog_key: String,
+    /// When this seller was registered (unix timestamp).
+    pub registered_at: u64,
 }
 
-/// The shared registry stored in DHT
+/// The master registry stored in the bootstrap node's DHT record (subkey 0, CBOR).
+/// Contains the directory of all sellers.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ListingRegistry {
-    /// All registered listings
-    pub listings: Vec<RegistryEntry>,
-    /// Version for conflict resolution (higher wins)
+pub struct MarketRegistry {
+    /// Registered sellers.
+    pub sellers: Vec<SellerEntry>,
+    /// Version for conflict resolution (higher wins).
     pub version: u64,
 }
 
-impl ListingRegistry {
-    /// Serialize to CBOR
+impl MarketRegistry {
     pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
         let mut buffer = Vec::new();
         ciborium::into_writer(self, &mut buffer)?;
         Ok(buffer)
     }
 
-    /// Deserialize from CBOR
     pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
         ciborium::from_reader(data)
     }
 
-    /// Add a listing to the registry
-    pub fn add_listing(&mut self, entry: RegistryEntry) {
-        // Don't add duplicates
-        if !self.listings.iter().any(|e| e.key == entry.key) {
+    /// Add a seller, deduplicating by pubkey.
+    pub fn add_seller(&mut self, entry: SellerEntry) {
+        if !self
+            .sellers
+            .iter()
+            .any(|e| e.seller_pubkey == entry.seller_pubkey)
+        {
+            self.sellers.push(entry);
+            self.version += 1;
+        }
+    }
+}
+
+/// Entry in a seller's catalog — one per listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogEntry {
+    /// DHT key of the listing.
+    pub listing_key: String,
+    /// Title for quick display.
+    pub title: String,
+    /// Reserve price.
+    pub reserve_price: u64,
+    /// When the auction ends (unix timestamp).
+    pub auction_end: u64,
+}
+
+/// A seller's catalog of listings, stored in the seller's own DHT record (subkey 0, CBOR).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SellerCatalog {
+    /// Seller's public key (string form).
+    pub seller_pubkey: String,
+    /// Listings in this catalog.
+    pub listings: Vec<CatalogEntry>,
+    /// Version for conflict resolution.
+    pub version: u64,
+}
+
+impl SellerCatalog {
+    pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
+        let mut buffer = Vec::new();
+        ciborium::into_writer(self, &mut buffer)?;
+        Ok(buffer)
+    }
+
+    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
+        ciborium::from_reader(data)
+    }
+
+    /// Add a listing, deduplicating by key.
+    pub fn add_listing(&mut self, entry: CatalogEntry) {
+        if !self
+            .listings
+            .iter()
+            .any(|e| e.listing_key == entry.listing_key)
+        {
             self.listings.push(entry);
             self.version += 1;
         }
     }
 
-    /// Remove expired listings (auction ended more than 1 hour ago)
+    /// Remove expired listings (auction ended more than 1 hour ago).
     pub fn cleanup_expired(&mut self) {
         let now = now_unix();
         let one_hour_ago = now.saturating_sub(3600);
@@ -104,7 +134,7 @@ impl ListingRegistry {
         }
     }
 
-    /// Remove expired listings with a custom time provider
+    /// Remove expired listings with a custom time provider.
     pub fn cleanup_expired_with_time<T: TimeProvider>(&mut self, time: &T) {
         let now = time.now_unix();
         let one_hour_ago = now.saturating_sub(3600);
@@ -117,279 +147,537 @@ impl ListingRegistry {
     }
 }
 
-/// Operations for the shared listing registry
+/// Flattened listing view produced by two-hop discovery.
+/// Preserves the downstream API (same fields as the old `RegistryEntry`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    /// DHT key of the listing.
+    pub key: String,
+    /// Title for quick display.
+    pub title: String,
+    /// Seller's public key.
+    pub seller: String,
+    /// Reserve price.
+    pub reserve_price: u64,
+    /// When the auction ends (unix timestamp).
+    pub auction_end: u64,
+}
+
+// ── Operations ───────────────────────────────────────────────────────
+
+/// Shared-keypair registry operations.
+///
+/// All nodes derive the same keypair from the network key, so any node can
+/// create or write to the master registry DHT record.
+///
+/// - **Any node**: can create-or-open the master registry, register sellers.
+/// - **Seller node**: owns its own catalog DHT record, adds listings.
+/// - **All nodes**: can read the master registry + seller catalogs for discovery.
 pub struct RegistryOperations {
     dht: DHTOperations,
-    /// Cached registry record key (once created/found)
-    registry_key: Option<RecordKey>,
-    /// Track if we have an open record handle
-    record_open: bool,
+    /// Shared keypair derived from the network key (all nodes have the same one).
+    shared_keypair: KeyPair,
+    /// The master registry DHT key (set after create-or-open).
+    master_registry_key: Option<RecordKey>,
+    /// This seller's catalog DHT record (sellers only).
+    seller_catalog_record: Option<OwnedDHTRecord>,
 }
 
 impl RegistryOperations {
-    pub const fn new(dht: DHTOperations) -> Self {
+    pub fn new(dht: DHTOperations, network_key: &str) -> Self {
         Self {
             dht,
-            registry_key: None,
-            record_open: false,
+            shared_keypair: derive_registry_keypair(network_key),
+            master_registry_key: None,
+            seller_catalog_record: None,
         }
     }
 
-    /// Get the shared registry keypair
-    /// Uses a hardcoded keypair for devnet to ensure all nodes share the same registry
-    /// In production, this should load from a secure shared key management system
-    fn get_or_create_registry_keypair() -> Result<KeyPair> {
-        let keypair_str = registry_keypair_str();
-        let keypair = KeyPair::try_from(keypair_str.as_str())
-            .map_err(|e| anyhow::anyhow!("Failed to parse registry keypair: {e}"))?;
+    // ── Master registry (any node) ─────────────────────────────────
 
-        debug!("Using registry keypair (from env or default)");
-        Ok(keypair)
-    }
-
-    /// Create or get the registry DHT record
-    /// All nodes use the hardcoded record key to share the same registry
-    pub async fn get_or_create_registry(&mut self) -> Result<RecordKey> {
-        if let Some(key) = &self.registry_key {
-            return Ok(key.clone());
-        }
-
-        let keypair = Self::get_or_create_registry_keypair()?;
+    /// Create the master registry DHT record using the shared keypair.
+    ///
+    /// The first node to call this creates the record. The shared keypair
+    /// means any node that knows the record key can write to it.
+    /// On the same node, a second call will fail (record already in local store).
+    pub async fn create_master_registry(&mut self) -> Result<RecordKey> {
         let routing_context = self.dht.get_routing_context_pub()?;
+        let schema = DHTSchema::dflt(1)?;
 
-        // Parse the registry record key (from env or default)
-        let record_key_str = registry_record_key_str();
-        let key = RecordKey::try_from(record_key_str.as_str())
-            .map_err(|e| anyhow::anyhow!("Failed to parse registry record key: {e}"))?;
-
-        // Try to open the existing record first (most common case)
-        let is_new = match routing_context
-            .open_dht_record(key.clone(), Some(keypair.clone()))
+        let descriptor = routing_context
+            .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(self.shared_keypair.clone()))
             .await
-        {
-            Ok(_) => {
-                info!("Opened existing registry at: {}", key);
-                false
-            }
-            Err(open_err) => {
-                // Record doesn't exist yet - try to create it
-                debug!(
-                    "Open failed ({}), attempting to create new registry record",
-                    open_err
-                );
+            .map_err(|e| anyhow::anyhow!("Failed to create master registry: {e}"))?;
 
-                let schema = DHTSchema::dflt(1)?;
-                match routing_context
-                    .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(keypair.clone()))
-                    .await
-                {
-                    Ok(descriptor) => {
-                        let created_key = descriptor.key();
-                        if created_key != key {
-                            warn!(
-                                "Created registry key {} doesn't match expected key {}. Using created key.",
-                                created_key, key
-                            );
-                            // This shouldn't happen with a hardcoded keypair, but handle it gracefully
-                        }
-                        info!("Created new registry at: {}", created_key);
-                        true
-                    }
-                    Err(create_err) => {
-                        // Race condition: another node created it between our open and create
-                        // Try opening again
-                        debug!(
-                            "Create failed ({}), trying to open again (race condition)",
-                            create_err
-                        );
-                        let _ = routing_context
-                            .open_dht_record(key.clone(), Some(keypair.clone()))
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "Failed to open or create registry. Open error: {open_err}, Create error: {create_err}, Retry open error: {e}"
-                                )
-                            })?;
-                        info!("Opened registry at: {} (after race)", key);
-                        false
-                    }
-                }
-            }
-        };
+        let key = descriptor.key();
 
-        self.registry_key = Some(key.clone());
+        // Initialize with empty registry
+        let empty = MarketRegistry::default();
+        let data = empty
+            .to_cbor()
+            .map_err(|e| anyhow::anyhow!("Failed to serialize empty registry: {e}"))?;
+        routing_context
+            .set_dht_value(key.clone(), 0, data, None)
+            .await?;
 
-        // Only initialize if this is a NEW record we just created
-        if is_new {
-            info!("Initializing new empty registry");
-            let empty_registry = ListingRegistry::default();
-            let data = empty_registry
-                .to_cbor()
-                .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {e}"))?;
-            routing_context
-                .set_dht_value(key.clone(), 0, data, None)
-                .await?;
-        }
-
-        // Keep the record open for future operations
-        // Don't close it - we'll reuse the open handle
-        self.record_open = true;
-        info!("Registry record is now open and ready");
+        info!("Created master registry at: {}", key);
+        self.master_registry_key = Some(key.clone());
         Ok(key)
     }
 
-    /// Fetch the current registry from DHT
-    pub async fn fetch_registry(&mut self) -> Result<ListingRegistry> {
-        let key = self.get_or_create_registry().await?;
-        let routing_context = self.dht.get_routing_context_pub()?;
-
-        // Record should already be open from get_or_create_registry
-        // If not, open it now
-        if !self.record_open {
-            let keypair = Self::get_or_create_registry_keypair()?;
-            let _ = routing_context
-                .open_dht_record(key.clone(), Some(keypair))
-                .await?;
-            self.record_open = true;
+    /// Ensure the master registry is available (create or use already-known key).
+    ///
+    /// - If the key is already known (from a peer broadcast), returns it.
+    /// - Otherwise tries to create the record (first node on this machine wins).
+    pub async fn ensure_master_registry(&mut self) -> Result<RecordKey> {
+        if let Some(key) = &self.master_registry_key {
+            return Ok(key.clone());
         }
-
-        // Force refresh to get latest data from the network
-        let data = routing_context
-            .get_dht_value(key.clone(), 0, true)
-            .await?
-            .map(|v| v.data().to_vec());
-
-        // Don't close the record - keep it open for future operations
-
-        if let Some(bytes) = data {
-            // Handle corrupted data gracefully
-            match ListingRegistry::from_cbor(&bytes) {
-                Ok(registry) => {
-                    debug!("Fetched registry with {} listings", registry.listings.len());
-                    Ok(registry)
-                }
-                Err(e) => {
-                    warn!("Registry data corrupted, returning empty: {}", e);
-                    Ok(ListingRegistry::default())
-                }
-            }
-        } else {
-            debug!("Registry is empty");
-            Ok(ListingRegistry::default())
-        }
+        self.create_master_registry().await
     }
 
-    /// Add a listing to the registry with retry logic for conflict resolution.
-    ///
-    /// # Authorization
-    ///
-    /// This method performs **no authorization checks** — any caller with access
-    /// to the shared registry keypair (see [`DEFAULT_REGISTRY_KEYPAIR`]) can
-    /// write arbitrary entries. This is acceptable for the devnet demo but would
-    /// need authenticated write control in production.
-    pub async fn register_listing(&mut self, entry: RegistryEntry) -> Result<()> {
-        let key = self.get_or_create_registry().await?;
+    /// Set the master registry key (received from a peer broadcast).
+    pub fn set_master_registry_key(&mut self, key: RecordKey) {
+        info!("Set master registry key: {}", key);
+        self.master_registry_key = Some(key);
+    }
+
+    /// Register a seller in the master registry.
+    /// Retries on concurrent-write conflicts.
+    #[allow(clippy::too_many_lines)]
+    pub async fn register_seller(&mut self, seller_pubkey: &str, catalog_key: &str) -> Result<()> {
+        let registry_key = self
+            .master_registry_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Master registry key not known yet"))?
+            .clone();
+
         let routing_context = self.dht.get_routing_context_pub()?;
 
-        // Record should already be open from get_or_create_registry
-        if !self.record_open {
-            let keypair = Self::get_or_create_registry_keypair()?;
-            let _ = routing_context
-                .open_dht_record(key.clone(), Some(keypair))
-                .await?;
-            self.record_open = true;
-        }
+        // Open with shared keypair for write access
+        let _ = routing_context
+            .open_dht_record(registry_key.clone(), Some(self.shared_keypair.clone()))
+            .await?;
 
-        // Retry up to 10 times with exponential backoff to handle concurrent writes
-        // This implements optimistic concurrency control
-        let max_retries = 10;
+        let max_retries: u32 = 10;
         let mut retry_delay = std::time::Duration::from_millis(50);
 
         for attempt in 0..max_retries {
-            // Fetch current registry with force_refresh to get latest state from network
-            let value_data = routing_context.get_dht_value(key.clone(), 0, true).await?;
+            let value_data = routing_context
+                .get_dht_value(registry_key.clone(), 0, true)
+                .await?;
 
             let (mut registry, old_seq) = match value_data {
                 Some(v) => {
                     let seq = v.seq();
-                    let registry = ListingRegistry::from_cbor(v.data())
+                    let reg = MarketRegistry::from_cbor(v.data())
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize registry: {e}"))?;
-                    (registry, Some(seq))
+                    (reg, Some(seq))
                 }
-                None => (ListingRegistry::default(), None),
+                None => (MarketRegistry::default(), None),
             };
 
-            // Check if listing already exists (no-op if duplicate)
-            if registry.listings.iter().any(|e| e.key == entry.key) {
-                info!("Listing '{}' already in registry, skipping", entry.title);
+            // Dedup check
+            if registry
+                .sellers
+                .iter()
+                .any(|e| e.seller_pubkey == seller_pubkey)
+            {
+                info!("Seller '{}' already registered, skipping", seller_pubkey);
                 return Ok(());
             }
 
-            // Add the new listing
-            registry.add_listing(entry.clone());
+            registry.add_seller(SellerEntry {
+                seller_pubkey: seller_pubkey.to_string(),
+                catalog_key: catalog_key.to_string(),
+                registered_at: now_unix(),
+            });
 
-            // Serialize the updated registry
             let data = registry
                 .to_cbor()
                 .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {e}"))?;
 
-            // Write the updated registry (Veilid automatically increments sequence number)
             match routing_context
-                .set_dht_value(key.clone(), 0, data.clone(), None)
+                .set_dht_value(registry_key.clone(), 0, data, None)
                 .await
             {
                 Ok(old_value) => {
-                    // Verify the write succeeded by checking if the sequence changed
-                    // If another node wrote between our read and write, we need to retry
-                    if let Some(returned_value) = old_value {
-                        let returned_seq = returned_value.seq();
-                        if let Some(expected_seq) = old_seq {
-                            if returned_seq != expected_seq {
-                                // Sequence changed - another write happened
-                                if attempt < max_retries - 1 {
-                                    warn!(
-                                        "Concurrent write detected (seq {} -> {}), retrying in {:?}",
-                                        expected_seq, returned_seq, retry_delay
-                                    );
-                                    tokio::time::sleep(retry_delay).await;
-                                    retry_delay *= 2; // Exponential backoff
-                                    continue;
-                                }
+                    if let Some(returned) = old_value {
+                        if let Some(expected) = old_seq {
+                            if returned.seq() != expected && attempt < max_retries - 1 {
+                                warn!(
+                                    "Concurrent write (seq {} -> {}), retrying",
+                                    expected,
+                                    returned.seq()
+                                );
+                                tokio::time::sleep(retry_delay).await;
+                                retry_delay *= 2;
+                                continue;
                             }
                         }
                     }
-
                     info!(
-                        "Successfully registered listing '{}' in registry (attempt {}/{})",
-                        entry.title,
+                        "Registered seller '{}' (attempt {}/{})",
+                        seller_pubkey,
                         attempt + 1,
                         max_retries
                     );
                     return Ok(());
                 }
                 Err(e) => {
-                    // Write failed - could be network issue or other error
                     if attempt < max_retries - 1 {
-                        warn!(
-                            "Write failed ({}), retrying in {:?} (attempt {}/{})",
-                            e,
-                            retry_delay,
-                            attempt + 1,
-                            max_retries
-                        );
+                        warn!("Write failed ({}), retrying", e);
                         tokio::time::sleep(retry_delay).await;
                         retry_delay *= 2;
                         continue;
                     }
                     return Err(anyhow::anyhow!(
-                        "Failed to register listing after {max_retries} attempts: {e}"
+                        "Failed to register seller after {max_retries} attempts: {e}"
                     ));
                 }
             }
         }
 
         Err(anyhow::anyhow!(
-            "Failed to register listing after {max_retries} attempts"
+            "Failed to register seller after {max_retries} attempts"
         ))
+    }
+
+    /// Get the master registry key (if known).
+    pub fn master_registry_key(&self) -> Option<RecordKey> {
+        self.master_registry_key.clone()
+    }
+
+    // ── Seller operations ────────────────────────────────────────────
+
+    /// Create (or return existing) seller catalog DHT record.
+    pub async fn get_or_create_seller_catalog(&mut self, seller_pubkey: &str) -> Result<RecordKey> {
+        if let Some(record) = &self.seller_catalog_record {
+            return Ok(record.key.clone());
+        }
+
+        let routing_context = self.dht.get_routing_context_pub()?;
+        let schema = DHTSchema::dflt(1)?;
+        let descriptor = routing_context
+            .create_dht_record(CRYPTO_KIND_VLD0, schema, None)
+            .await?;
+
+        let key = descriptor.key();
+        let owner = descriptor
+            .owner_keypair()
+            .ok_or_else(|| anyhow::anyhow!("Seller catalog record missing owner keypair"))?;
+
+        // Initialize with empty catalog
+        let empty = SellerCatalog {
+            seller_pubkey: seller_pubkey.to_string(),
+            listings: Vec::new(),
+            version: 0,
+        };
+        let data = empty
+            .to_cbor()
+            .map_err(|e| anyhow::anyhow!("Failed to serialize empty catalog: {e}"))?;
+        routing_context
+            .set_dht_value(key.clone(), 0, data, None)
+            .await?;
+
+        let record = OwnedDHTRecord { key, owner };
+        info!("Created seller catalog at: {}", record.key);
+        let catalog_key = record.key.clone();
+        self.seller_catalog_record = Some(record);
+
+        Ok(catalog_key)
+    }
+
+    /// Get the seller catalog key (if created).
+    pub fn seller_catalog_key(&self) -> Option<RecordKey> {
+        self.seller_catalog_record.as_ref().map(|r| r.key.clone())
+    }
+
+    /// Add a listing to the seller's own catalog.
+    pub async fn add_listing_to_catalog(&self, entry: CatalogEntry) -> Result<()> {
+        let record = self
+            .seller_catalog_record
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Seller catalog not created yet"))?;
+
+        let routing_context = self.dht.get_routing_context_pub()?;
+        let _ = routing_context
+            .open_dht_record(record.key.clone(), Some(record.owner.clone()))
+            .await?;
+
+        let value_data = routing_context
+            .get_dht_value(record.key.clone(), 0, true)
+            .await?;
+
+        let mut catalog = match value_data {
+            Some(v) => SellerCatalog::from_cbor(v.data())
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize catalog: {e}"))?,
+            None => SellerCatalog::default(),
+        };
+
+        catalog.add_listing(entry);
+
+        let data = catalog
+            .to_cbor()
+            .map_err(|e| anyhow::anyhow!("Failed to serialize catalog: {e}"))?;
+        routing_context
+            .set_dht_value(record.key.clone(), 0, data, None)
+            .await?;
+
+        info!(
+            "Added listing to catalog, now has {} listings",
+            catalog.listings.len()
+        );
+        Ok(())
+    }
+
+    // ── Discovery (all nodes) ────────────────────────────────────────
+
+    /// Fetch the master registry from DHT.
+    ///
+    /// Returns an empty registry if the master key is not yet known
+    /// (e.g. no `RegistryAnnouncement` received yet).
+    pub async fn fetch_registry(&self) -> Result<MarketRegistry> {
+        let Some(key) = &self.master_registry_key else {
+            info!("Master registry key not known yet, returning empty registry");
+            return Ok(MarketRegistry::default());
+        };
+        let key = key.clone();
+
+        let routing_context = self.dht.get_routing_context_pub()?;
+        let _ = routing_context.open_dht_record(key.clone(), None).await?;
+
+        let data = routing_context
+            .get_dht_value(key.clone(), 0, true)
+            .await?
+            .map(|v| v.data().to_vec());
+
+        let _ = routing_context.close_dht_record(key).await;
+
+        if let Some(bytes) = data {
+            match MarketRegistry::from_cbor(&bytes) {
+                Ok(registry) => {
+                    debug!("Fetched registry with {} sellers", registry.sellers.len());
+                    Ok(registry)
+                }
+                Err(e) => {
+                    warn!("Registry data corrupted, returning empty: {}", e);
+                    Ok(MarketRegistry::default())
+                }
+            }
+        } else {
+            debug!("Registry is empty");
+            Ok(MarketRegistry::default())
+        }
+    }
+
+    /// Fetch a single seller's catalog from DHT.
+    pub async fn fetch_seller_catalog(&self, catalog_key: &RecordKey) -> Result<SellerCatalog> {
+        let routing_context = self.dht.get_routing_context_pub()?;
+        let _ = routing_context
+            .open_dht_record(catalog_key.clone(), None)
+            .await?;
+
+        let data = routing_context
+            .get_dht_value(catalog_key.clone(), 0, true)
+            .await?
+            .map(|v| v.data().to_vec());
+
+        let _ = routing_context.close_dht_record(catalog_key.clone()).await;
+
+        if let Some(bytes) = data {
+            match SellerCatalog::from_cbor(&bytes) {
+                Ok(catalog) => {
+                    debug!(
+                        "Fetched catalog for seller '{}' with {} listings",
+                        catalog.seller_pubkey,
+                        catalog.listings.len()
+                    );
+                    Ok(catalog)
+                }
+                Err(e) => {
+                    warn!("Catalog data corrupted, returning empty: {}", e);
+                    Ok(SellerCatalog::default())
+                }
+            }
+        } else {
+            debug!("Catalog is empty");
+            Ok(SellerCatalog::default())
+        }
+    }
+
+    /// Two-hop discovery: master registry → seller catalogs → flat listing list.
+    pub async fn fetch_all_listings(&self) -> Result<Vec<RegistryEntry>> {
+        let registry = self.fetch_registry().await?;
+        let mut all_listings = Vec::new();
+
+        for seller in &registry.sellers {
+            let catalog_key = RecordKey::try_from(seller.catalog_key.as_str()).map_err(|e| {
+                anyhow::anyhow!("Invalid catalog key '{}': {e}", seller.catalog_key)
+            })?;
+
+            match self.fetch_seller_catalog(&catalog_key).await {
+                Ok(catalog) => {
+                    for entry in &catalog.listings {
+                        all_listings.push(RegistryEntry {
+                            key: entry.listing_key.clone(),
+                            title: entry.title.clone(),
+                            seller: seller.seller_pubkey.clone(),
+                            reserve_price: entry.reserve_price,
+                            auction_end: entry.auction_end,
+                        });
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to fetch catalog for seller '{}': {}",
+                        seller.seller_pubkey, e
+                    );
+                }
+            }
+        }
+
+        info!(
+            "Two-hop discovery: {} sellers, {} total listings",
+            registry.sellers.len(),
+            all_listings.len()
+        );
+        Ok(all_listings)
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn market_registry_cbor_roundtrip() {
+        let reg = MarketRegistry {
+            sellers: vec![
+                SellerEntry {
+                    seller_pubkey: "pk1".to_string(),
+                    catalog_key: "ck1".to_string(),
+                    registered_at: 1000,
+                },
+                SellerEntry {
+                    seller_pubkey: "pk2".to_string(),
+                    catalog_key: "ck2".to_string(),
+                    registered_at: 2000,
+                },
+            ],
+            version: 5,
+        };
+
+        let bytes = reg.to_cbor().unwrap();
+        let decoded = MarketRegistry::from_cbor(&bytes).unwrap();
+        assert_eq!(decoded.sellers.len(), 2);
+        assert_eq!(decoded.sellers[0].seller_pubkey, "pk1");
+        assert_eq!(decoded.sellers[1].catalog_key, "ck2");
+        assert_eq!(decoded.version, 5);
+    }
+
+    #[test]
+    fn seller_catalog_cbor_roundtrip() {
+        let catalog = SellerCatalog {
+            seller_pubkey: "seller1".to_string(),
+            listings: vec![CatalogEntry {
+                listing_key: "lk1".to_string(),
+                title: "Test".to_string(),
+                reserve_price: 100,
+                auction_end: 9999,
+            }],
+            version: 3,
+        };
+
+        let bytes = catalog.to_cbor().unwrap();
+        let decoded = SellerCatalog::from_cbor(&bytes).unwrap();
+        assert_eq!(decoded.seller_pubkey, "seller1");
+        assert_eq!(decoded.listings.len(), 1);
+        assert_eq!(decoded.listings[0].listing_key, "lk1");
+        assert_eq!(decoded.version, 3);
+    }
+
+    #[test]
+    fn market_registry_dedup() {
+        let mut reg = MarketRegistry::default();
+        reg.add_seller(SellerEntry {
+            seller_pubkey: "pk1".to_string(),
+            catalog_key: "ck1".to_string(),
+            registered_at: 1000,
+        });
+        assert_eq!(reg.sellers.len(), 1);
+        assert_eq!(reg.version, 1);
+
+        // Duplicate — should be ignored
+        reg.add_seller(SellerEntry {
+            seller_pubkey: "pk1".to_string(),
+            catalog_key: "ck1".to_string(),
+            registered_at: 2000,
+        });
+        assert_eq!(reg.sellers.len(), 1);
+        assert_eq!(reg.version, 1);
+
+        // Different seller — should be added
+        reg.add_seller(SellerEntry {
+            seller_pubkey: "pk2".to_string(),
+            catalog_key: "ck2".to_string(),
+            registered_at: 3000,
+        });
+        assert_eq!(reg.sellers.len(), 2);
+        assert_eq!(reg.version, 2);
+    }
+
+    #[test]
+    fn seller_catalog_dedup() {
+        let mut catalog = SellerCatalog::default();
+        catalog.add_listing(CatalogEntry {
+            listing_key: "lk1".to_string(),
+            title: "Item 1".to_string(),
+            reserve_price: 50,
+            auction_end: 9999,
+        });
+        assert_eq!(catalog.listings.len(), 1);
+        assert_eq!(catalog.version, 1);
+
+        // Duplicate — should be ignored
+        catalog.add_listing(CatalogEntry {
+            listing_key: "lk1".to_string(),
+            title: "Item 1".to_string(),
+            reserve_price: 50,
+            auction_end: 9999,
+        });
+        assert_eq!(catalog.listings.len(), 1);
+        assert_eq!(catalog.version, 1);
+    }
+
+    #[test]
+    fn seller_catalog_cleanup_expired() {
+        use crate::mocks::MockTime;
+
+        let mut catalog = SellerCatalog {
+            seller_pubkey: "s".to_string(),
+            listings: vec![
+                CatalogEntry {
+                    listing_key: "expired".to_string(),
+                    title: "Old".to_string(),
+                    reserve_price: 10,
+                    auction_end: 100, // way in the past
+                },
+                CatalogEntry {
+                    listing_key: "active".to_string(),
+                    title: "New".to_string(),
+                    reserve_price: 20,
+                    auction_end: 99_999_999, // far future
+                },
+            ],
+            version: 0,
+        };
+
+        catalog.cleanup_expired_with_time(&MockTime::new(5000));
+        assert_eq!(catalog.listings.len(), 1);
+        assert_eq!(catalog.listings[0].listing_key, "active");
+        assert_eq!(catalog.version, 1);
     }
 }

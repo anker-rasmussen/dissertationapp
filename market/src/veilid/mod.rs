@@ -22,4 +22,6 @@ pub use listing_ops::ListingOperations;
 pub use mpc::MpcTunnelProxy;
 pub use mpc_routes::MpcRouteManager;
 pub use node::VeilidNode;
-pub use registry::{ListingRegistry, RegistryEntry, RegistryOperations};
+pub use registry::{
+    CatalogEntry, MarketRegistry, RegistryEntry, RegistryOperations, SellerCatalog, SellerEntry,
+};
