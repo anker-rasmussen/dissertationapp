@@ -22,7 +22,7 @@ use market::veilid::auction_coordinator::AuctionCoordinator;
 use market::veilid::bid_ops::BidOperations;
 use market::veilid::bid_storage::BidStorage;
 use market::veilid::node::{DevNetConfig, VeilidNode};
-use market::veilid::registry::{RegistryEntry, RegistryOperations};
+use market::veilid::registry::{CatalogEntry, RegistryOperations};
 use market::Listing;
 use serial_test::serial;
 use tokio::time::timeout;
@@ -671,12 +671,14 @@ async fn test_e2e_real_devnet_3_party_auction() {
             .api()
             .ok_or_else(|| anyhow::anyhow!("Failed to get seller API"))?
             .clone();
+        let network_key = market::config::DEFAULT_NETWORK_KEY;
         let seller_coordinator = Arc::new(AuctionCoordinator::new(
             seller_api,
             seller_dht.clone(),
             seller_id.clone(),
             BidStorage::new(),
             seller_node.offset,
+            network_key,
         ));
 
         // Create and publish listing to its own DHT record
@@ -691,17 +693,25 @@ async fn test_e2e_real_devnet_3_party_auction() {
             .update_listing(&listing_record, &listing)
             .await?;
 
-        // Register listing in the SHARED REGISTRY (visible to all nodes on devnet)
-        let mut seller_registry = RegistryOperations::new(seller_dht.clone());
-        let registry_entry = RegistryEntry {
-            key: listing_record.key.to_string(),
-            title: listing.title.clone(),
-            seller: seller_id.to_string(),
-            reserve_price: listing.reserve_price,
-            auction_end: listing.auction_end,
-        };
-        seller_registry.register_listing(registry_entry).await?;
-        eprintln!("[E2E] Listing registered in shared devnet registry");
+        // Register listing in the per-seller registry
+        let seller_str = seller_id.to_string();
+        let mut seller_registry = RegistryOperations::new(seller_dht.clone(), network_key);
+        let registry_key = seller_registry.create_master_registry().await?;
+        let catalog_key = seller_registry
+            .get_or_create_seller_catalog(&seller_str)
+            .await?;
+        seller_registry
+            .add_listing_to_catalog(CatalogEntry {
+                listing_key: listing_record.key.to_string(),
+                title: listing.title.clone(),
+                reserve_price: listing.reserve_price,
+                auction_end: listing.auction_end,
+            })
+            .await?;
+        seller_registry
+            .register_seller(&seller_str, &catalog_key.to_string())
+            .await?;
+        eprintln!("[E2E] Listing registered in per-seller catalog registry");
 
         // Seller watches listing
         seller_coordinator.watch_listing(listing.clone()).await;
@@ -715,20 +725,20 @@ async fn test_e2e_real_devnet_3_party_auction() {
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        // Bidder1 fetches the registry to discover listings
-        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone());
-        let registry = bidder1_registry.fetch_registry().await?;
+        // Bidder1 fetches listings via two-hop discovery
+        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone(), network_key);
+        bidder1_registry.set_master_registry_key(registry_key);
+        let all_listings = bidder1_registry.fetch_all_listings().await?;
         eprintln!(
             "[E2E] Bidder1 fetched registry with {} listings",
-            registry.listings.len()
+            all_listings.len()
         );
 
         assert!(
-            !registry.listings.is_empty(),
+            !all_listings.is_empty(),
             "Registry should have at least one listing"
         );
-        let found_listing = registry
-            .listings
+        let found_listing = all_listings
             .iter()
             .find(|e| e.key == listing_record.key.to_string());
         assert!(
@@ -937,6 +947,7 @@ async fn test_e2e_coordinator_messaging() {
             node1_id.clone(),
             BidStorage::new(),
             node1.offset,
+            market::config::DEFAULT_NETWORK_KEY,
         ));
 
         // Create a listing record and bid record
@@ -1035,12 +1046,14 @@ async fn test_e2e_real_devnet_5_party_auction() {
             .api()
             .ok_or_else(|| anyhow::anyhow!("Failed to get seller API"))?
             .clone();
+        let network_key = market::config::DEFAULT_NETWORK_KEY;
         let _seller_coordinator = Arc::new(AuctionCoordinator::new(
             seller_api,
             seller_dht.clone(),
             seller_id.clone(),
             BidStorage::new(),
             seller_node.offset,
+            network_key,
         ));
 
         // Create and publish listing to its own DHT record
@@ -1055,17 +1068,25 @@ async fn test_e2e_real_devnet_5_party_auction() {
             .update_listing(&listing_record, &listing)
             .await?;
 
-        // Register listing in the SHARED REGISTRY (visible to all nodes on devnet)
-        let mut seller_registry = RegistryOperations::new(seller_dht.clone());
-        let registry_entry = RegistryEntry {
-            key: listing_record.key.to_string(),
-            title: listing.title.clone(),
-            seller: seller_id.to_string(),
-            reserve_price: listing.reserve_price,
-            auction_end: listing.auction_end,
-        };
-        seller_registry.register_listing(registry_entry).await?;
-        eprintln!("[E2E] Listing registered in shared devnet registry");
+        // Register listing in the per-seller registry
+        let seller_str = seller_id.to_string();
+        let mut seller_registry = RegistryOperations::new(seller_dht.clone(), network_key);
+        let registry_key = seller_registry.create_master_registry().await?;
+        let catalog_key = seller_registry
+            .get_or_create_seller_catalog(&seller_str)
+            .await?;
+        seller_registry
+            .add_listing_to_catalog(CatalogEntry {
+                listing_key: listing_record.key.to_string(),
+                title: listing.title.clone(),
+                reserve_price: listing.reserve_price,
+                auction_end: listing.auction_end,
+            })
+            .await?;
+        seller_registry
+            .register_seller(&seller_str, &catalog_key.to_string())
+            .await?;
+        eprintln!("[E2E] Listing registered in per-seller catalog registry");
 
         // Bidder1 discovers listing via the SHARED REGISTRY
         let bidder1_dht = bidder1_node
@@ -1076,20 +1097,20 @@ async fn test_e2e_real_devnet_5_party_auction() {
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        // Bidder1 fetches the registry to discover listings
-        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone());
-        let registry = bidder1_registry.fetch_registry().await?;
+        // Bidder1 fetches listings via two-hop discovery
+        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone(), network_key);
+        bidder1_registry.set_master_registry_key(registry_key);
+        let all_listings = bidder1_registry.fetch_all_listings().await?;
         eprintln!(
             "[E2E] Bidder1 fetched registry with {} listings",
-            registry.listings.len()
+            all_listings.len()
         );
 
         assert!(
-            !registry.listings.is_empty(),
+            !all_listings.is_empty(),
             "Registry should have at least one listing"
         );
-        let found_listing = registry
-            .listings
+        let found_listing = all_listings
             .iter()
             .find(|e| e.key == listing_record.key.to_string());
         assert!(
@@ -1333,12 +1354,14 @@ async fn test_e2e_real_devnet_10_party_auction() {
             .api()
             .ok_or_else(|| anyhow::anyhow!("Failed to get seller API"))?
             .clone();
+        let network_key = market::config::DEFAULT_NETWORK_KEY;
         let _seller_coordinator = Arc::new(AuctionCoordinator::new(
             seller_api,
             seller_dht.clone(),
             seller_id.clone(),
             BidStorage::new(),
             seller_node.offset,
+            network_key,
         ));
 
         // Create and publish listing to its own DHT record
@@ -1353,17 +1376,25 @@ async fn test_e2e_real_devnet_10_party_auction() {
             .update_listing(&listing_record, &listing)
             .await?;
 
-        // Register listing in the SHARED REGISTRY
-        let mut seller_registry = RegistryOperations::new(seller_dht.clone());
-        let registry_entry = RegistryEntry {
-            key: listing_record.key.to_string(),
-            title: listing.title.clone(),
-            seller: seller_id.to_string(),
-            reserve_price: listing.reserve_price,
-            auction_end: listing.auction_end,
-        };
-        seller_registry.register_listing(registry_entry).await?;
-        eprintln!("[E2E] Listing registered in shared devnet registry");
+        // Register listing in the per-seller registry
+        let seller_str = seller_id.to_string();
+        let mut seller_registry = RegistryOperations::new(seller_dht.clone(), network_key);
+        let registry_key = seller_registry.create_master_registry().await?;
+        let catalog_key = seller_registry
+            .get_or_create_seller_catalog(&seller_str)
+            .await?;
+        seller_registry
+            .add_listing_to_catalog(CatalogEntry {
+                listing_key: listing_record.key.to_string(),
+                title: listing.title.clone(),
+                reserve_price: listing.reserve_price,
+                auction_end: listing.auction_end,
+            })
+            .await?;
+        seller_registry
+            .register_seller(&seller_str, &catalog_key.to_string())
+            .await?;
+        eprintln!("[E2E] Listing registered in per-seller catalog registry");
 
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1373,14 +1404,15 @@ async fn test_e2e_real_devnet_10_party_auction() {
             .node
             .dht_operations()
             .ok_or_else(|| anyhow::anyhow!("Failed to get bidder1 DHT"))?;
-        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone());
-        let registry = bidder1_registry.fetch_registry().await?;
+        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone(), network_key);
+        bidder1_registry.set_master_registry_key(registry_key);
+        let all_listings = bidder1_registry.fetch_all_listings().await?;
         eprintln!(
             "[E2E] Bidder1 fetched registry with {} listings",
-            registry.listings.len()
+            all_listings.len()
         );
         assert!(
-            !registry.listings.is_empty(),
+            !all_listings.is_empty(),
             "Registry should have at least one listing"
         );
 
@@ -1700,6 +1732,7 @@ impl E2EParticipant {
             node_id,
             bid_storage.clone(),
             offset,
+            market::config::DEFAULT_NETWORK_KEY,
         ));
 
         // Spawn AppMessage processing loop (replicates main.rs:230-249)

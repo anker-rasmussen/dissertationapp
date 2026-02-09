@@ -41,4 +41,6 @@ pub use veilid::listing_ops::ListingOperations;
 pub use veilid::mpc::MpcTunnelProxy;
 pub use veilid::mpc_routes::MpcRouteManager;
 pub use veilid::node::{DevNetConfig, VeilidNode};
-pub use veilid::registry::{ListingRegistry, RegistryEntry, RegistryOperations};
+pub use veilid::registry::{
+    CatalogEntry, MarketRegistry, RegistryEntry, RegistryOperations, SellerCatalog, SellerEntry,
+};

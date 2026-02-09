@@ -371,22 +371,18 @@ pub fn ListingBrowser(
             spawn(async move {
                 browse_result.set("Fetching listings from registry...".to_string());
 
-                if let Some(dht) = state.dht_operations() {
-                    match fetch_registry_listings(&dht).await {
-                        Ok(listings) => {
-                            let count = listings.len();
-                            let mut current = known_listings.write();
-                            for (key, title) in listings {
-                                if !current.iter().any(|(k, _)| k == &key) {
-                                    current.push((key, title));
-                                }
+                match fetch_registry_listings(&state).await {
+                    Ok(listings) => {
+                        let count = listings.len();
+                        let mut current = known_listings.write();
+                        for (key, title) in listings {
+                            if !current.iter().any(|(k, _)| k == &key) {
+                                current.push((key, title));
                             }
-                            browse_result.set(format!("Found {} listings in registry", count));
                         }
-                        Err(e) => browse_result.set(format!("Error: {}", e)),
+                        browse_result.set(format!("Found {} listings in registry", count));
                     }
-                } else {
-                    browse_result.set("Node not started yet".to_string());
+                    Err(e) => browse_result.set(format!("Error: {}", e)),
                 }
             });
         }

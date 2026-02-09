@@ -46,6 +46,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Cryptography
 sha2 = "0.10"  # SHA256 hashing for content verification
+ed25519-dalek = { version = "2", default-features = false }  # Shared keypair derivation
 aes-gcm = "0.10"  # AES-256-GCM encryption for content
 rand = "0.8"  # Random number generation
 
