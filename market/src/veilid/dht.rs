@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tracing::{debug, info};
 use veilid_core::{
@@ -7,6 +6,7 @@ use veilid_core::{
 };
 
 use crate::config::DHT_SUBKEY_COUNT;
+use crate::error::{MarketError, MarketResult};
 use crate::traits::DhtStore;
 
 /// DHT operations wrapper for Veilid
@@ -35,23 +35,23 @@ impl DHTOperations {
     }
 
     /// Get a routing context with the appropriate safety selection (internal)
-    fn get_routing_context(&self) -> Result<veilid_core::RoutingContext> {
+    fn get_routing_context(&self) -> MarketResult<veilid_core::RoutingContext> {
         self.get_routing_context_pub()
     }
 
     /// Get a routing context with the appropriate safety selection (public)
-    pub fn get_routing_context_pub(&self) -> Result<veilid_core::RoutingContext> {
+    pub fn get_routing_context_pub(&self) -> MarketResult<veilid_core::RoutingContext> {
         let mut routing_context = self
             .api
             .routing_context()
-            .context("Failed to get routing context")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to get routing context: {e}")))?;
 
         if self.use_unsafe_routing {
             // Use unsafe (direct) routing for devnet - no private routes
             // PreferOrdered ensures messages arrive in order when possible
             routing_context = routing_context
                 .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-                .context("Failed to set unsafe routing")?;
+                .map_err(|e| MarketError::Dht(format!("Failed to set unsafe routing: {e}")))?;
             debug!("Using unsafe (direct) routing for DHT operations");
         }
 
@@ -60,7 +60,7 @@ impl DHTOperations {
 
     /// Create a new DHT record with the default crypto system (VLD0)
     /// Returns the OwnedDHTRecord that includes the owner keypair for write access
-    pub async fn create_dht_record(&self) -> Result<OwnedDHTRecord> {
+    pub async fn create_dht_record(&self) -> MarketResult<OwnedDHTRecord> {
         let routing_context = self.get_routing_context()?;
 
         // Create DHT schema with configured subkeys:
@@ -68,19 +68,20 @@ impl DHTOperations {
         // - Subkey 1: Bid index (for auctions)
         // - Subkey 2: Coordination record (for bid announcements)
         // - Subkey 3: Bidder registry (for n-party MPC)
-        let schema = DHTSchema::dflt(DHT_SUBKEY_COUNT)?;
+        let schema = DHTSchema::dflt(DHT_SUBKEY_COUNT)
+            .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
 
         // Create the record - this generates a new key and allocates storage
         // kind: CRYPTO_KIND_VLD0, schema: dflt(4), owner: None (random keypair)
         let record_descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, None)
             .await
-            .context("Failed to create DHT record")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to create DHT record: {e}")))?;
 
         let key = record_descriptor.key();
-        let owner = record_descriptor
-            .owner_keypair()
-            .context("Record was created but owner keypair is missing")?;
+        let owner = record_descriptor.owner_keypair().ok_or_else(|| {
+            MarketError::Dht("Record was created but owner keypair is missing".into())
+        })?;
 
         info!("Created DHT record with key: {}", key);
 
@@ -89,13 +90,13 @@ impl DHTOperations {
 
     /// Open an existing DHT record for read/write access
     /// Returns the record descriptor if successful
-    pub async fn open_record(&self, key: &RecordKey) -> Result<DHTRecordDescriptor> {
+    pub async fn open_record(&self, key: &RecordKey) -> MarketResult<DHTRecordDescriptor> {
         let routing_context = self.get_routing_context()?;
 
         let descriptor = routing_context
             .open_dht_record(key.clone(), None)
             .await
-            .context("Failed to open DHT record")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to open DHT record: {e}")))?;
 
         debug!("Opened DHT record: {}", key);
         Ok(descriptor)
@@ -103,20 +104,20 @@ impl DHTOperations {
 
     /// Set a value in a DHT record (requires write access via owner keypair)
     /// For simple records, use subkey 0
-    pub async fn set_dht_value(&self, record: &OwnedDHTRecord, value: Vec<u8>) -> Result<()> {
+    pub async fn set_dht_value(&self, record: &OwnedDHTRecord, value: Vec<u8>) -> MarketResult<()> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record with owner keypair for write access
         let _ = routing_context
             .open_dht_record(record.key.clone(), Some(record.owner.clone()))
             .await
-            .context("Failed to open DHT record for writing")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for writing: {e}")))?;
 
         // Set the value at subkey 0
         routing_context
             .set_dht_value(record.key.clone(), 0, value.clone(), None)
             .await
-            .context("Failed to set DHT value")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to set DHT value: {e}")))?;
 
         info!(
             "Set DHT value for key {}, {} bytes at subkey 0",
@@ -128,7 +129,7 @@ impl DHTOperations {
         routing_context
             .close_dht_record(record.key.clone())
             .await
-            .context("Failed to close DHT record")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
 
         Ok(())
     }
@@ -136,7 +137,7 @@ impl DHTOperations {
     /// Get a value from a DHT record
     /// For simple records, use subkey 0
     /// Returns None if the value hasn't been set yet
-    pub async fn get_dht_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
+    pub async fn get_dht_value(&self, key: &RecordKey) -> MarketResult<Option<Vec<u8>>> {
         self.get_value_at_subkey(key, 0).await
     }
 
@@ -146,20 +147,22 @@ impl DHTOperations {
         record: &OwnedDHTRecord,
         subkey: u32,
         value: Vec<u8>,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record with owner keypair for write access
         let _ = routing_context
             .open_dht_record(record.key.clone(), Some(record.owner.clone()))
             .await
-            .context("Failed to open DHT record for writing")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for writing: {e}")))?;
 
         // Set the value at specified subkey
         routing_context
             .set_dht_value(record.key.clone(), subkey, value.clone(), None)
             .await
-            .context(format!("Failed to set DHT value at subkey {subkey}"))?;
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to set DHT value at subkey {subkey}: {e}"))
+            })?;
 
         info!(
             "Set DHT value for key {}, {} bytes at subkey {}",
@@ -172,7 +175,7 @@ impl DHTOperations {
         routing_context
             .close_dht_record(record.key.clone())
             .await
-            .context("Failed to close DHT record")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
 
         Ok(())
     }
@@ -183,27 +186,29 @@ impl DHTOperations {
         &self,
         key: &RecordKey,
         subkey: u32,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> MarketResult<Option<Vec<u8>>> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record first
         let _ = routing_context
             .open_dht_record(key.clone(), None)
             .await
-            .context("Failed to open DHT record for reading")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for reading: {e}")))?;
 
         // Get the value at specified subkey
         // force_refresh=true ensures we get the latest value from the network
         let value_data = routing_context
             .get_dht_value(key.clone(), subkey, true)
             .await
-            .context(format!("Failed to get DHT value from subkey {subkey}"))?;
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to get DHT value from subkey {subkey}: {e}"))
+            })?;
 
         // Close the record after reading
         routing_context
             .close_dht_record(key.clone())
             .await
-            .context("Failed to close DHT record")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
 
         if let Some(data) = value_data {
             info!(
@@ -221,20 +226,22 @@ impl DHTOperations {
 
     /// Delete a DHT record
     /// This removes the record from the DHT entirely
-    pub async fn delete_dht_record(&self, key: &RecordKey) -> Result<()> {
+    pub async fn delete_dht_record(&self, key: &RecordKey) -> MarketResult<()> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record first
         let _ = routing_context
             .open_dht_record(key.clone(), None)
             .await
-            .context("Failed to open DHT record for deletion")?;
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to open DHT record for deletion: {e}"))
+            })?;
 
         // Delete the record
         routing_context
             .delete_dht_record(key.clone())
             .await
-            .context("Failed to delete DHT record")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to delete DHT record: {e}")))?;
 
         info!("Deleted DHT record: {}", key);
         Ok(())
@@ -242,14 +249,16 @@ impl DHTOperations {
 
     /// Watch a DHT record for changes
     /// Returns true if watch was successfully established
-    pub async fn watch_dht_record(&self, key: &RecordKey) -> Result<bool> {
+    pub async fn watch_dht_record(&self, key: &RecordKey) -> MarketResult<bool> {
         let routing_context = self.get_routing_context()?;
 
         // Open the record first
         let _ = routing_context
             .open_dht_record(key.clone(), None)
             .await
-            .context("Failed to open DHT record for watching")?;
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to open DHT record for watching: {e}"))
+            })?;
 
         // Watch subkey 0 only (single value record)
         let subkeys = Some(ValueSubkeyRangeSet::single(0));
@@ -259,7 +268,7 @@ impl DHTOperations {
         let watch_result = routing_context
             .watch_dht_values(key.clone(), subkeys, expiration, count)
             .await
-            .context("Failed to watch DHT record")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to watch DHT record: {e}")))?;
 
         if watch_result {
             info!("Now watching DHT record: {}", key);
@@ -271,7 +280,7 @@ impl DHTOperations {
     }
 
     /// Cancel watching a DHT record
-    pub async fn cancel_dht_watch(&self, key: &RecordKey) -> Result<bool> {
+    pub async fn cancel_dht_watch(&self, key: &RecordKey) -> MarketResult<bool> {
         let routing_context = self.get_routing_context()?;
 
         // Cancel watch on subkey 0
@@ -280,7 +289,7 @@ impl DHTOperations {
         let cancel_result = routing_context
             .cancel_dht_watch(key.clone(), subkeys)
             .await
-            .context("Failed to cancel DHT watch")?;
+            .map_err(|e| MarketError::Dht(format!("Failed to cancel DHT watch: {e}")))?;
 
         if cancel_result {
             info!("Cancelled watch on DHT record: {}", key);
@@ -297,7 +306,7 @@ impl DHTOperations {
 impl DhtStore for DHTOperations {
     type OwnedRecord = OwnedDHTRecord;
 
-    async fn create_record(&self) -> Result<Self::OwnedRecord> {
+    async fn create_record(&self) -> MarketResult<Self::OwnedRecord> {
         self.create_dht_record().await
     }
 
@@ -305,15 +314,15 @@ impl DhtStore for DHTOperations {
         record.key.clone()
     }
 
-    async fn get_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
+    async fn get_value(&self, key: &RecordKey) -> MarketResult<Option<Vec<u8>>> {
         self.get_dht_value(key).await
     }
 
-    async fn set_value(&self, record: &Self::OwnedRecord, value: Vec<u8>) -> Result<()> {
+    async fn set_value(&self, record: &Self::OwnedRecord, value: Vec<u8>) -> MarketResult<()> {
         self.set_dht_value(record, value).await
     }
 
-    async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> Result<Option<Vec<u8>>> {
+    async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> MarketResult<Option<Vec<u8>>> {
         self.get_value_at_subkey(key, subkey).await
     }
 
@@ -322,19 +331,19 @@ impl DhtStore for DHTOperations {
         record: &Self::OwnedRecord,
         subkey: u32,
         value: Vec<u8>,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         self.set_value_at_subkey(record, subkey, value).await
     }
 
-    async fn delete_record(&self, key: &RecordKey) -> Result<()> {
+    async fn delete_record(&self, key: &RecordKey) -> MarketResult<()> {
         self.delete_dht_record(key).await
     }
 
-    async fn watch_record(&self, key: &RecordKey) -> Result<bool> {
+    async fn watch_record(&self, key: &RecordKey) -> MarketResult<bool> {
         self.watch_dht_record(key).await
     }
 
-    async fn cancel_watch(&self, key: &RecordKey) -> Result<bool> {
+    async fn cancel_watch(&self, key: &RecordKey) -> MarketResult<bool> {
         self.cancel_dht_watch(key).await
     }
 }

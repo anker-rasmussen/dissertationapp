@@ -690,7 +690,7 @@ impl AuctionCoordinator {
     /// Ensure the master registry is available (create or use already-known key).
     pub async fn ensure_master_registry(&self) -> Result<RecordKey> {
         let mut ops = self.registry_ops.lock().await;
-        ops.ensure_master_registry().await
+        Ok(ops.ensure_master_registry().await?)
     }
 
     /// Broadcast a `SellerRegistration` to all peers.
@@ -737,7 +737,7 @@ impl AuctionCoordinator {
     /// Fetch all listings via two-hop discovery. Delegates to `registry_ops`.
     pub async fn fetch_all_listings(&self) -> Result<Vec<RegistryEntry>> {
         let ops = self.registry_ops.lock().await;
-        ops.fetch_all_listings().await
+        Ok(ops.fetch_all_listings().await?)
     }
 
     /// Return a clone of the shutdown token.

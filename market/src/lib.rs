@@ -18,9 +18,12 @@
 
 pub mod config;
 pub mod crypto;
+pub mod error;
 pub mod marketplace;
 pub mod traits;
 pub mod veilid;
+
+pub use error::{MarketError, MarketResult};
 
 #[cfg(any(test, feature = "test"))]
 pub mod mocks;

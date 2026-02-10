@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use veilid_core::{PublicKey, RecordKey};
 
 use crate::config::now_unix;
+use crate::error::MarketError;
 use crate::traits::TimeProvider;
 
 /// A bid record published to the DHT for auction participation
@@ -25,17 +26,19 @@ pub struct BidRecord {
 
 impl BidRecord {
     /// Serialize to CBOR for DHT storage
-    pub fn to_cbor(&self) -> anyhow::Result<Vec<u8>> {
+    pub fn to_cbor(&self) -> Result<Vec<u8>, MarketError> {
         let mut data = Vec::new();
-        ciborium::ser::into_writer(self, &mut data)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bid record: {e}"))?;
+        ciborium::ser::into_writer(self, &mut data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize bid record: {e}"))
+        })?;
         Ok(data)
     }
 
     /// Deserialize from CBOR
-    pub fn from_cbor(data: &[u8]) -> anyhow::Result<Self> {
-        ciborium::de::from_reader(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid record: {e}"))
+    pub fn from_cbor(data: &[u8]) -> Result<Self, MarketError> {
+        ciborium::de::from_reader(data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to deserialize bid record: {e}"))
+        })
     }
 }
 
@@ -99,16 +102,18 @@ impl BidIndex {
         sorted.iter().position(|b| b == bidder)
     }
 
-    pub fn to_cbor(&self) -> anyhow::Result<Vec<u8>> {
+    pub fn to_cbor(&self) -> Result<Vec<u8>, MarketError> {
         let mut data = Vec::new();
-        ciborium::ser::into_writer(self, &mut data)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bid index: {e}"))?;
+        ciborium::ser::into_writer(self, &mut data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize bid index: {e}"))
+        })?;
         Ok(data)
     }
 
-    pub fn from_cbor(data: &[u8]) -> anyhow::Result<Self> {
-        ciborium::de::from_reader(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid index: {e}"))
+    pub fn from_cbor(data: &[u8]) -> Result<Self, MarketError> {
+        ciborium::de::from_reader(data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to deserialize bid index: {e}"))
+        })
     }
 
     /// Merge another index into this one

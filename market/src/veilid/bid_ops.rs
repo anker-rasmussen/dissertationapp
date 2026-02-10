@@ -1,8 +1,8 @@
-use anyhow::Result;
 use tracing::{debug, info, warn};
 use veilid_core::RecordKey;
 
 use crate::config::{subkeys, BID_REGISTER_INITIAL_DELAY_MS, BID_REGISTER_MAX_RETRIES};
+use crate::error::{MarketError, MarketResult};
 use crate::marketplace::{BidIndex, BidRecord};
 use crate::traits::DhtStore;
 
@@ -18,7 +18,7 @@ impl<D: DhtStore> BidOperations<D> {
     }
 
     /// Publish a bid to the DHT
-    pub async fn publish_bid(&self, bid: BidRecord) -> Result<D::OwnedRecord> {
+    pub async fn publish_bid(&self, bid: BidRecord) -> MarketResult<D::OwnedRecord> {
         // Create a new DHT record for this bid
         let record = self.dht.create_record().await?;
 
@@ -32,7 +32,7 @@ impl<D: DhtStore> BidOperations<D> {
     }
 
     /// Fetch a bid from the DHT
-    pub async fn fetch_bid(&self, bid_key: &RecordKey) -> Result<Option<BidRecord>> {
+    pub async fn fetch_bid(&self, bid_key: &RecordKey) -> MarketResult<Option<BidRecord>> {
         match self.dht.get_value(bid_key).await? {
             Some(data) => {
                 let bid = BidRecord::from_cbor(&data)?;
@@ -49,7 +49,7 @@ impl<D: DhtStore> BidOperations<D> {
         &self,
         listing_record: &D::OwnedRecord,
         bid: BidRecord,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         let listing_key = D::record_key(listing_record);
         let max_retries = BID_REGISTER_MAX_RETRIES;
         let mut retry_delay = std::time::Duration::from_millis(BID_REGISTER_INITIAL_DELAY_MS);
@@ -99,20 +99,20 @@ impl<D: DhtStore> BidOperations<D> {
                         retry_delay *= 2;
                         continue;
                     }
-                    return Err(anyhow::anyhow!(
+                    return Err(MarketError::Dht(format!(
                         "Failed to register bid after {max_retries} attempts: {e}"
-                    ));
+                    )));
                 }
             }
         }
 
-        Err(anyhow::anyhow!(
+        Err(MarketError::Dht(format!(
             "Failed to register bid after {max_retries} retries"
-        ))
+        )))
     }
 
     /// Fetch the bid index for a listing
-    pub async fn fetch_bid_index(&self, listing_key: &RecordKey) -> Result<BidIndex> {
+    pub async fn fetch_bid_index(&self, listing_key: &RecordKey) -> MarketResult<BidIndex> {
         if let Some(data) = self.dht.get_subkey(listing_key, subkeys::BID_INDEX).await? {
             let index = BidIndex::from_cbor(&data)?;
             debug!("Fetched bid index with {} bids", index.bids.len());

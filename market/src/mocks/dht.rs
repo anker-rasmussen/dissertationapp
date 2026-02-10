@@ -1,7 +1,7 @@
 //! Mock DHT store for testing.
 
+use crate::error::{MarketError, MarketResult};
 use crate::traits::DhtStore;
-use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -223,9 +223,9 @@ impl Default for MockDht {
 impl DhtStore for MockDht {
     type OwnedRecord = MockOwnedRecord;
 
-    async fn create_record(&self) -> Result<Self::OwnedRecord> {
+    async fn create_record(&self) -> MarketResult<Self::OwnedRecord> {
         if self.should_fail(true, None).await {
-            return Err(anyhow!("MockDht: simulated create failure"));
+            return Err(MarketError::Dht("MockDht: simulated create failure".into()));
         }
 
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
@@ -245,18 +245,18 @@ impl DhtStore for MockDht {
         record.key.clone()
     }
 
-    async fn get_value(&self, key: &RecordKey) -> Result<Option<Vec<u8>>> {
+    async fn get_value(&self, key: &RecordKey) -> MarketResult<Option<Vec<u8>>> {
         self.get_subkey(key, 0).await
     }
 
-    async fn set_value(&self, record: &Self::OwnedRecord, value: Vec<u8>) -> Result<()> {
+    async fn set_value(&self, record: &Self::OwnedRecord, value: Vec<u8>) -> MarketResult<()> {
         self.set_subkey(record, 0, value).await
     }
 
-    async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> Result<Option<Vec<u8>>> {
+    async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> MarketResult<Option<Vec<u8>>> {
         let key_str = key.to_string();
         if self.should_fail(false, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated read failure"));
+            return Err(MarketError::Dht("MockDht: simulated read failure".into()));
         }
 
         let storage = self.inner.storage.read().await;
@@ -270,10 +270,10 @@ impl DhtStore for MockDht {
         record: &Self::OwnedRecord,
         subkey: u32,
         value: Vec<u8>,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         let key_str = record.key.to_string();
         if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated write failure"));
+            return Err(MarketError::Dht("MockDht: simulated write failure".into()));
         }
 
         let mut storage = self.inner.storage.write().await;
@@ -285,10 +285,10 @@ impl DhtStore for MockDht {
         Ok(())
     }
 
-    async fn delete_record(&self, key: &RecordKey) -> Result<()> {
+    async fn delete_record(&self, key: &RecordKey) -> MarketResult<()> {
         let key_str = key.to_string();
         if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated delete failure"));
+            return Err(MarketError::Dht("MockDht: simulated delete failure".into()));
         }
 
         let mut storage = self.inner.storage.write().await;
@@ -296,10 +296,10 @@ impl DhtStore for MockDht {
         Ok(())
     }
 
-    async fn watch_record(&self, key: &RecordKey) -> Result<bool> {
+    async fn watch_record(&self, key: &RecordKey) -> MarketResult<bool> {
         let key_str = key.to_string();
         if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated watch failure"));
+            return Err(MarketError::Dht("MockDht: simulated watch failure".into()));
         }
 
         let mut storage = self.inner.storage.write().await;
@@ -312,10 +312,12 @@ impl DhtStore for MockDht {
         }
     }
 
-    async fn cancel_watch(&self, key: &RecordKey) -> Result<bool> {
+    async fn cancel_watch(&self, key: &RecordKey) -> MarketResult<bool> {
         let key_str = key.to_string();
         if self.should_fail(true, Some(&key_str)).await {
-            return Err(anyhow!("MockDht: simulated cancel_watch failure"));
+            return Err(MarketError::Dht(
+                "MockDht: simulated cancel_watch failure".into(),
+            ));
         }
 
         let mut storage = self.inner.storage.write().await;
