@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use market::{config, DevNetConfig, VeilidNode};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -207,6 +208,7 @@ fn main() -> anyhow::Result<()> {
                             }
                         };
                         let network_key = market::config::network_key();
+                        let shutdown = CancellationToken::new();
                         let coordinator = Arc::new(market::AuctionCoordinator::new(
                             api,
                             dht,
@@ -214,6 +216,7 @@ fn main() -> anyhow::Result<()> {
                             bid_storage,
                             node_offset,
                             &network_key,
+                            shutdown,
                         ));
 
                         coordinator.clone().start_monitoring();

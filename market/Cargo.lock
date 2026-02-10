@@ -3561,6 +3561,7 @@ dependencies = [
  "serial_test",
  "sha2 0.10.9",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "veilid-core",
@@ -6243,6 +6244,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

@@ -26,6 +26,7 @@ use market::veilid::registry::{CatalogEntry, RegistryOperations};
 use market::Listing;
 use serial_test::serial;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use veilid_core::PublicKey;
 
@@ -679,6 +680,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
             BidStorage::new(),
             seller_node.offset,
             network_key,
+            CancellationToken::new(),
         ));
 
         // Create and publish listing to its own DHT record
@@ -948,6 +950,7 @@ async fn test_e2e_coordinator_messaging() {
             BidStorage::new(),
             node1.offset,
             market::config::DEFAULT_NETWORK_KEY,
+            CancellationToken::new(),
         ));
 
         // Create a listing record and bid record
@@ -1054,6 +1057,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
             BidStorage::new(),
             seller_node.offset,
             network_key,
+            CancellationToken::new(),
         ));
 
         // Create and publish listing to its own DHT record
@@ -1362,6 +1366,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
             BidStorage::new(),
             seller_node.offset,
             network_key,
+            CancellationToken::new(),
         ));
 
         // Create and publish listing to its own DHT record
@@ -1733,6 +1738,7 @@ impl E2EParticipant {
             bid_storage.clone(),
             offset,
             market::config::DEFAULT_NETWORK_KEY,
+            CancellationToken::new(),
         ));
 
         // Spawn AppMessage processing loop (replicates main.rs:230-249)
