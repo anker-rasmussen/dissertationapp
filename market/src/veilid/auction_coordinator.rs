@@ -2,8 +2,11 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use veilid_core::{PublicKey, RecordKey, SafetySelection, Sequencing, Target, VeilidAPI};
+use veilid_core::{
+    PublicKey, RecordKey, RouteBlob, SafetySelection, Sequencing, Target, VeilidAPI,
+};
 
 use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use super::bid_storage::BidStorage;
@@ -36,6 +39,8 @@ pub struct AuctionCoordinator {
     /// Buffered SellerRegistrations received before the registry key was known.
     /// Replayed once a `RegistryAnnouncement` sets the key.
     pending_seller_registrations: Arc<Mutex<Vec<(PublicKey, RecordKey)>>>,
+    /// Token used to signal graceful shutdown of background tasks.
+    shutdown: CancellationToken,
 }
 
 impl AuctionCoordinator {
@@ -46,6 +51,7 @@ impl AuctionCoordinator {
         bid_storage: BidStorage,
         node_offset: u16,
         network_key: &str,
+        shutdown: CancellationToken,
     ) -> Self {
         let mpc = Arc::new(MpcOrchestrator::new(
             api.clone(),
@@ -71,6 +77,7 @@ impl AuctionCoordinator {
             decryption_keys: Arc::new(Mutex::new(HashMap::new())),
             mpc,
             pending_seller_registrations: Arc::new(Mutex::new(Vec::new())),
+            shutdown,
         }
     }
 
@@ -90,7 +97,6 @@ impl AuctionCoordinator {
     }
 
     /// Handle auction coordination messages
-    #[allow(clippy::too_many_lines)]
     async fn handle_auction_message(&self, message: AuctionMessage) -> Result<()> {
         match message {
             AuctionMessage::BidAnnouncement {
@@ -99,127 +105,16 @@ impl AuctionCoordinator {
                 bid_record_key,
                 timestamp,
             } => {
-                info!(
-                    "Received bid announcement for listing {} from bidder {}",
-                    listing_key, bidder
-                );
-
-                // Store the announcement locally
-                let key = listing_key.to_string();
-                let mut announcements = self.bid_announcements.lock().await;
-                let list = announcements.entry(key.clone()).or_insert_with(Vec::new);
-
-                if !list.iter().any(|(b, _)| b == &bidder) {
-                    list.push((bidder.clone(), bid_record_key.clone()));
-                    info!(
-                        "Stored bid announcement, total announcements for this listing: {}",
-                        list.len()
-                    );
-                }
-                drop(announcements);
-
-                // If we own this listing, update DHT bid registry
-                let owned = self.owned_listings.lock().await;
-                if let Some(record) = owned.get(&listing_key) {
-                    info!("We own this listing, updating DHT bid registry");
-
-                    let current_data = self.dht.get_value_at_subkey(&listing_key, 2).await?;
-                    let mut registry = if let Some(data) = current_data {
-                        BidAnnouncementRegistry::from_bytes(&data)?
-                    } else {
-                        warn!("No existing registry found, creating new one");
-                        BidAnnouncementRegistry::new()
-                    };
-
-                    registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
-
-                    let data = registry.to_bytes()?;
-                    self.dht.set_value_at_subkey(record, 2, data).await?;
-
-                    info!(
-                        "Updated DHT bid registry for listing {}, now has {} announcements",
-                        listing_key,
-                        registry.announcements.len()
-                    );
-                }
+                self.handle_bid_announcement(listing_key, bidder, bid_record_key, timestamp)
+                    .await
             }
             AuctionMessage::WinnerDecryptionRequest {
                 listing_key,
-                winner: _sender,
+                winner,
                 timestamp: _,
             } => {
-                info!(
-                    "Received WinnerDecryptionRequest (challenge) for listing {}",
-                    listing_key
-                );
-
-                let bid_data = self.mpc.bid_storage().get_bid(&listing_key).await;
-                match bid_data {
-                    Some((bid_value, nonce)) => {
-                        info!(
-                            "Responding to seller's challenge with bid reveal (value: {})",
-                            bid_value
-                        );
-
-                        let managers = self.mpc.route_managers().lock().await;
-
-                        if let Some(route_manager) = managers.get(&listing_key) {
-                            let mgr = route_manager.lock().await;
-                            let routes = mgr.received_routes.lock().await;
-
-                            let listing_ops = ListingOperations::new(self.dht.clone());
-                            let seller_pubkey = match listing_ops.get_listing(&listing_key).await {
-                                Ok(Some(listing)) => Some(listing.seller),
-                                _ => None,
-                            };
-
-                            let seller_route = seller_pubkey
-                                .as_ref()
-                                .and_then(|seller| routes.get(seller).cloned());
-
-                            drop(routes);
-                            drop(mgr);
-                            drop(managers);
-
-                            if let Some(route_id) = seller_route {
-                                let message = AuctionMessage::winner_bid_reveal(
-                                    listing_key.clone(),
-                                    self.my_node_id.clone(),
-                                    bid_value,
-                                    nonce,
-                                );
-
-                                let data = message.to_bytes()?;
-                                let routing_context = self.mpc.safe_routing_context()?;
-
-                                match routing_context
-                                    .app_message(Target::RouteId(route_id), data)
-                                    .await
-                                {
-                                    Ok(()) => {
-                                        info!("Sent WinnerBidReveal to seller via MPC route");
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to send WinnerBidReveal to seller: {}", e);
-                                    }
-                                }
-                            } else {
-                                warn!("Seller's MPC route not found, cannot respond to challenge");
-                            }
-                        } else {
-                            warn!(
-                                "No route manager for listing {}, cannot respond to challenge",
-                                listing_key
-                            );
-                        }
-                    }
-                    None => {
-                        debug!(
-                            "No bid stored for listing {}, ignoring challenge",
-                            listing_key
-                        );
-                    }
-                }
+                self.handle_winner_decryption_request(listing_key, winner)
+                    .await
             }
             AuctionMessage::DecryptionHashTransfer {
                 listing_key,
@@ -227,27 +122,8 @@ impl AuctionCoordinator {
                 decryption_hash,
                 timestamp: _,
             } => {
-                info!(
-                    "Received decryption hash transfer for listing {} (winner: {})",
-                    listing_key, winner
-                );
-
-                if winner == self.my_node_id {
-                    info!(
-                        "I am the auction winner! Received decryption key: {}",
-                        decryption_hash
-                    );
-
-                    let key = listing_key.to_string();
-                    let mut keys = self.decryption_keys.lock().await;
-                    keys.insert(key, decryption_hash);
-                    info!("Stored decryption key for listing {}", listing_key);
-
-                    drop(keys);
-                    self.mpc.cleanup_route_manager(&listing_key).await;
-                } else {
-                    debug!("Decryption hash transfer not for me, ignoring");
-                }
+                self.handle_decryption_hash_transfer(listing_key, winner, decryption_hash)
+                    .await
             }
             AuctionMessage::MpcRouteAnnouncement {
                 listing_key,
@@ -255,22 +131,8 @@ impl AuctionCoordinator {
                 route_blob,
                 timestamp: _,
             } => {
-                info!(
-                    "Received MPC route announcement for listing {} from party {}",
-                    listing_key, party_pubkey
-                );
-
-                let managers = self.mpc.route_managers().lock().await;
-
-                if let Some(manager) = managers.get(&listing_key) {
-                    manager
-                        .lock()
-                        .await
-                        .register_route_announcement(party_pubkey, route_blob)
-                        .await?;
-                } else {
-                    debug!("Received route for unwatched auction {}", listing_key);
-                }
+                self.handle_mpc_route_announcement(listing_key, party_pubkey, route_blob)
+                    .await
             }
             AuctionMessage::WinnerBidReveal {
                 listing_key,
@@ -279,128 +141,342 @@ impl AuctionCoordinator {
                 nonce,
                 timestamp: _,
             } => {
-                info!(
-                    "Received WinnerBidReveal for listing {} from winner {}",
-                    listing_key, winner
-                );
-
-                let verified = self
-                    .mpc
-                    .verify_winner_reveal(&listing_key, &winner, bid_value, &nonce)
-                    .await;
-
-                // Store verification result
-                {
-                    let mut verifications = self.mpc.pending_verifications().lock().await;
-                    verifications
-                        .entry(listing_key.clone())
-                        .and_modify(|state| state.verified = Some(verified));
-                }
-
-                if verified {
-                    info!(
-                        "Winner bid VERIFIED for listing {} — sending decryption key immediately",
-                        listing_key
-                    );
-
-                    let listing_ops = ListingOperations::new(self.dht.clone());
-                    match listing_ops.get_listing(&listing_key).await {
-                        Ok(Some(listing)) => {
-                            if let Err(e) = self
-                                .mpc
-                                .send_decryption_hash(
-                                    &listing_key,
-                                    &winner,
-                                    &listing.decryption_key,
-                                )
-                                .await
-                            {
-                                error!("Failed to send decryption key to winner: {}", e);
-                            }
-                        }
-                        Ok(None) => {
-                            warn!("Listing not found when trying to send decryption key");
-                        }
-                        Err(e) => {
-                            error!("Failed to retrieve listing: {}", e);
-                        }
-                    }
-                } else {
-                    warn!("Winner bid verification FAILED for listing {} — withholding decryption key", listing_key);
-                }
+                self.handle_winner_bid_reveal(listing_key, winner, bid_value, nonce)
+                    .await
             }
             AuctionMessage::SellerRegistration {
                 seller_pubkey,
                 catalog_key,
                 timestamp: _,
             } => {
-                info!(
-                    "Received SellerRegistration from {} with catalog {}",
-                    seller_pubkey, catalog_key
-                );
-                let mut ops = self.registry_ops.lock().await;
-                if ops.master_registry_key().is_some() {
-                    if let Err(e) = ops
-                        .register_seller(&seller_pubkey.to_string(), &catalog_key.to_string())
-                        .await
-                    {
-                        warn!("Failed to register seller {}: {}", seller_pubkey, e);
-                    }
-                } else {
-                    info!(
-                        "Master registry key not yet known, buffering SellerRegistration from {}",
-                        seller_pubkey
-                    );
-                    let mut pending = self.pending_seller_registrations.lock().await;
-                    pending.push((seller_pubkey, catalog_key));
-                }
+                self.handle_seller_registration(seller_pubkey, catalog_key)
+                    .await
             }
             AuctionMessage::RegistryAnnouncement {
                 registry_key,
                 timestamp: _,
-            } => {
-                let mut ops = self.registry_ops.lock().await;
-                let existing = ops.master_registry_key();
-                if existing.is_none() {
-                    info!(
-                        "Received RegistryAnnouncement, setting master registry key: {}",
-                        registry_key
-                    );
-                    ops.set_master_registry_key(registry_key);
+            } => self.handle_registry_announcement(registry_key).await,
+        }
+    }
 
-                    // Replay any SellerRegistrations that arrived before we knew the key
-                    let pending = {
-                        let mut buf = self.pending_seller_registrations.lock().await;
-                        std::mem::take(&mut *buf)
+    async fn handle_bid_announcement(
+        &self,
+        listing_key: RecordKey,
+        bidder: PublicKey,
+        bid_record_key: RecordKey,
+        timestamp: u64,
+    ) -> Result<()> {
+        info!(
+            "Received bid announcement for listing {} from bidder {}",
+            listing_key, bidder
+        );
+
+        // Store the announcement locally
+        let key = listing_key.to_string();
+        let mut announcements = self.bid_announcements.lock().await;
+        let list = announcements.entry(key.clone()).or_insert_with(Vec::new);
+
+        if !list.iter().any(|(b, _)| b == &bidder) {
+            list.push((bidder.clone(), bid_record_key.clone()));
+            info!(
+                "Stored bid announcement, total announcements for this listing: {}",
+                list.len()
+            );
+        }
+        drop(announcements);
+
+        // If we own this listing, update DHT bid registry
+        let record = {
+            let owned = self.owned_listings.lock().await;
+            owned.get(&listing_key).cloned()
+        };
+        if let Some(record) = record {
+            info!("We own this listing, updating DHT bid registry");
+
+            let current_data = self.dht.get_value_at_subkey(&listing_key, 2).await?;
+            let mut registry = if let Some(data) = current_data {
+                BidAnnouncementRegistry::from_bytes(&data)?
+            } else {
+                warn!("No existing registry found, creating new one");
+                BidAnnouncementRegistry::new()
+            };
+
+            registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
+
+            let data = registry.to_bytes()?;
+            self.dht.set_value_at_subkey(&record, 2, data).await?;
+
+            info!(
+                "Updated DHT bid registry for listing {}, now has {} announcements",
+                listing_key,
+                registry.announcements.len()
+            );
+        }
+        Ok(())
+    }
+
+    async fn handle_winner_decryption_request(
+        &self,
+        listing_key: RecordKey,
+        _sender: PublicKey,
+    ) -> Result<()> {
+        info!(
+            "Received WinnerDecryptionRequest (challenge) for listing {}",
+            listing_key
+        );
+
+        let bid_data = self.mpc.bid_storage().get_bid(&listing_key).await;
+        match bid_data {
+            Some((bid_value, nonce)) => {
+                info!(
+                    "Responding to seller's challenge with bid reveal (value: {})",
+                    bid_value
+                );
+
+                let managers = self.mpc.route_managers().lock().await;
+
+                if let Some(route_manager) = managers.get(&listing_key) {
+                    let mgr = route_manager.lock().await;
+                    let routes = mgr.received_routes.lock().await;
+
+                    let listing_ops = ListingOperations::new(self.dht.clone());
+                    let seller_pubkey = match listing_ops.get_listing(&listing_key).await {
+                        Ok(Some(listing)) => Some(listing.seller),
+                        _ => None,
                     };
-                    if !pending.is_empty() {
-                        info!("Replaying {} buffered SellerRegistrations", pending.len());
-                        for (seller_pubkey, catalog_key) in pending {
-                            if let Err(e) = ops
-                                .register_seller(
-                                    &seller_pubkey.to_string(),
-                                    &catalog_key.to_string(),
-                                )
-                                .await
-                            {
-                                warn!(
-                                    "Failed to register buffered seller {}: {}",
-                                    seller_pubkey, e
-                                );
+
+                    let seller_route = seller_pubkey
+                        .as_ref()
+                        .and_then(|seller| routes.get(seller).cloned());
+
+                    drop(routes);
+                    drop(mgr);
+                    drop(managers);
+
+                    if let Some(route_id) = seller_route {
+                        let message = AuctionMessage::winner_bid_reveal(
+                            listing_key.clone(),
+                            self.my_node_id.clone(),
+                            bid_value,
+                            nonce,
+                        );
+
+                        let data = message.to_bytes()?;
+                        let routing_context = self.mpc.safe_routing_context()?;
+
+                        match routing_context
+                            .app_message(Target::RouteId(route_id), data)
+                            .await
+                        {
+                            Ok(()) => {
+                                info!("Sent WinnerBidReveal to seller via MPC route");
+                            }
+                            Err(e) => {
+                                error!("Failed to send WinnerBidReveal to seller: {}", e);
                             }
                         }
+                    } else {
+                        warn!("Seller's MPC route not found, cannot respond to challenge");
                     }
-                } else if existing.as_ref() == Some(&registry_key) {
-                    debug!("Received duplicate RegistryAnnouncement, ignoring");
                 } else {
-                    debug!(
-                        "Received RegistryAnnouncement with different key {}, keeping first-write-wins key",
-                        registry_key
+                    warn!(
+                        "No route manager for listing {}, cannot respond to challenge",
+                        listing_key
                     );
                 }
-                drop(ops);
+            }
+            None => {
+                debug!(
+                    "No bid stored for listing {}, ignoring challenge",
+                    listing_key
+                );
             }
         }
+        Ok(())
+    }
+
+    async fn handle_decryption_hash_transfer(
+        &self,
+        listing_key: RecordKey,
+        winner: PublicKey,
+        decryption_hash: String,
+    ) -> Result<()> {
+        info!(
+            "Received decryption hash transfer for listing {} (winner: {})",
+            listing_key, winner
+        );
+
+        if winner == self.my_node_id {
+            info!(
+                "I am the auction winner! Received decryption key: {}",
+                decryption_hash
+            );
+
+            let key = listing_key.to_string();
+            let mut keys = self.decryption_keys.lock().await;
+            keys.insert(key, decryption_hash);
+            info!("Stored decryption key for listing {}", listing_key);
+
+            drop(keys);
+            self.mpc.cleanup_route_manager(&listing_key).await;
+        } else {
+            debug!("Decryption hash transfer not for me, ignoring");
+        }
+        Ok(())
+    }
+
+    async fn handle_mpc_route_announcement(
+        &self,
+        listing_key: RecordKey,
+        party_pubkey: PublicKey,
+        route_blob: RouteBlob,
+    ) -> Result<()> {
+        info!(
+            "Received MPC route announcement for listing {} from party {}",
+            listing_key, party_pubkey
+        );
+
+        let manager = {
+            let managers = self.mpc.route_managers().lock().await;
+            managers.get(&listing_key).cloned()
+        };
+
+        if let Some(manager) = manager {
+            manager
+                .lock()
+                .await
+                .register_route_announcement(party_pubkey, route_blob)
+                .await?;
+        } else {
+            debug!("Received route for unwatched auction {}", listing_key);
+        }
+        Ok(())
+    }
+
+    async fn handle_winner_bid_reveal(
+        &self,
+        listing_key: RecordKey,
+        winner: PublicKey,
+        bid_value: u64,
+        nonce: [u8; 32],
+    ) -> Result<()> {
+        info!(
+            "Received WinnerBidReveal for listing {} from winner {}",
+            listing_key, winner
+        );
+
+        let verified = self
+            .mpc
+            .verify_winner_reveal(&listing_key, &winner, bid_value, &nonce)
+            .await;
+
+        // Store verification result
+        {
+            let mut verifications = self.mpc.pending_verifications().lock().await;
+            verifications
+                .entry(listing_key.clone())
+                .and_modify(|state| state.verified = Some(verified));
+        }
+
+        if verified {
+            info!(
+                "Winner bid VERIFIED for listing {} — sending decryption key immediately",
+                listing_key
+            );
+
+            let listing_ops = ListingOperations::new(self.dht.clone());
+            match listing_ops.get_listing(&listing_key).await {
+                Ok(Some(listing)) => {
+                    if let Err(e) = self
+                        .mpc
+                        .send_decryption_hash(&listing_key, &winner, &listing.decryption_key)
+                        .await
+                    {
+                        error!("Failed to send decryption key to winner: {}", e);
+                    }
+                }
+                Ok(None) => {
+                    warn!("Listing not found when trying to send decryption key");
+                }
+                Err(e) => {
+                    error!("Failed to retrieve listing: {}", e);
+                }
+            }
+        } else {
+            warn!(
+                "Winner bid verification FAILED for listing {} — withholding decryption key",
+                listing_key
+            );
+        }
+        Ok(())
+    }
+
+    async fn handle_seller_registration(
+        &self,
+        seller_pubkey: PublicKey,
+        catalog_key: RecordKey,
+    ) -> Result<()> {
+        info!(
+            "Received SellerRegistration from {} with catalog {}",
+            seller_pubkey, catalog_key
+        );
+        let mut ops = self.registry_ops.lock().await;
+        if ops.master_registry_key().is_some() {
+            if let Err(e) = ops
+                .register_seller(&seller_pubkey.to_string(), &catalog_key.to_string())
+                .await
+            {
+                warn!("Failed to register seller {}: {}", seller_pubkey, e);
+            }
+        } else {
+            info!(
+                "Master registry key not yet known, buffering SellerRegistration from {}",
+                seller_pubkey
+            );
+            let mut pending = self.pending_seller_registrations.lock().await;
+            pending.push((seller_pubkey, catalog_key));
+        }
+        Ok(())
+    }
+
+    async fn handle_registry_announcement(&self, registry_key: RecordKey) -> Result<()> {
+        let mut ops = self.registry_ops.lock().await;
+        let existing = ops.master_registry_key();
+        if existing.is_none() {
+            info!(
+                "Received RegistryAnnouncement, setting master registry key: {}",
+                registry_key
+            );
+            ops.set_master_registry_key(registry_key);
+
+            // Replay any SellerRegistrations that arrived before we knew the key
+            let pending = {
+                let mut buf = self.pending_seller_registrations.lock().await;
+                std::mem::take(&mut *buf)
+            };
+            if !pending.is_empty() {
+                info!("Replaying {} buffered SellerRegistrations", pending.len());
+                for (seller_pubkey, catalog_key) in pending {
+                    if let Err(e) = ops
+                        .register_seller(&seller_pubkey.to_string(), &catalog_key.to_string())
+                        .await
+                    {
+                        warn!(
+                            "Failed to register buffered seller {}: {}",
+                            seller_pubkey, e
+                        );
+                    }
+                }
+            }
+        } else if existing.as_ref() == Some(&registry_key) {
+            debug!("Received duplicate RegistryAnnouncement, ignoring");
+        } else {
+            debug!(
+                "Received RegistryAnnouncement with different key {}, keeping first-write-wins key",
+                registry_key
+            );
+        }
+        drop(ops);
         Ok(())
     }
 
@@ -565,54 +641,12 @@ impl AuctionCoordinator {
         );
 
         let data = announcement.to_bytes()?;
+        let sent = self.broadcast_message(&data).await?;
 
-        let routing_context = self
-            .api
-            .routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
-            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))?;
-
-        let state = self
-            .api
-            .get_state()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get state: {e}"))?;
-
-        let mut sent_count = 0;
-
-        info!("Found {} peers to broadcast to", state.network.peers.len());
-
-        for peer in &state.network.peers {
-            info!("Sending bid announcement to peer {:?}", peer.node_ids);
-
-            for node_id in &peer.node_ids {
-                match routing_context
-                    .app_message(Target::NodeId(node_id.clone()), data.clone())
-                    .await
-                {
-                    Ok(()) => {
-                        info!("Successfully sent bid announcement to peer {}", node_id);
-                        sent_count += 1;
-                        break;
-                    }
-                    Err(e) => {
-                        debug!(
-                            "Failed to send bid announcement to peer node {}: {}",
-                            node_id, e
-                        );
-                    }
-                }
-            }
-        }
-
-        if sent_count == 0 {
-            warn!(
-                "No peers found to send bid announcement. Network has {} peers",
-                state.network.peers.len()
-            );
+        if sent == 0 {
+            warn!("No peers found to send bid announcement");
         } else {
-            info!("Broadcast completed: sent to {} peers", sent_count);
+            info!("Broadcast completed: sent to {} peers", sent);
         }
 
         Ok(())
@@ -706,14 +740,26 @@ impl AuctionCoordinator {
         ops.fetch_all_listings().await
     }
 
+    /// Return a clone of the shutdown token.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
     /// Start background deadline monitoring.
     pub fn start_monitoring(self: Arc<Self>) {
         info!("Starting auction deadline monitor");
+        let token = self.shutdown.clone();
 
         tokio::spawn(async move {
             let mut tick_count: u32 = 0;
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                tokio::select! {
+                    () = token.cancelled() => {
+                        info!("Auction monitor shutting down");
+                        break;
+                    }
+                    () = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {}
+                }
                 tick_count = tick_count.wrapping_add(1);
 
                 // Re-broadcast registry key for late joiners:
