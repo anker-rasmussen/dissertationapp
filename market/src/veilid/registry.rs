@@ -1,4 +1,3 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
@@ -8,6 +7,7 @@ use veilid_core::{
 
 use super::dht::{DHTOperations, OwnedDHTRecord};
 use crate::config::now_unix;
+use crate::error::{MarketError, MarketResult};
 use crate::traits::TimeProvider;
 
 /// Derive a deterministic VLD0 keypair from the network key.
@@ -200,25 +200,27 @@ impl RegistryOperations {
     /// The first node to call this creates the record. The shared keypair
     /// means any node that knows the record key can write to it.
     /// On the same node, a second call will fail (record already in local store).
-    pub async fn create_master_registry(&mut self) -> Result<RecordKey> {
+    pub async fn create_master_registry(&mut self) -> MarketResult<RecordKey> {
         let routing_context = self.dht.get_routing_context_pub()?;
-        let schema = DHTSchema::dflt(1)?;
+        let schema = DHTSchema::dflt(1)
+            .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
 
         let descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(self.shared_keypair.clone()))
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create master registry: {e}"))?;
+            .map_err(|e| MarketError::Dht(format!("Failed to create master registry: {e}")))?;
 
         let key = descriptor.key();
 
         // Initialize with empty registry
         let empty = MarketRegistry::default();
-        let data = empty
-            .to_cbor()
-            .map_err(|e| anyhow::anyhow!("Failed to serialize empty registry: {e}"))?;
+        let data = empty.to_cbor().map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize empty registry: {e}"))
+        })?;
         routing_context
             .set_dht_value(key.clone(), 0, data, None)
-            .await?;
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to set initial registry value: {e}")))?;
 
         info!("Created master registry at: {}", key);
         self.master_registry_key = Some(key.clone());
@@ -229,7 +231,7 @@ impl RegistryOperations {
     ///
     /// - If the key is already known (from a peer broadcast), returns it.
     /// - Otherwise tries to create the record (first node on this machine wins).
-    pub async fn ensure_master_registry(&mut self) -> Result<RecordKey> {
+    pub async fn ensure_master_registry(&mut self) -> MarketResult<RecordKey> {
         if let Some(key) = &self.master_registry_key {
             return Ok(key.clone());
         }
@@ -245,11 +247,15 @@ impl RegistryOperations {
     /// Register a seller in the master registry.
     /// Retries on concurrent-write conflicts.
     #[allow(clippy::too_many_lines)]
-    pub async fn register_seller(&mut self, seller_pubkey: &str, catalog_key: &str) -> Result<()> {
+    pub async fn register_seller(
+        &mut self,
+        seller_pubkey: &str,
+        catalog_key: &str,
+    ) -> MarketResult<()> {
         let registry_key = self
             .master_registry_key
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Master registry key not known yet"))?
+            .ok_or_else(|| MarketError::InvalidState("Master registry key not known yet".into()))?
             .clone();
 
         let routing_context = self.dht.get_routing_context_pub()?;
@@ -257,7 +263,8 @@ impl RegistryOperations {
         // Open with shared keypair for write access
         let _ = routing_context
             .open_dht_record(registry_key.clone(), Some(self.shared_keypair.clone()))
-            .await?;
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to open registry record: {e}")))?;
 
         let max_retries: u32 = 10;
         let mut retry_delay = std::time::Duration::from_millis(50);
@@ -265,13 +272,15 @@ impl RegistryOperations {
         for attempt in 0..max_retries {
             let value_data = routing_context
                 .get_dht_value(registry_key.clone(), 0, true)
-                .await?;
+                .await
+                .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?;
 
             let (mut registry, old_seq) = match value_data {
                 Some(v) => {
                     let seq = v.seq();
-                    let reg = MarketRegistry::from_cbor(v.data())
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize registry: {e}"))?;
+                    let reg = MarketRegistry::from_cbor(v.data()).map_err(|e| {
+                        MarketError::Serialization(format!("Failed to deserialize registry: {e}"))
+                    })?;
                     (reg, Some(seq))
                 }
                 None => (MarketRegistry::default(), None),
@@ -293,9 +302,9 @@ impl RegistryOperations {
                 registered_at: now_unix(),
             });
 
-            let data = registry
-                .to_cbor()
-                .map_err(|e| anyhow::anyhow!("Failed to serialize registry: {e}"))?;
+            let data = registry.to_cbor().map_err(|e| {
+                MarketError::Serialization(format!("Failed to serialize registry: {e}"))
+            })?;
 
             match routing_context
                 .set_dht_value(registry_key.clone(), 0, data, None)
@@ -331,16 +340,16 @@ impl RegistryOperations {
                         retry_delay *= 2;
                         continue;
                     }
-                    return Err(anyhow::anyhow!(
+                    return Err(MarketError::Dht(format!(
                         "Failed to register seller after {max_retries} attempts: {e}"
-                    ));
+                    )));
                 }
             }
         }
 
-        Err(anyhow::anyhow!(
+        Err(MarketError::Dht(format!(
             "Failed to register seller after {max_retries} attempts"
-        ))
+        )))
     }
 
     /// Get the master registry key (if known).
@@ -351,21 +360,28 @@ impl RegistryOperations {
     // ── Seller operations ────────────────────────────────────────────
 
     /// Create (or return existing) seller catalog DHT record.
-    pub async fn get_or_create_seller_catalog(&mut self, seller_pubkey: &str) -> Result<RecordKey> {
+    pub async fn get_or_create_seller_catalog(
+        &mut self,
+        seller_pubkey: &str,
+    ) -> MarketResult<RecordKey> {
         if let Some(record) = &self.seller_catalog_record {
             return Ok(record.key.clone());
         }
 
         let routing_context = self.dht.get_routing_context_pub()?;
-        let schema = DHTSchema::dflt(1)?;
+        let schema = DHTSchema::dflt(1)
+            .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
         let descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, None)
-            .await?;
+            .await
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to create seller catalog record: {e}"))
+            })?;
 
         let key = descriptor.key();
-        let owner = descriptor
-            .owner_keypair()
-            .ok_or_else(|| anyhow::anyhow!("Seller catalog record missing owner keypair"))?;
+        let owner = descriptor.owner_keypair().ok_or_else(|| {
+            MarketError::Dht("Seller catalog record missing owner keypair".into())
+        })?;
 
         // Initialize with empty catalog
         let empty = SellerCatalog {
@@ -373,12 +389,13 @@ impl RegistryOperations {
             listings: Vec::new(),
             version: 0,
         };
-        let data = empty
-            .to_cbor()
-            .map_err(|e| anyhow::anyhow!("Failed to serialize empty catalog: {e}"))?;
+        let data = empty.to_cbor().map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize empty catalog: {e}"))
+        })?;
         routing_context
             .set_dht_value(key.clone(), 0, data, None)
-            .await?;
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to set initial catalog value: {e}")))?;
 
         let record = OwnedDHTRecord { key, owner };
         info!("Created seller catalog at: {}", record.key);
@@ -394,24 +411,27 @@ impl RegistryOperations {
     }
 
     /// Add a listing to the seller's own catalog.
-    pub async fn add_listing_to_catalog(&self, entry: CatalogEntry) -> Result<()> {
+    pub async fn add_listing_to_catalog(&self, entry: CatalogEntry) -> MarketResult<()> {
         let record = self
             .seller_catalog_record
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Seller catalog not created yet"))?;
+            .ok_or_else(|| MarketError::InvalidState("Seller catalog not created yet".into()))?;
 
         let routing_context = self.dht.get_routing_context_pub()?;
         let _ = routing_context
             .open_dht_record(record.key.clone(), Some(record.owner.clone()))
-            .await?;
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to open catalog record: {e}")))?;
 
         let value_data = routing_context
             .get_dht_value(record.key.clone(), 0, true)
-            .await?;
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to get catalog value: {e}")))?;
 
         let mut catalog = match value_data {
-            Some(v) => SellerCatalog::from_cbor(v.data())
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize catalog: {e}"))?,
+            Some(v) => SellerCatalog::from_cbor(v.data()).map_err(|e| {
+                MarketError::Serialization(format!("Failed to deserialize catalog: {e}"))
+            })?,
             None => SellerCatalog::default(),
         };
 
@@ -419,10 +439,11 @@ impl RegistryOperations {
 
         let data = catalog
             .to_cbor()
-            .map_err(|e| anyhow::anyhow!("Failed to serialize catalog: {e}"))?;
+            .map_err(|e| MarketError::Serialization(format!("Failed to serialize catalog: {e}")))?;
         routing_context
             .set_dht_value(record.key.clone(), 0, data, None)
-            .await?;
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to set catalog value: {e}")))?;
 
         info!(
             "Added listing to catalog, now has {} listings",
@@ -437,7 +458,7 @@ impl RegistryOperations {
     ///
     /// Returns an empty registry if the master key is not yet known
     /// (e.g. no `RegistryAnnouncement` received yet).
-    pub async fn fetch_registry(&self) -> Result<MarketRegistry> {
+    pub async fn fetch_registry(&self) -> MarketResult<MarketRegistry> {
         let Some(key) = &self.master_registry_key else {
             info!("Master registry key not known yet, returning empty registry");
             return Ok(MarketRegistry::default());
@@ -445,11 +466,15 @@ impl RegistryOperations {
         let key = key.clone();
 
         let routing_context = self.dht.get_routing_context_pub()?;
-        let _ = routing_context.open_dht_record(key.clone(), None).await?;
+        let _ = routing_context
+            .open_dht_record(key.clone(), None)
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to open registry record: {e}")))?;
 
         let data = routing_context
             .get_dht_value(key.clone(), 0, true)
-            .await?
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?
             .map(|v| v.data().to_vec());
 
         let _ = routing_context.close_dht_record(key).await;
@@ -472,15 +497,20 @@ impl RegistryOperations {
     }
 
     /// Fetch a single seller's catalog from DHT.
-    pub async fn fetch_seller_catalog(&self, catalog_key: &RecordKey) -> Result<SellerCatalog> {
+    pub async fn fetch_seller_catalog(
+        &self,
+        catalog_key: &RecordKey,
+    ) -> MarketResult<SellerCatalog> {
         let routing_context = self.dht.get_routing_context_pub()?;
         let _ = routing_context
             .open_dht_record(catalog_key.clone(), None)
-            .await?;
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to open catalog record: {e}")))?;
 
         let data = routing_context
             .get_dht_value(catalog_key.clone(), 0, true)
-            .await?
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to get catalog value: {e}")))?
             .map(|v| v.data().to_vec());
 
         let _ = routing_context.close_dht_record(catalog_key.clone()).await;
@@ -507,13 +537,13 @@ impl RegistryOperations {
     }
 
     /// Two-hop discovery: master registry → seller catalogs → flat listing list.
-    pub async fn fetch_all_listings(&self) -> Result<Vec<RegistryEntry>> {
+    pub async fn fetch_all_listings(&self) -> MarketResult<Vec<RegistryEntry>> {
         let registry = self.fetch_registry().await?;
         let mut all_listings = Vec::new();
 
         for seller in &registry.sellers {
             let catalog_key = RecordKey::try_from(seller.catalog_key.as_str()).map_err(|e| {
-                anyhow::anyhow!("Invalid catalog key '{}': {e}", seller.catalog_key)
+                MarketError::Dht(format!("Invalid catalog key '{}': {e}", seller.catalog_key))
             })?;
 
             match self.fetch_seller_catalog(&catalog_key).await {

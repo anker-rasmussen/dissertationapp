@@ -2,7 +2,8 @@ use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
-use anyhow::{Context, Result};
+
+use crate::error::{MarketError, MarketResult};
 
 /// AES-256-GCM key (32 bytes)
 pub type ContentKey = [u8; 32];
@@ -18,7 +19,7 @@ pub fn generate_key() -> ContentKey {
 /// Encrypt text content with AES-256-GCM
 /// Returns (ciphertext, nonce) tuple
 /// The nonce must be stored alongside the ciphertext for decryption
-pub fn encrypt_content(plaintext: &str, key: &ContentKey) -> Result<(Vec<u8>, ContentNonce)> {
+pub fn encrypt_content(plaintext: &str, key: &ContentKey) -> MarketResult<(Vec<u8>, ContentNonce)> {
     let cipher = Aes256Gcm::new(key.into());
 
     // Generate random nonce (12 bytes for GCM)
@@ -28,7 +29,7 @@ pub fn encrypt_content(plaintext: &str, key: &ContentKey) -> Result<(Vec<u8>, Co
     // Encrypt the plaintext
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_bytes())
-        .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
+        .map_err(|e| MarketError::Crypto(format!("Encryption failed: {e}")))?;
 
     Ok((ciphertext, nonce_bytes))
 }
@@ -39,17 +40,18 @@ pub fn decrypt_content(
     ciphertext: &[u8],
     key: &ContentKey,
     nonce: &ContentNonce,
-) -> Result<String> {
+) -> MarketResult<String> {
     let cipher = Aes256Gcm::new(key.into());
     let nonce = Nonce::from_slice(nonce);
 
     // Decrypt the ciphertext
     let plaintext_bytes = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
+        .map_err(|e| MarketError::Crypto(format!("Decryption failed: {e}")))?;
 
     // Convert to UTF-8 string
-    String::from_utf8(plaintext_bytes).context("Decrypted content is not valid UTF-8")
+    String::from_utf8(plaintext_bytes)
+        .map_err(|e| MarketError::Crypto(format!("Decrypted content is not valid UTF-8: {e}")))
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ bincode = "1.3"  # Binary serialization for MPC messages
 
 # Error handling
 anyhow = "1.0"
+thiserror = "2"
 
 # Async traits
 async-trait = "0.1"
