@@ -145,8 +145,13 @@ fn main() -> anyhow::Result<()> {
     let node_holder = app_state.node_holder.clone();
     let coordinator_holder = app_state.coordinator.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new()
-            .expect("Failed to create Tokio runtime — cannot start without an async runtime");
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                error!("Failed to create Tokio runtime: {e}");
+                return;
+            }
+        };
         rt.block_on(async move {
             let data_dir = get_data_dir();
             info!("Using data directory: {:?}", data_dir);

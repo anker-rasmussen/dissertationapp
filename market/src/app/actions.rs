@@ -187,10 +187,7 @@ pub async fn submit_bid(
 
     // Create BidRecord and publish to DHT
     let bid_ops = BidOperations::new(dht.clone());
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = market::config::now_unix();
     let mut bid_record = BidRecord {
         listing_key: listing_record_key.clone(),
         bidder: bidder.clone(),

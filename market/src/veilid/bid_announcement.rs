@@ -344,7 +344,7 @@ mod tests {
                 assert_eq!(registry_key, test_record_key());
                 assert_eq!(timestamp, 5000);
             }
-            _ => panic!("Expected RegistryAnnouncement"),
+            other => panic!("Expected RegistryAnnouncement, got {other:?}"),
         }
     }
 
@@ -367,7 +367,7 @@ mod tests {
                 assert_eq!(catalog_key, test_record_key());
                 assert_eq!(timestamp, 3000);
             }
-            _ => panic!("Expected SellerRegistration"),
+            other => panic!("Expected SellerRegistration, got {other:?}"),
         }
     }
 }
