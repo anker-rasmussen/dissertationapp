@@ -76,20 +76,17 @@ impl VeilidNode {
         }
     }
 
-    /// Configure this node to connect to the local devnet (requires LD_PRELOAD)
-    ///
-    /// Automatically enables insecure storage for devnet use.
+    /// Configure this node to connect to the local devnet (requires LD_PRELOAD).
     #[must_use]
     pub fn with_devnet(mut self, config: DevNetConfig) -> Self {
         self.devnet_config = Some(config);
-        self.insecure_storage = true;
         self
     }
 
     /// Explicitly set whether to use insecure (unencrypted) protected storage.
     ///
     /// In production this should remain `false` (the default).
-    /// Devnet mode sets this to `true` automatically via [`with_devnet`].
+    /// For devnet or testing, chain `.with_insecure_storage(true)` explicitly.
     #[must_use]
     pub const fn with_insecure_storage(mut self, insecure: bool) -> Self {
         self.insecure_storage = insecure;
@@ -107,6 +104,13 @@ impl VeilidNode {
     #[allow(clippy::too_many_lines)]
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting Veilid node...");
+
+        if self.insecure_storage {
+            warn!(
+                "Insecure (unencrypted) protected storage is ENABLED. \
+                 Do not use this setting in production."
+            );
+        }
 
         let protected_store_dir = self.data_dir.join("protected_store");
         let table_store_dir = self.data_dir.join("table_store");

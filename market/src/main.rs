@@ -157,7 +157,9 @@ fn main() -> anyhow::Result<()> {
                 VeilidNode::new(data_dir).with_public_network()
             } else {
                 info!("Connecting to LOCAL devnet");
-                VeilidNode::new(data_dir).with_devnet(DevNetConfig::default())
+                VeilidNode::new(data_dir)
+                    .with_devnet(DevNetConfig::default())
+                    .with_insecure_storage(true)
             };
 
             if let Err(e) = node.start().await {

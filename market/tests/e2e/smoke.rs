@@ -341,7 +341,9 @@ impl TestNode {
             port_offset: offset,
         };
 
-        let node = VeilidNode::new(data_dir.clone()).with_devnet(config);
+        let node = VeilidNode::new(data_dir.clone())
+            .with_devnet(config)
+            .with_insecure_storage(true);
 
         Self {
             node,
@@ -1596,7 +1598,9 @@ async fn test_e2e_single_node_diagnostic() {
     eprintln!("   Bootstrap: {:?}", config.bootstrap_nodes);
     eprintln!("   Port offset: {} (port 5195)", config.port_offset);
 
-    let mut node = VeilidNode::new(data_dir.clone()).with_devnet(config);
+    let mut node = VeilidNode::new(data_dir.clone())
+        .with_devnet(config)
+        .with_insecure_storage(true);
 
     // Attempt to start
     eprintln!("5. Starting Veilid node...");
