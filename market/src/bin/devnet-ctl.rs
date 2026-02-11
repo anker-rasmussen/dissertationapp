@@ -26,6 +26,11 @@ fn libipspoof_path() -> PathBuf {
         .join("libipspoof.so")
 }
 
+fn compose_path_str(path: &std::path::Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("Path contains invalid UTF-8: {}", path.display()))
+}
+
 fn start_devnet() -> Result<(), String> {
     let compose_path = docker_compose_path();
 
@@ -42,7 +47,7 @@ fn start_devnet() -> Result<(), String> {
         .args([
             "compose",
             "-f",
-            compose_path.to_str().unwrap(),
+            compose_path_str(&compose_path)?,
             "down",
             "-v",
             "--remove-orphans",
@@ -53,7 +58,13 @@ fn start_devnet() -> Result<(), String> {
 
     eprintln!("[devnet-ctl] Starting devnet...");
     let output = Command::new("docker")
-        .args(["compose", "-f", compose_path.to_str().unwrap(), "up", "-d"])
+        .args([
+            "compose",
+            "-f",
+            compose_path_str(&compose_path)?,
+            "up",
+            "-d",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -83,7 +94,7 @@ fn stop_devnet() -> Result<(), String> {
         .args([
             "compose",
             "-f",
-            compose_path.to_str().unwrap(),
+            compose_path_str(&compose_path)?,
             "down",
             "-v",
             "--remove-orphans",
@@ -153,7 +164,7 @@ fn check_status() -> Result<(), String> {
         .args([
             "compose",
             "-f",
-            compose_path.to_str().unwrap(),
+            compose_path_str(&compose_path)?,
             "ps",
             "--format",
             "{{.Service}}\t{{.State}}\t{{.Health}}",
@@ -202,7 +213,9 @@ fn check_status() -> Result<(), String> {
         eprintln!("[devnet-ctl] WARNING: libipspoof.so not found!");
         eprintln!(
             "Build with: cd {} && make libipspoof.so",
-            libipspoof.parent().unwrap().display()
+            libipspoof
+                .parent()
+                .map_or_else(|| "<unknown>".to_string(), |p| p.display().to_string())
         );
     }
 
@@ -218,7 +231,7 @@ fn wait_for_health(timeout_secs: u64) -> Result<(), String> {
             .args([
                 "compose",
                 "-f",
-                compose_path.to_str().unwrap(),
+                compose_path_str(&compose_path)?,
                 "ps",
                 "--format",
                 "{{.Service}}\t{{.Health}}",

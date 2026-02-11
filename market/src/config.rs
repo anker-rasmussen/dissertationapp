@@ -53,6 +53,6 @@ pub const MP_SPDZ_DIR_ENV: &str = "MP_SPDZ_DIR";
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .expect("System clock is before Unix epoch")
+        .as_secs()
 }

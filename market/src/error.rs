@@ -22,6 +22,12 @@ pub enum MarketError {
     #[error("Invalid state: {0}")]
     InvalidState(String),
 
+    #[error("Configuration error: {0}")]
+    Config(String),
+
+    #[error("Process execution failed: {0}")]
+    Process(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
