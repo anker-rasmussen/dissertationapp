@@ -1,51 +1,42 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::sync::Arc;
-use tokio::process::Command;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use veilid_core::{
-    PublicKey, RecordKey, RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target,
-    VeilidAPI,
+    PublicKey, RecordKey, RouteId, SafetySelection, SafetySpec, Sequencing, Stability, VeilidAPI,
 };
 
-use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
+use super::bid_announcement::BidAnnouncementRegistry;
 use super::bid_ops::BidOperations;
 use super::bid_storage::BidStorage;
 use super::dht::DHTOperations;
 use super::mpc::MpcTunnelProxy;
+use super::mpc_execution::{compile_mpc_program, spawn_shamir_party, MpcCleanupGuard};
 use super::mpc_routes::MpcRouteManager;
+pub use super::mpc_verification::VerificationState;
 use crate::config;
 use crate::marketplace::BidIndex;
 
-type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
-type VerificationMap = Arc<Mutex<HashMap<RecordKey, VerificationState>>>;
-
-/// Named struct replacing the tuple `(PublicKey, u64, Option<bool>)` for pending verifications.
-#[derive(Debug, Clone)]
-pub struct VerificationState {
-    pub winner_pubkey: PublicKey,
-    pub mpc_winning_bid: u64,
-    pub verified: Option<bool>,
-}
+pub(crate) type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
+pub(crate) type VerificationMap = Arc<Mutex<HashMap<RecordKey, VerificationState>>>;
 
 /// Orchestrates MPC execution: route exchange, tunnel proxy lifecycle, bid verification.
 ///
 /// Extracted from `AuctionCoordinator` to separate MPC concerns from auction
 /// coordination (bid announcements, listing management, DHT updates).
 pub struct MpcOrchestrator {
-    api: VeilidAPI,
-    dht: DHTOperations,
-    my_node_id: PublicKey,
-    bid_storage: BidStorage,
-    node_offset: u16,
+    pub(crate) api: VeilidAPI,
+    pub(crate) dht: DHTOperations,
+    pub(crate) my_node_id: PublicKey,
+    pub(crate) bid_storage: BidStorage,
+    pub(crate) node_offset: u16,
     /// Currently active MPC tunnel proxy (if any)
-    active_tunnel_proxy: Arc<Mutex<Option<MpcTunnelProxy>>>,
+    pub(crate) active_tunnel_proxy: Arc<Mutex<Option<MpcTunnelProxy>>>,
     /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
-    route_managers: RouteManagerMap,
+    pub(crate) route_managers: RouteManagerMap,
     /// Pending verifications: listing_key -> (winner_pubkey, mpc_winning_bid, verified?)
-    pending_verifications: VerificationMap,
+    pub(crate) pending_verifications: VerificationMap,
 }
 
 impl MpcOrchestrator {
@@ -373,68 +364,6 @@ impl MpcOrchestrator {
         Ok(())
     }
 
-    /// Handle seller (party 0) MPC result: parse output, store verification, send challenge.
-    async fn handle_seller_mpc_result(
-        &self,
-        stdout: &str,
-        listing_key: &RecordKey,
-        all_parties: &[PublicKey],
-    ) {
-        let Some((winner_pid, bid)) = parse_seller_mpc_output(stdout) else {
-            warn!("Could not parse winner/bid from MPC output");
-            return;
-        };
-
-        if winner_pid == 0 {
-            // Winner is the seller (reserve price was highest) = no sale
-            info!("No bidder exceeded the reserve price — no sale");
-            self.cleanup_route_manager(listing_key).await;
-        } else if winner_pid < all_parties.len() {
-            let winner_pubkey = all_parties[winner_pid].clone();
-            let key = listing_key.clone();
-
-            // Store pending verification entry
-            self.pending_verifications.lock().await.insert(
-                key,
-                VerificationState {
-                    winner_pubkey: winner_pubkey.clone(),
-                    mpc_winning_bid: bid,
-                    verified: None,
-                },
-            );
-            info!(
-                "Stored pending verification: winner={}, bid={}",
-                winner_pubkey, bid
-            );
-
-            // Send WinnerDecryptionRequest to winner via their MPC route (challenge)
-            info!(
-                "Sending challenge (WinnerDecryptionRequest) to winner {}",
-                winner_pubkey
-            );
-            self.send_winner_challenge(listing_key, &winner_pubkey)
-                .await;
-        } else {
-            error!(
-                "Winner party ID {} out of range (only {} parties)",
-                winner_pid,
-                all_parties.len()
-            );
-        }
-    }
-
-    /// Handle bidder (party 1..N) MPC result: parse output, cleanup if lost.
-    async fn handle_bidder_mpc_result(&self, stdout: &str, listing_key: &RecordKey) {
-        let i_won = parse_bidder_mpc_output(stdout);
-
-        if i_won {
-            info!("I won — waiting for seller's challenge (WinnerDecryptionRequest)");
-        } else {
-            info!("I lost — cleaning up route manager");
-            self.cleanup_route_manager(listing_key).await;
-        }
-    }
-
     /// Create a routing context suitable for sending to private routes.
     pub fn safe_routing_context(&self) -> Result<veilid_core::RoutingContext> {
         self.api
@@ -456,171 +385,6 @@ impl MpcOrchestrator {
         if managers.remove(&key).is_some() {
             info!("Cleaned up route manager for listing {}", listing_key);
         }
-    }
-
-    /// Send decryption hash to auction winner via their MPC route
-    pub async fn send_decryption_hash(
-        &self,
-        listing_key: &RecordKey,
-        winner: &PublicKey,
-        decryption_hash: &str,
-    ) -> Result<()> {
-        info!(
-            "Sending decryption hash to winner {} for listing {}",
-            winner, listing_key
-        );
-
-        let message = AuctionMessage::decryption_hash_transfer(
-            listing_key.clone(),
-            winner.clone(),
-            decryption_hash.to_string(),
-        );
-
-        let data = message.to_bytes()?;
-
-        // Look up the winner's route while holding locks, then release before async work
-        let winner_route = {
-            let route_manager = {
-                let managers = self.route_managers.lock().await;
-                managers
-                    .get(listing_key)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Route manager not found for listing {listing_key}")
-                    })?
-                    .clone()
-            };
-            let received_routes = {
-                let mgr = route_manager.lock().await;
-                mgr.received_routes.clone()
-            };
-            let routes = received_routes.lock().await;
-            routes.get(winner).cloned().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Winner's MPC route not found in route manager for listing {listing_key}"
-                )
-            })?
-        };
-
-        info!("Found winner's MPC route: {}", winner_route);
-        let routing_context = self.safe_routing_context()?;
-
-        match routing_context
-            .app_message(Target::RouteId(winner_route.clone()), data)
-            .await
-        {
-            Ok(()) => {
-                info!(
-                    "Successfully sent decryption hash to winner via MPC route {}",
-                    winner_route
-                );
-                self.cleanup_route_manager(listing_key).await;
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to send to winner's MPC route: {}", e);
-                Err(anyhow::anyhow!("Failed to send decryption hash: {e}"))
-            }
-        }
-    }
-
-    /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style)
-    pub async fn verify_winner_reveal(
-        &self,
-        listing_key: &RecordKey,
-        winner: &PublicKey,
-        bid_value: u64,
-        nonce: &[u8; 32],
-    ) -> bool {
-        use sha2::{Digest, Sha256};
-
-        // 1. Get pending verification to check expected winning bid
-        let expected_bid = {
-            let verifications = self.pending_verifications.lock().await;
-            if let Some(state) = verifications.get(listing_key) {
-                if &state.winner_pubkey != winner {
-                    warn!(
-                        "Winner mismatch: expected {}, got {}",
-                        state.winner_pubkey, winner
-                    );
-                    return false;
-                }
-                state.mpc_winning_bid
-            } else {
-                warn!("No pending verification found for listing {}", listing_key);
-                return false;
-            }
-        };
-
-        // 2. Check bid value matches MPC output
-        if bid_value != expected_bid {
-            warn!(
-                "Bid value mismatch: revealed {} but MPC output was {}",
-                bid_value, expected_bid
-            );
-            return false;
-        }
-
-        // 3. Fetch winner's BidRecord from DHT to get stored commitment
-        let bid_ops = BidOperations::new(self.dht.clone());
-
-        let registry_data = match self.dht.get_value_at_subkey(listing_key, 2).await {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                warn!("No bid registry found for listing {}", listing_key);
-                return false;
-            }
-            Err(e) => {
-                warn!("Failed to fetch bid registry: {}", e);
-                return false;
-            }
-        };
-
-        let registry = match BidAnnouncementRegistry::from_bytes(&registry_data) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Failed to parse bid registry: {}", e);
-                return false;
-            }
-        };
-
-        let winner_bid_record_key = if let Some((_, key, _)) =
-            registry.announcements.iter().find(|(b, _, _)| b == winner)
-        {
-            key.clone()
-        } else {
-            warn!("Winner {} not found in bid registry", winner);
-            return false;
-        };
-
-        let bid_record = match bid_ops.fetch_bid(&winner_bid_record_key).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                warn!("Winner's bid record not found at {}", winner_bid_record_key);
-                return false;
-            }
-            Err(e) => {
-                warn!("Failed to fetch winner's bid record: {}", e);
-                return false;
-            }
-        };
-
-        // 4. Compute commitment: SHA256(bid_value || nonce)
-        let mut hasher = Sha256::new();
-        hasher.update(bid_value.to_le_bytes());
-        hasher.update(nonce);
-        let computed_commitment: [u8; 32] = hasher.finalize().into();
-
-        // 5. Compare with stored commitment
-        if computed_commitment != bid_record.commitment {
-            warn!("Commitment mismatch for winner {}", winner);
-            return false;
-        }
-
-        info!(
-            "Commitment verified for winner {} with bid value {}",
-            winner, bid_value
-        );
-        true
     }
 
     /// Discover bids from DHT bid registry (n-party approach)
@@ -689,62 +453,6 @@ impl MpcOrchestrator {
         Ok(bid_index)
     }
 
-    /// Send WinnerDecryptionRequest challenge to winner via their MPC route
-    pub async fn send_winner_challenge(&self, listing_key: &RecordKey, winner: &PublicKey) {
-        let message =
-            AuctionMessage::winner_decryption_request(listing_key.clone(), self.my_node_id.clone());
-
-        let data = match message.to_bytes() {
-            Ok(d) => d,
-            Err(e) => {
-                error!("Failed to serialize WinnerDecryptionRequest: {}", e);
-                return;
-            }
-        };
-
-        // Look up the winner's route while holding locks, then release before async work
-        let winner_route = {
-            let route_manager = {
-                let managers = self.route_managers.lock().await;
-                if let Some(rm) = managers.get(listing_key) {
-                    rm.clone()
-                } else {
-                    warn!("Route manager not found for listing {}", listing_key);
-                    return;
-                }
-            };
-            let received_routes = {
-                let mgr = route_manager.lock().await;
-                mgr.received_routes.clone()
-            };
-            let routes = received_routes.lock().await;
-            if let Some(route) = routes.get(winner).cloned() {
-                route
-            } else {
-                warn!("Winner's MPC route not found in route manager");
-                return;
-            }
-        };
-
-        let routing_context = match self.safe_routing_context() {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                error!("Failed to create routing context: {}", e);
-                return;
-            }
-        };
-
-        match routing_context
-            .app_message(Target::RouteId(winner_route), data)
-            .await
-        {
-            Ok(()) => {
-                info!("Sent WinnerDecryptionRequest challenge to winner via MPC route");
-            }
-            Err(e) => error!("Failed to send challenge to winner: {}", e),
-        }
-    }
-
     /// Get the node ID for this orchestrator
     pub const fn my_node_id(&self) -> &PublicKey {
         &self.my_node_id
@@ -758,189 +466,5 @@ impl MpcOrchestrator {
     /// Get the DHT operations handle
     pub const fn dht(&self) -> &DHTOperations {
         &self.dht
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Extracted sub-functions (free functions in the same module)
-// ---------------------------------------------------------------------------
-
-/// Compile the MPC program for the given number of parties using MP-SPDZ's `compile.py`.
-async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -> Result<()> {
-    info!("Compiling auction_n program for {} parties...", num_parties);
-
-    let compile_output = Command::new(format!("{mp_spdz_dir}/compile.py"))
-        .current_dir(mp_spdz_dir)
-        .arg("auction_n")
-        .arg("--")
-        .arg(num_parties.to_string())
-        .output()
-        .await;
-
-    match compile_output {
-        Ok(result) => {
-            let stdout = String::from_utf8_lossy(&result.stdout);
-            let stderr = String::from_utf8_lossy(&result.stderr);
-
-            if result.status.success() {
-                info!(
-                    "Successfully compiled auction_n for {} parties",
-                    num_parties
-                );
-                if !stdout.is_empty() {
-                    info!("Compile output: {}", stdout);
-                }
-                Ok(())
-            } else {
-                error!("Compilation failed!");
-                if !stderr.is_empty() {
-                    error!("Compile errors: {}", stderr);
-                }
-                Err(anyhow::anyhow!(
-                    "Failed to compile MPC program for {num_parties} parties"
-                ))
-            }
-        }
-        Err(e) => Err(anyhow::anyhow!("Failed to run compile.py: {e}")),
-    }
-}
-
-/// Spawn `shamir-party.x`, write the bid value to its stdin, and collect output.
-async fn spawn_shamir_party(
-    mp_spdz_dir: &str,
-    party_id: usize,
-    num_parties: usize,
-    hosts_file: &std::path::Path,
-    bid_value: u64,
-) -> Result<std::process::Output> {
-    info!(
-        "Executing MP-SPDZ auction_n-{} program (Shamir, interactive)...",
-        num_parties
-    );
-
-    let program_name = format!("auction_n-{num_parties}");
-    let spawn_result = Command::new(format!("{mp_spdz_dir}/shamir-party.x"))
-        .current_dir(mp_spdz_dir)
-        .arg("-p")
-        .arg(party_id.to_string())
-        .arg("-N")
-        .arg(num_parties.to_string())
-        .arg("-OF")
-        .arg(".") // Output to stdout
-        .arg("-ip")
-        .arg(hosts_file.to_str().unwrap_or("HOSTS"))
-        .arg("-I") // Interactive mode: read inputs from stdin
-        .arg(&program_name)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-
-    let mut child = match spawn_result {
-        Ok(child) => child,
-        Err(e) => {
-            return Err(anyhow::anyhow!("Failed to spawn shamir-party.x: {e}"));
-        }
-    };
-
-    // Write bid value to stdin, then close the pipe (EOF)
-    {
-        use tokio::io::AsyncWriteExt;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to open stdin pipe to shamir-party.x"))?;
-        stdin
-            .write_all(format!("{bid_value}\n").as_bytes())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write bid value to stdin: {e}"))?;
-        // stdin is dropped here, sending EOF
-    }
-
-    child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to execute shamir-party.x: {e}"))
-}
-
-/// Parse seller (party 0) MPC output to extract the winner party ID and winning bid.
-///
-/// Looks for lines like `"Winning bid: 42"` and `"Winner: Party 2"`.
-/// Returns `Some((winner_party_id, winning_bid))` or `None` if parsing fails.
-fn parse_seller_mpc_output(stdout: &str) -> Option<(usize, u64)> {
-    let mut winning_bid: Option<u64> = None;
-    let mut winner_party_id: Option<usize> = None;
-
-    for line in stdout.lines() {
-        if line.contains("Winning bid:") {
-            if let Some(bid_str) = line.split(':').next_back() {
-                winning_bid = bid_str.trim().parse().ok();
-                if let Some(bid) = winning_bid {
-                    info!("Parsed winning bid from MPC output: {}", bid);
-                }
-            }
-        }
-        if line.contains("Winner: Party") {
-            #[allow(clippy::double_ended_iterator_last)]
-            if let Some(party_str) = line.split("Party").last() {
-                winner_party_id = party_str.trim().parse().ok();
-                if let Some(pid) = winner_party_id {
-                    info!("Parsed winner party ID from MPC output: {}", pid);
-                }
-            }
-        }
-    }
-
-    match (winning_bid, winner_party_id) {
-        (Some(bid), Some(pid)) => Some((pid, bid)),
-        _ => None,
-    }
-}
-
-/// Parse bidder (party 1..N) MPC output.
-///
-/// Returns `true` if the output contains `"You won: 1"`, `false` otherwise.
-fn parse_bidder_mpc_output(stdout: &str) -> bool {
-    for line in stdout.lines() {
-        if line.contains("You won:") {
-            if line.contains("You won: 1") {
-                info!("Result: I won the auction!");
-                return true;
-            }
-            info!("Result: I did not win");
-            return false;
-        }
-    }
-    false
-}
-
-// ---------------------------------------------------------------------------
-// RAII cleanup guard for tunnel proxy + hosts file
-// ---------------------------------------------------------------------------
-
-/// Ensures MPC tunnel proxy cleanup and hosts file removal on all exit paths.
-///
-/// The guard calls `tunnel_proxy.cleanup()` and removes the temporary hosts file
-/// when it is dropped, eliminating duplicated cleanup code in success/error branches.
-struct MpcCleanupGuard {
-    tunnel_proxy: Option<MpcTunnelProxy>,
-    hosts_file: std::path::PathBuf,
-}
-
-impl MpcCleanupGuard {
-    const fn new(tunnel_proxy: MpcTunnelProxy, hosts_file: std::path::PathBuf) -> Self {
-        Self {
-            tunnel_proxy: Some(tunnel_proxy),
-            hosts_file,
-        }
-    }
-}
-
-impl Drop for MpcCleanupGuard {
-    fn drop(&mut self) {
-        if let Some(proxy) = self.tunnel_proxy.take() {
-            proxy.cleanup();
-        }
-        let _ = std::fs::remove_file(&self.hosts_file);
     }
 }
