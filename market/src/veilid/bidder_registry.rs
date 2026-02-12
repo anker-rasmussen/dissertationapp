@@ -214,3 +214,165 @@ impl BidderRegistryOps {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mocks::{make_test_public_key, make_test_record_key, MockTime};
+
+    #[test]
+    fn test_bidder_registry_cbor_roundtrip() {
+        let listing_key = make_test_record_key(1);
+        let bidder1 = make_test_public_key(1);
+        let bidder2 = make_test_public_key(2);
+        let bid_record_key1 = make_test_record_key(10);
+        let bid_record_key2 = make_test_record_key(20);
+
+        let registry = BidderRegistry {
+            listing_key: listing_key.clone(),
+            bidders: vec![
+                BidderEntry {
+                    bidder: bidder1.clone(),
+                    bid_record_key: bid_record_key1.clone(),
+                    timestamp: 1000,
+                },
+                BidderEntry {
+                    bidder: bidder2.clone(),
+                    bid_record_key: bid_record_key2.clone(),
+                    timestamp: 2000,
+                },
+            ],
+        };
+
+        let bytes = registry.to_cbor().expect("Should serialize");
+        let decoded = BidderRegistry::from_cbor(&bytes).expect("Should deserialize");
+
+        assert_eq!(decoded.listing_key, listing_key);
+        assert_eq!(decoded.bidders.len(), 2);
+        assert_eq!(decoded.bidders[0].bidder, bidder1);
+        assert_eq!(decoded.bidders[0].bid_record_key, bid_record_key1);
+        assert_eq!(decoded.bidders[0].timestamp, 1000);
+        assert_eq!(decoded.bidders[1].bidder, bidder2);
+        assert_eq!(decoded.bidders[1].bid_record_key, bid_record_key2);
+        assert_eq!(decoded.bidders[1].timestamp, 2000);
+    }
+
+    #[test]
+    fn test_bidder_registry_new() {
+        let listing_key = make_test_record_key(1);
+        let registry = BidderRegistry::new(listing_key.clone());
+
+        assert_eq!(registry.listing_key, listing_key);
+        assert_eq!(registry.bidders.len(), 0);
+    }
+
+    #[test]
+    fn test_bidder_registry_add_bidder() {
+        let listing_key = make_test_record_key(1);
+        let mut registry = BidderRegistry::new(listing_key);
+
+        let bidder = make_test_public_key(1);
+        let bid_record_key = make_test_record_key(10);
+
+        registry.add_bidder(bidder.clone(), bid_record_key.clone());
+
+        assert_eq!(registry.bidders.len(), 1);
+        assert_eq!(registry.bidders[0].bidder, bidder);
+        assert_eq!(registry.bidders[0].bid_record_key, bid_record_key);
+        assert!(registry.bidders[0].timestamp > 0);
+    }
+
+    #[test]
+    fn test_bidder_registry_add_bidder_with_time() {
+        let listing_key = make_test_record_key(1);
+        let mut registry = BidderRegistry::new(listing_key);
+
+        let bidder = make_test_public_key(1);
+        let bid_record_key = make_test_record_key(10);
+        let time = MockTime::new(5000);
+
+        registry.add_bidder_with_time(bidder.clone(), bid_record_key.clone(), &time);
+
+        assert_eq!(registry.bidders.len(), 1);
+        assert_eq!(registry.bidders[0].bidder, bidder);
+        assert_eq!(registry.bidders[0].bid_record_key, bid_record_key);
+        assert_eq!(registry.bidders[0].timestamp, 5000);
+    }
+
+    #[test]
+    fn test_bidder_registry_no_duplicates() {
+        let listing_key = make_test_record_key(1);
+        let mut registry = BidderRegistry::new(listing_key);
+
+        let bidder = make_test_public_key(1);
+        let bid_record_key1 = make_test_record_key(10);
+        let bid_record_key2 = make_test_record_key(20);
+        let time = MockTime::new(5000);
+
+        // Add bidder first time
+        registry.add_bidder_with_time(bidder.clone(), bid_record_key1.clone(), &time);
+        assert_eq!(registry.bidders.len(), 1);
+        assert_eq!(registry.bidders[0].bid_record_key, bid_record_key1);
+
+        // Try to add same bidder again (different bid_record_key) — should be ignored
+        time.advance(1000);
+        registry.add_bidder_with_time(bidder.clone(), bid_record_key2, &time);
+        assert_eq!(registry.bidders.len(), 1);
+        assert_eq!(registry.bidders[0].bid_record_key, bid_record_key1);
+        assert_eq!(registry.bidders[0].timestamp, 5000); // Unchanged
+    }
+
+    #[test]
+    fn test_bidder_registry_multiple_bidders() {
+        let listing_key = make_test_record_key(1);
+        let mut registry = BidderRegistry::new(listing_key);
+
+        let time = MockTime::new(1000);
+
+        // Add 5 different bidders
+        for i in 1..=5 {
+            let bidder = make_test_public_key(i);
+            let bid_record_key = make_test_record_key(i as u64 * 10);
+            registry.add_bidder_with_time(bidder.clone(), bid_record_key.clone(), &time);
+            time.advance(100);
+        }
+
+        assert_eq!(registry.bidders.len(), 5);
+
+        // Verify each bidder is unique
+        for (idx, i) in (1..=5).enumerate() {
+            assert_eq!(registry.bidders[idx].bidder, make_test_public_key(i));
+            assert_eq!(
+                registry.bidders[idx].bid_record_key,
+                make_test_record_key(i as u64 * 10)
+            );
+            assert_eq!(registry.bidders[idx].timestamp, 1000 + idx as u64 * 100);
+        }
+    }
+
+    #[test]
+    fn test_bidder_entry_roundtrip() {
+        let entry = BidderEntry {
+            bidder: make_test_public_key(5),
+            bid_record_key: make_test_record_key(42),
+            timestamp: 123456,
+        };
+
+        // Verify entry fields
+        assert_eq!(entry.bidder, make_test_public_key(5));
+        assert_eq!(entry.bid_record_key, make_test_record_key(42));
+        assert_eq!(entry.timestamp, 123456);
+    }
+
+    #[test]
+    fn test_bidder_registry_empty_serialization() {
+        let listing_key = make_test_record_key(99);
+        let registry = BidderRegistry::new(listing_key.clone());
+
+        let bytes = registry.to_cbor().expect("Should serialize empty registry");
+        let decoded = BidderRegistry::from_cbor(&bytes).expect("Should deserialize empty registry");
+
+        assert_eq!(decoded.listing_key, listing_key);
+        assert_eq!(decoded.bidders.len(), 0);
+    }
+}
