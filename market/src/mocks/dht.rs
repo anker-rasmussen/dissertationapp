@@ -276,10 +276,31 @@ impl DhtStore for MockDht {
             return Err(MarketError::Dht("MockDht: simulated write failure".into()));
         }
 
+        // Reject writes to nonexistent records
         let mut storage = self.inner.storage.write().await;
-        let record_storage = storage
-            .entry(key_str)
-            .or_insert_with(RecordStorage::default);
+        let record_storage = storage.get_mut(&key_str).ok_or_else(|| {
+            MarketError::Dht(format!("MockDht: record {} does not exist", key_str))
+        })?;
+
+        // Validate subkey bounds
+        if subkey >= crate::config::DHT_SUBKEY_COUNT as u32 {
+            return Err(MarketError::Dht(format!(
+                "MockDht: subkey {} exceeds max {} for record {}",
+                subkey,
+                crate::config::DHT_SUBKEY_COUNT - 1,
+                key_str
+            )));
+        }
+
+        // Validate size limit
+        if value.len() > crate::traits::dht::MAX_DHT_VALUE_SIZE {
+            return Err(MarketError::Dht(format!(
+                "MockDht: value size {} exceeds max {} bytes",
+                value.len(),
+                crate::traits::dht::MAX_DHT_VALUE_SIZE
+            )));
+        }
+
         record_storage.subkeys.insert(subkey, value);
 
         Ok(())
@@ -478,6 +499,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mock_dht_rejects_write_to_nonexistent_record() {
+        let dht = MockDht::new();
+        // Create a record key without actually creating the record
+        let fake_record = MockOwnedRecord {
+            key: make_test_record_key(999),
+        };
+        let result = dht.set_subkey(&fake_record, 0, b"data".to_vec()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_rejects_oversized_value() {
+        let dht = MockDht::new();
+        let record = dht.create_record().await.unwrap();
+        let big_value = vec![0u8; 33 * 1024]; // 33KB > 32KB limit
+        let result = dht.set_subkey(&record, 0, big_value).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_rejects_invalid_subkey() {
+        let dht = MockDht::new();
+        let record = dht.create_record().await.unwrap();
+        // DHT_SUBKEY_COUNT is 4, so subkey 4 is invalid
+        let result = dht.set_subkey(&record, 4, b"data".to_vec()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_shared_mock_dht_independent_records() {
         let handle = SharedDhtHandle::new();
 
@@ -513,5 +563,125 @@ mod tests {
             party1.get_value(&key2).await.unwrap(),
             Some(b"party2 data".to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_delete_nonexistent() {
+        let dht = MockDht::new();
+        let fake_key = make_test_record_key(999);
+
+        // Deleting a nonexistent record should succeed (idempotent)
+        dht.delete_record(&fake_key).await.unwrap();
+        assert!(!dht.has_record(&fake_key).await);
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_watch_and_cancel_nonexistent() {
+        let dht = MockDht::new();
+        let fake_key = make_test_record_key(999);
+
+        // Watch on nonexistent record returns false
+        assert!(!dht.watch_record(&fake_key).await.unwrap());
+
+        // Cancel watch on nonexistent record returns false
+        assert!(!dht.cancel_watch(&fake_key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_get_nonexistent_subkey() {
+        let dht = MockDht::new();
+        let fake_key = make_test_record_key(999);
+
+        // Getting value from nonexistent record returns None
+        let value = dht.get_subkey(&fake_key, 0).await.unwrap();
+        assert!(value.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_fail_mode_on_key() {
+        let dht = MockDht::new();
+        let record = dht.create_record().await.unwrap();
+        let key = MockDht::record_key(&record);
+        let key_str = key.to_string();
+
+        // Set failure mode for specific key
+        dht.set_fail_mode(Some(MockDhtFailure::OnKey(key_str)))
+            .await;
+
+        // Operations on this key should fail
+        assert!(dht.set_value(&record, b"test".to_vec()).await.is_err());
+        assert!(dht.get_value(&key).await.is_err());
+        assert!(dht.watch_record(&key).await.is_err());
+        assert!(dht.cancel_watch(&key).await.is_err());
+        assert!(dht.delete_record(&key).await.is_err());
+
+        // Create a different record
+        let record2 = dht.create_record().await.unwrap();
+        let key2 = MockDht::record_key(&record2);
+
+        // Operations on different key should succeed
+        assert!(dht.set_value(&record2, b"test".to_vec()).await.is_ok());
+        assert!(dht.get_value(&key2).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_fail_mode_writes_only() {
+        let dht = MockDht::new();
+        let record = dht.create_record().await.unwrap();
+        let key = MockDht::record_key(&record);
+
+        // Set value first
+        dht.set_value(&record, b"data".to_vec()).await.unwrap();
+
+        // Enable write-only failure mode
+        dht.set_fail_mode(Some(MockDhtFailure::Writes)).await;
+
+        // Reads should work
+        assert!(dht.get_value(&key).await.is_ok());
+
+        // Writes should fail
+        assert!(dht.set_value(&record, b"new data".to_vec()).await.is_err());
+        assert!(dht.watch_record(&key).await.is_err());
+        assert!(dht.cancel_watch(&key).await.is_err());
+        assert!(dht.delete_record(&key).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_snapshot() {
+        let dht = MockDht::new();
+        let record = dht.create_record().await.unwrap();
+        let key = MockDht::record_key(&record);
+
+        // Write some data
+        dht.set_subkey(&record, 0, b"zero".to_vec()).await.unwrap();
+        dht.set_subkey(&record, 1, b"one".to_vec()).await.unwrap();
+
+        // Get snapshot
+        let snapshot = dht.snapshot().await;
+
+        // Verify snapshot contains expected data
+        let key_str = key.to_string();
+        assert!(snapshot.contains_key(&key_str));
+        let subkeys = &snapshot[&key_str];
+        assert_eq!(subkeys.get(&0), Some(&b"zero".to_vec()));
+        assert_eq!(subkeys.get(&1), Some(&b"one".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_mock_dht_with_node_id() {
+        let node_id = make_test_public_key(42);
+        let dht = MockDht::with_node_id(node_id.clone());
+
+        assert_eq!(dht.node_id(), node_id);
+    }
+
+    #[tokio::test]
+    async fn test_shared_dht_handle_default() {
+        let handle = SharedDhtHandle::default();
+        let party = handle.create_party_view(make_test_public_key(1));
+
+        // Should be able to create records
+        let record = party.create_record().await.unwrap();
+        assert!(party.has_record(&MockDht::record_key(&record)).await);
     }
 }
