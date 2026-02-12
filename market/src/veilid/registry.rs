@@ -63,7 +63,11 @@ impl MarketRegistry {
     }
 
     /// Add a seller, deduplicating by pubkey.
+    /// Caps the registry at 500 sellers to prevent unbounded growth.
     pub fn add_seller(&mut self, entry: SellerEntry) {
+        if self.sellers.len() >= 500 {
+            return; // Cap at 500 sellers
+        }
         if !self
             .sellers
             .iter()
@@ -111,7 +115,11 @@ impl SellerCatalog {
     }
 
     /// Add a listing, deduplicating by key.
+    /// Caps the catalog at 200 listings per seller to prevent unbounded growth.
     pub fn add_listing(&mut self, entry: CatalogEntry) {
+        if self.listings.len() >= 200 {
+            return; // Cap at 200 listings per seller
+        }
         if !self
             .listings
             .iter()
@@ -278,10 +286,13 @@ impl RegistryOperations {
             let (mut registry, old_seq) = match value_data {
                 Some(v) => {
                     let seq = v.seq();
-                    let reg = MarketRegistry::from_cbor(v.data()).map_err(|e| {
-                        MarketError::Serialization(format!("Failed to deserialize registry: {e}"))
-                    })?;
-                    (reg, Some(seq))
+                    match MarketRegistry::from_cbor(v.data()) {
+                        Ok(reg) => (reg, Some(seq)),
+                        Err(e) => {
+                            warn!("Registry data corrupted (seq {}), overwriting: {}", seq, e);
+                            (MarketRegistry::default(), Some(seq))
+                        }
+                    }
                 }
                 None => (MarketRegistry::default(), None),
             };
@@ -542,9 +553,16 @@ impl RegistryOperations {
         let mut all_listings = Vec::new();
 
         for seller in &registry.sellers {
-            let catalog_key = RecordKey::try_from(seller.catalog_key.as_str()).map_err(|e| {
-                MarketError::Dht(format!("Invalid catalog key '{}': {e}", seller.catalog_key))
-            })?;
+            let catalog_key = match RecordKey::try_from(seller.catalog_key.as_str()) {
+                Ok(key) => key,
+                Err(e) => {
+                    warn!(
+                        "Skipping seller '{}': invalid catalog key '{}': {}",
+                        seller.seller_pubkey, seller.catalog_key, e
+                    );
+                    continue;
+                }
+            };
 
             match self.fetch_seller_catalog(&catalog_key).await {
                 Ok(catalog) => {
@@ -709,5 +727,312 @@ mod tests {
         assert_eq!(catalog.listings.len(), 1);
         assert_eq!(catalog.listings[0].listing_key, "active");
         assert_eq!(catalog.version, 1);
+    }
+
+    #[test]
+    fn test_market_registry_max_sellers() {
+        let mut reg = MarketRegistry::default();
+
+        // Add 500 sellers (the cap)
+        for i in 0..500 {
+            reg.add_seller(SellerEntry {
+                seller_pubkey: format!("pk{}", i),
+                catalog_key: format!("ck{}", i),
+                registered_at: i as u64 * 1000,
+            });
+        }
+        assert_eq!(reg.sellers.len(), 500);
+        assert_eq!(reg.version, 500);
+
+        // Try to add 501st seller — should be ignored
+        reg.add_seller(SellerEntry {
+            seller_pubkey: "pk500".to_string(),
+            catalog_key: "ck500".to_string(),
+            registered_at: 500_000,
+        });
+        assert_eq!(reg.sellers.len(), 500);
+        assert_eq!(reg.version, 500); // Version unchanged
+
+        // Verify last seller is still the 499th one (0-indexed)
+        assert_eq!(reg.sellers[499].seller_pubkey, "pk499");
+    }
+
+    #[test]
+    fn test_seller_catalog_max_listings() {
+        let mut catalog = SellerCatalog {
+            seller_pubkey: "seller1".to_string(),
+            listings: Vec::new(),
+            version: 0,
+        };
+
+        // Add 200 listings (the cap)
+        for i in 0..200 {
+            catalog.add_listing(CatalogEntry {
+                listing_key: format!("lk{}", i),
+                title: format!("Item {}", i),
+                reserve_price: i as u64 * 10,
+                auction_end: 99_999 + i as u64,
+            });
+        }
+        assert_eq!(catalog.listings.len(), 200);
+        assert_eq!(catalog.version, 200);
+
+        // Try to add 201st listing — should be ignored
+        catalog.add_listing(CatalogEntry {
+            listing_key: "lk200".to_string(),
+            title: "Item 200".to_string(),
+            reserve_price: 2000,
+            auction_end: 100_199,
+        });
+        assert_eq!(catalog.listings.len(), 200);
+        assert_eq!(catalog.version, 200); // Version unchanged
+
+        // Verify last listing is still the 199th one (0-indexed)
+        assert_eq!(catalog.listings[199].listing_key, "lk199");
+    }
+
+    #[test]
+    fn test_seller_catalog_listing_entries() {
+        let mut catalog = SellerCatalog {
+            seller_pubkey: "seller1".to_string(),
+            listings: Vec::new(),
+            version: 0,
+        };
+
+        let entry1 = CatalogEntry {
+            listing_key: "lk1".to_string(),
+            title: "Vintage Watch".to_string(),
+            reserve_price: 500,
+            auction_end: 10_000,
+        };
+
+        let entry2 = CatalogEntry {
+            listing_key: "lk2".to_string(),
+            title: "Rare Coin".to_string(),
+            reserve_price: 1000,
+            auction_end: 20_000,
+        };
+
+        catalog.add_listing(entry1.clone());
+        catalog.add_listing(entry2.clone());
+
+        assert_eq!(catalog.listings.len(), 2);
+        assert_eq!(catalog.version, 2);
+
+        // Verify first entry
+        assert_eq!(catalog.listings[0].listing_key, "lk1");
+        assert_eq!(catalog.listings[0].title, "Vintage Watch");
+        assert_eq!(catalog.listings[0].reserve_price, 500);
+        assert_eq!(catalog.listings[0].auction_end, 10_000);
+
+        // Verify second entry
+        assert_eq!(catalog.listings[1].listing_key, "lk2");
+        assert_eq!(catalog.listings[1].title, "Rare Coin");
+        assert_eq!(catalog.listings[1].reserve_price, 1000);
+        assert_eq!(catalog.listings[1].auction_end, 20_000);
+
+        // Test full roundtrip
+        let bytes = catalog.to_cbor().unwrap();
+        let decoded = SellerCatalog::from_cbor(&bytes).unwrap();
+
+        assert_eq!(decoded.listings[0].listing_key, entry1.listing_key);
+        assert_eq!(decoded.listings[0].title, entry1.title);
+        assert_eq!(decoded.listings[1].listing_key, entry2.listing_key);
+        assert_eq!(decoded.listings[1].title, entry2.title);
+    }
+
+    #[test]
+    fn test_registry_entry_creation() {
+        let entry = RegistryEntry {
+            key: "listing_key_123".to_string(),
+            title: "Test Item".to_string(),
+            seller: "seller_pk_456".to_string(),
+            reserve_price: 250,
+            auction_end: 15_000,
+        };
+
+        assert_eq!(entry.key, "listing_key_123");
+        assert_eq!(entry.title, "Test Item");
+        assert_eq!(entry.seller, "seller_pk_456");
+        assert_eq!(entry.reserve_price, 250);
+        assert_eq!(entry.auction_end, 15_000);
+    }
+
+    #[test]
+    fn test_market_registry_add_multiple_unique_sellers() {
+        let mut reg = MarketRegistry::default();
+
+        for i in 1..=10 {
+            reg.add_seller(SellerEntry {
+                seller_pubkey: format!("seller_{}", i),
+                catalog_key: format!("catalog_{}", i),
+                registered_at: i as u64 * 100,
+            });
+        }
+
+        assert_eq!(reg.sellers.len(), 10);
+        assert_eq!(reg.version, 10);
+
+        // Verify each seller is distinct
+        for (idx, i) in (1..=10).enumerate() {
+            assert_eq!(reg.sellers[idx].seller_pubkey, format!("seller_{}", i));
+            assert_eq!(reg.sellers[idx].catalog_key, format!("catalog_{}", i));
+            assert_eq!(reg.sellers[idx].registered_at, i as u64 * 100);
+        }
+    }
+
+    #[test]
+    fn test_seller_catalog_empty_cleanup() {
+        use crate::mocks::MockTime;
+
+        let mut catalog = SellerCatalog {
+            seller_pubkey: "s".to_string(),
+            listings: Vec::new(),
+            version: 0,
+        };
+
+        // Cleanup on empty catalog should not change version
+        catalog.cleanup_expired_with_time(&MockTime::new(5000));
+        assert_eq!(catalog.listings.len(), 0);
+        assert_eq!(catalog.version, 0);
+    }
+
+    #[test]
+    fn test_seller_catalog_cleanup_no_expired() {
+        use crate::mocks::MockTime;
+
+        let mut catalog = SellerCatalog {
+            seller_pubkey: "s".to_string(),
+            listings: vec![
+                CatalogEntry {
+                    listing_key: "active1".to_string(),
+                    title: "Item1".to_string(),
+                    reserve_price: 10,
+                    auction_end: 10_000, // Far in the future
+                },
+                CatalogEntry {
+                    listing_key: "active2".to_string(),
+                    title: "Item2".to_string(),
+                    reserve_price: 20,
+                    auction_end: 20_000, // Far in the future
+                },
+            ],
+            version: 0,
+        };
+
+        // Cleanup at time 5000 (all auctions end after this + 1 hour)
+        catalog.cleanup_expired_with_time(&MockTime::new(5000));
+        assert_eq!(catalog.listings.len(), 2);
+        assert_eq!(catalog.version, 0); // Version unchanged
+    }
+
+    #[test]
+    fn test_seller_catalog_cleanup_all_expired() {
+        use crate::mocks::MockTime;
+
+        let mut catalog = SellerCatalog {
+            seller_pubkey: "s".to_string(),
+            listings: vec![
+                CatalogEntry {
+                    listing_key: "expired1".to_string(),
+                    title: "Old1".to_string(),
+                    reserve_price: 10,
+                    auction_end: 100,
+                },
+                CatalogEntry {
+                    listing_key: "expired2".to_string(),
+                    title: "Old2".to_string(),
+                    reserve_price: 20,
+                    auction_end: 200,
+                },
+            ],
+            version: 0,
+        };
+
+        // Cleanup at time 10000 (all auctions ended > 1 hour ago)
+        catalog.cleanup_expired_with_time(&MockTime::new(10_000));
+        assert_eq!(catalog.listings.len(), 0);
+        assert_eq!(catalog.version, 1); // Version bumped
+    }
+
+    #[test]
+    fn test_market_registry_version_increments() {
+        let mut reg = MarketRegistry::default();
+        assert_eq!(reg.version, 0);
+
+        reg.add_seller(SellerEntry {
+            seller_pubkey: "pk1".to_string(),
+            catalog_key: "ck1".to_string(),
+            registered_at: 1000,
+        });
+        assert_eq!(reg.version, 1);
+
+        reg.add_seller(SellerEntry {
+            seller_pubkey: "pk2".to_string(),
+            catalog_key: "ck2".to_string(),
+            registered_at: 2000,
+        });
+        assert_eq!(reg.version, 2);
+
+        // Duplicate — version should not increment
+        reg.add_seller(SellerEntry {
+            seller_pubkey: "pk1".to_string(),
+            catalog_key: "ck1".to_string(),
+            registered_at: 3000,
+        });
+        assert_eq!(reg.version, 2);
+    }
+
+    #[test]
+    fn test_seller_catalog_version_increments() {
+        let mut catalog = SellerCatalog::default();
+        assert_eq!(catalog.version, 0);
+
+        catalog.add_listing(CatalogEntry {
+            listing_key: "lk1".to_string(),
+            title: "Item1".to_string(),
+            reserve_price: 100,
+            auction_end: 5000,
+        });
+        assert_eq!(catalog.version, 1);
+
+        catalog.add_listing(CatalogEntry {
+            listing_key: "lk2".to_string(),
+            title: "Item2".to_string(),
+            reserve_price: 200,
+            auction_end: 6000,
+        });
+        assert_eq!(catalog.version, 2);
+
+        // Duplicate — version should not increment
+        catalog.add_listing(CatalogEntry {
+            listing_key: "lk1".to_string(),
+            title: "Item1".to_string(),
+            reserve_price: 100,
+            auction_end: 5000,
+        });
+        assert_eq!(catalog.version, 2);
+    }
+
+    #[test]
+    fn test_derive_registry_keypair_deterministic() {
+        let network_key = "test-network-key";
+        let keypair1 = derive_registry_keypair(network_key);
+        let keypair2 = derive_registry_keypair(network_key);
+
+        // Same network key should produce same keypair
+        assert_eq!(keypair1.kind(), keypair2.kind());
+        assert_eq!(keypair1.value().key(), keypair2.value().key());
+        assert_eq!(keypair1.value().secret(), keypair2.value().secret());
+    }
+
+    #[test]
+    fn test_derive_registry_keypair_different_networks() {
+        let keypair1 = derive_registry_keypair("network-1");
+        let keypair2 = derive_registry_keypair("network-2");
+
+        // Different network keys should produce different keypairs
+        assert_ne!(keypair1.value().key(), keypair2.value().key());
+        assert_ne!(keypair1.value().secret(), keypair2.value().secret());
     }
 }
