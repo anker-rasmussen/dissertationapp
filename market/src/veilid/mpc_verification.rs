@@ -9,6 +9,7 @@ use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use super::bid_ops::BidOperations;
 use super::mpc_execution::{parse_bidder_mpc_output, parse_seller_mpc_output};
 use super::mpc_orchestrator::MpcOrchestrator;
+use crate::config::subkeys;
 
 /// Named struct replacing the tuple `(PublicKey, u64, Option<bool>)` for pending verifications.
 #[derive(Debug, Clone)]
@@ -119,7 +120,11 @@ impl MpcOrchestrator {
         // 3. Fetch winner's BidRecord from DHT to get stored commitment
         let bid_ops = BidOperations::new(self.dht.clone());
 
-        let registry_data = match self.dht.get_value_at_subkey(listing_key, 2).await {
+        let registry_data = match self
+            .dht
+            .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
+            .await
+        {
             Ok(Some(data)) => data,
             Ok(None) => {
                 warn!("No bid registry found for listing {}", listing_key);
