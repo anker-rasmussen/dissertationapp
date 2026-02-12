@@ -687,8 +687,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
 
         // Create and publish listing to its own DHT record
         let listing_record = seller_dht.create_dht_record().await?;
-        let mut listing =
-            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
+        let listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
@@ -718,7 +717,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
         eprintln!("[E2E] Listing registered in per-seller catalog registry");
 
         // Seller watches listing
-        seller_coordinator.watch_listing(listing.clone()).await;
+        seller_coordinator.watch_listing(listing.to_public()).await;
 
         // Bidder1 discovers listing via the SHARED REGISTRY
         let bidder1_dht = bidder1_node
@@ -772,7 +771,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
 
         // ========== BIDDERS PLACE BIDS ==========
         // In real usage, bidders would send app messages to seller, who records them.
-        // The seller (who owns the listing record) registers bids and increments bid_count.
+        // The seller (who owns the listing record) registers bids.
 
         let bidder1_id = bidder1_node
             .node_id()
@@ -802,14 +801,10 @@ async fn test_e2e_real_devnet_3_party_auction() {
         seller_bid_ops
             .register_bid(&listing_record, seller_bid)
             .await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller placed their own bid (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller placed their own bid");
 
         // Bidder1 creates their own bid record (they own this)
         let bid1_record = bidder1_dht.create_dht_record().await?;
@@ -823,14 +818,10 @@ async fn test_e2e_real_devnet_3_party_auction() {
             bid_key: bid1_record.key.clone(),
         };
         seller_bid_ops.register_bid(&listing_record, bid1).await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller registered bid from Bidder1 (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller registered bid from Bidder1");
 
         // Bidder2 creates their own bid record
         let bidder2_dht = bidder2_node
@@ -848,14 +839,10 @@ async fn test_e2e_real_devnet_3_party_auction() {
             bid_key: bid2_record.key.clone(),
         };
         seller_bid_ops.register_bid(&listing_record, bid2).await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller registered bid from Bidder2 (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller registered bid from Bidder2");
 
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -870,20 +857,15 @@ async fn test_e2e_real_devnet_3_party_auction() {
             "Should have 3 bids registered (seller + 2 bidders)"
         );
 
-        // ========== VERIFY LISTING BID_COUNT FROM ANOTHER NODE ==========
-        // Read back the listing from bidder1's perspective to verify bid_count was saved
+        // ========== VERIFY LISTING IS READABLE FROM ANOTHER NODE ==========
         let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
         let verified_listing = bidder1_listing_ops_verify
             .get_listing(&listing_record.key)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
         eprintln!(
-            "[E2E] Verified listing from bidder1: bid_count={}",
-            verified_listing.bid_count
-        );
-        assert_eq!(
-            verified_listing.bid_count, 3,
-            "Listing bid_count should be 3 after all bids"
+            "[E2E] Verified listing from bidder1: title={}",
+            verified_listing.title
         );
 
         eprintln!("[E2E] Full 3-party auction flow completed with 3 bids!");
@@ -1064,8 +1046,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
 
         // Create and publish listing to its own DHT record
         let listing_record = seller_dht.create_dht_record().await?;
-        let mut listing =
-            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
+        let listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
@@ -1148,14 +1129,10 @@ async fn test_e2e_real_devnet_5_party_auction() {
         seller_bid_ops
             .register_bid(&listing_record, seller_bid)
             .await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller placed their own bid (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller placed their own bid");
 
         // Bidder1 creates their bid
         let bid1_record = bidder1_dht.create_dht_record().await?;
@@ -1169,14 +1146,10 @@ async fn test_e2e_real_devnet_5_party_auction() {
             bid_key: bid1_record.key.clone(),
         };
         seller_bid_ops.register_bid(&listing_record, bid1).await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller registered bid from Bidder1 (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller registered bid from Bidder1");
 
         // Bidder2 creates their bid
         let bidder2_dht = bidder2_node
@@ -1194,14 +1167,10 @@ async fn test_e2e_real_devnet_5_party_auction() {
             bid_key: bid2_record.key.clone(),
         };
         seller_bid_ops.register_bid(&listing_record, bid2).await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller registered bid from Bidder2 (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller registered bid from Bidder2");
 
         // Bidder3 creates their bid
         let bidder3_dht = bidder3_node
@@ -1219,14 +1188,10 @@ async fn test_e2e_real_devnet_5_party_auction() {
             bid_key: bid3_record.key.clone(),
         };
         seller_bid_ops.register_bid(&listing_record, bid3).await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller registered bid from Bidder3 (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller registered bid from Bidder3");
 
         // Bidder4 creates their bid
         let bidder4_dht = bidder4_node
@@ -1244,14 +1209,10 @@ async fn test_e2e_real_devnet_5_party_auction() {
             bid_key: bid4_record.key.clone(),
         };
         seller_bid_ops.register_bid(&listing_record, bid4).await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller registered bid from Bidder4 (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller registered bid from Bidder4");
 
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1266,19 +1227,15 @@ async fn test_e2e_real_devnet_5_party_auction() {
             "Should have 5 bids registered (seller + 4 bidders)"
         );
 
-        // ========== VERIFY LISTING BID_COUNT FROM ANOTHER NODE ==========
+        // ========== VERIFY LISTING IS READABLE FROM ANOTHER NODE ==========
         let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
         let verified_listing = bidder1_listing_ops_verify
             .get_listing(&listing_record.key)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
         eprintln!(
-            "[E2E] Verified listing from bidder1: bid_count={}",
-            verified_listing.bid_count
-        );
-        assert_eq!(
-            verified_listing.bid_count, 5,
-            "Listing bid_count should be 5 after all bids"
+            "[E2E] Verified listing from bidder1: title={}",
+            verified_listing.title
         );
 
         eprintln!("[E2E] Full 5-party auction flow completed with 5 bids!");
@@ -1373,8 +1330,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
 
         // Create and publish listing to its own DHT record
         let listing_record = seller_dht.create_dht_record().await?;
-        let mut listing =
-            create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
+        let listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
 
         // Publish listing to its own DHT record
         use market::veilid::listing_ops::ListingOperations;
@@ -1447,14 +1403,10 @@ async fn test_e2e_real_devnet_10_party_auction() {
         seller_bid_ops
             .register_bid(&listing_record, seller_bid)
             .await?;
-        listing.bid_count += 1;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
-        eprintln!(
-            "[E2E] Seller placed their own bid (bid_count={})",
-            listing.bid_count
-        );
+        eprintln!("[E2E] Seller placed their own bid");
 
         // Each of the 9 bidders places a bid
         for (i, node) in nodes.iter().enumerate().skip(1) {
@@ -1475,14 +1427,10 @@ async fn test_e2e_real_devnet_10_party_auction() {
                 bid_key: bid_record.key.clone(),
             };
             seller_bid_ops.register_bid(&listing_record, bid).await?;
-            listing.bid_count += 1;
             listing_ops
                 .update_listing(&listing_record, &listing)
                 .await?;
-            eprintln!(
-                "[E2E] Seller registered bid from Bidder{} (bid_count={})",
-                i, listing.bid_count
-            );
+            eprintln!("[E2E] Seller registered bid from Bidder{i}");
         }
 
         // Wait for DHT propagation
@@ -1498,19 +1446,15 @@ async fn test_e2e_real_devnet_10_party_auction() {
             "Should have 10 bids registered (seller + 9 bidders)"
         );
 
-        // ========== VERIFY LISTING BID_COUNT FROM ANOTHER NODE ==========
+        // ========== VERIFY LISTING IS READABLE FROM ANOTHER NODE ==========
         let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
         let verified_listing = bidder1_listing_ops_verify
             .get_listing(&listing_record.key)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
         eprintln!(
-            "[E2E] Verified listing from bidder1: bid_count={}",
-            verified_listing.bid_count
-        );
-        assert_eq!(
-            verified_listing.bid_count, 10,
-            "Listing bid_count should be 10 after all bids"
+            "[E2E] Verified listing from bidder1: title={}",
+            verified_listing.title
         );
 
         eprintln!("[E2E] Full 10-party auction flow completed with 10 bids!");
@@ -1997,9 +1941,11 @@ async fn test_e2e_real_bid_flow_with_commitments() {
     let _devnet = setup_e2e_environment().expect("E2E setup failed");
 
     let result = timeout(Duration::from_secs(360), async {
-        let mut seller = E2EParticipant::new(33).await?;
-        let mut bidder1 = E2EParticipant::new(34).await?;
-        let mut bidder2 = E2EParticipant::new(35).await?;
+        // Use unique offsets (16-18) to avoid devnet routing table pollution
+        // from prior tests that used the same ports with different identities
+        let mut seller = E2EParticipant::new(16).await?;
+        let mut bidder1 = E2EParticipant::new(17).await?;
+        let mut bidder2 = E2EParticipant::new(18).await?;
 
         let seller_id = seller.node_id().unwrap();
         let bidder1_id = bidder1.node_id().unwrap();
@@ -2241,9 +2187,10 @@ async fn test_e2e_full_mpc_execution() {
     let _devnet = setup_e2e_environment().expect("E2E setup failed");
 
     let result = timeout(Duration::from_secs(600), async {
-        let mut seller = E2EParticipant::new(33).await?;
-        let mut bidder1 = E2EParticipant::new(34).await?;
-        let mut bidder2 = E2EParticipant::new(35).await?;
+        // Use unique offsets (36-38) to avoid devnet routing table pollution
+        let mut seller = E2EParticipant::new(36).await?;
+        let mut bidder1 = E2EParticipant::new(37).await?;
+        let mut bidder2 = E2EParticipant::new(38).await?;
 
         let seller_id = seller.node_id().unwrap();
         let bidder1_id = bidder1.node_id().unwrap();
@@ -2254,7 +2201,7 @@ async fn test_e2e_full_mpc_execution() {
         // Create listing with auction_end already in the past so monitoring triggers immediately
         let listing_record = seller_dht.create_dht_record().await?;
         let plaintext = "MPC test content: quantum computing blueprint";
-        let mut listing = create_encrypted_listing(
+        let listing = create_encrypted_listing(
             listing_record.key.clone(),
             seller_id.clone(),
             100,
@@ -2365,8 +2312,7 @@ async fn test_e2e_full_mpc_execution() {
         // Write to the pre-created DHT record (not publish_bid which creates a new one)
         bidder2_dht.set_dht_value(&b2_rec, bid2.to_cbor()?).await?;
 
-        // Update listing bid_count
-        listing.bid_count = 3;
+        // Update listing in DHT
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
@@ -2388,8 +2334,8 @@ async fn test_e2e_full_mpc_execution() {
         // All 3 coordinators watch the listing and start monitoring
         // The listing's auction_end is already in the past (MockTime 1000 + 1s = 1001),
         // so the first monitor poll will trigger handle_auction_end_wrapper.
-        bidder1.coordinator.watch_listing(listing.clone()).await;
-        bidder2.coordinator.watch_listing(listing.clone()).await;
+        bidder1.coordinator.watch_listing(listing.to_public()).await;
+        bidder2.coordinator.watch_listing(listing.to_public()).await;
 
         // Start monitoring on all 3 — this spawns background tasks that check deadlines
         seller.coordinator.clone().start_monitoring();
@@ -2496,9 +2442,10 @@ async fn test_e2e_winner_verification_and_decryption() {
     let _devnet = setup_e2e_environment().expect("E2E setup failed");
 
     let result = timeout(Duration::from_secs(600), async {
-        let mut seller = E2EParticipant::new(33).await?;
-        let mut bidder1 = E2EParticipant::new(34).await?;
-        let mut bidder2 = E2EParticipant::new(35).await?;
+        // Use unique offsets (19, 28, 29) to avoid devnet routing table pollution
+        let mut seller = E2EParticipant::new(19).await?;
+        let mut bidder1 = E2EParticipant::new(28).await?;
+        let mut bidder2 = E2EParticipant::new(29).await?;
 
         let seller_id = seller.node_id().unwrap();
         let bidder1_id = bidder1.node_id().unwrap();
@@ -2509,7 +2456,7 @@ async fn test_e2e_winner_verification_and_decryption() {
         // Create listing with REAL encrypted content that we can verify decryption of
         let listing_record = seller_dht.create_dht_record().await?;
         let plaintext_content = "TOP SECRET: Coordinates to buried treasure at 51.5074N, 0.1278W";
-        let mut listing = create_encrypted_listing(
+        let listing = create_encrypted_listing(
             listing_record.key.clone(),
             seller_id.clone(),
             50, // Low reserve so bidders win
@@ -2620,7 +2567,6 @@ async fn test_e2e_winner_verification_and_decryption() {
         // Write to the pre-created DHT record (not publish_bid which creates a new one)
         bidder2_dht.set_dht_value(&b2_rec, bid2.to_cbor()?).await?;
 
-        listing.bid_count = 3;
         listing_ops
             .update_listing(&listing_record, &listing)
             .await?;
@@ -2638,8 +2584,8 @@ async fn test_e2e_winner_verification_and_decryption() {
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         // Watch and start monitoring
-        bidder1.coordinator.watch_listing(listing.clone()).await;
-        bidder2.coordinator.watch_listing(listing.clone()).await;
+        bidder1.coordinator.watch_listing(listing.to_public()).await;
+        bidder2.coordinator.watch_listing(listing.to_public()).await;
 
         seller.coordinator.clone().start_monitoring();
         bidder1.coordinator.clone().start_monitoring();

@@ -14,7 +14,8 @@ use super::dht::{DHTOperations, OwnedDHTRecord};
 use super::listing_ops::ListingOperations;
 use super::mpc_orchestrator::MpcOrchestrator;
 use super::registry::{RegistryEntry, RegistryOperations};
-use crate::marketplace::Listing;
+use crate::config::subkeys;
+use crate::marketplace::PublicListing;
 use crate::traits::DhtStore;
 
 type BidAnnouncementMap = Arc<Mutex<HashMap<String, Vec<(PublicKey, RecordKey)>>>>;
@@ -27,7 +28,7 @@ pub struct AuctionCoordinator {
     /// Per-seller registry operations (shared via Arc<Mutex>)
     registry_ops: Arc<Mutex<RegistryOperations>>,
     /// Listings we're monitoring
-    watched_listings: Arc<Mutex<HashMap<RecordKey, Listing>>>,
+    watched_listings: Arc<Mutex<HashMap<RecordKey, PublicListing>>>,
     /// Listings we own (as seller): Map<listing_key, OwnedDHTRecord>
     owned_listings: Arc<Mutex<HashMap<RecordKey, OwnedDHTRecord>>>,
     /// Collected bid announcements: Map<listing_key, Vec<(bidder, bid_record_key)>>
@@ -193,7 +194,10 @@ impl AuctionCoordinator {
         if let Some(record) = record {
             info!("We own this listing, updating DHT bid registry");
 
-            let current_data = self.dht.get_value_at_subkey(&listing_key, 2).await?;
+            let current_data = self
+                .dht
+                .get_value_at_subkey(&listing_key, subkeys::BID_ANNOUNCEMENTS, true)
+                .await?;
             let mut registry = if let Some(data) = current_data {
                 BidAnnouncementRegistry::from_bytes(&data)?
             } else {
@@ -204,7 +208,9 @@ impl AuctionCoordinator {
             registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
 
             let data = registry.to_bytes()?;
-            self.dht.set_value_at_subkey(&record, 2, data).await?;
+            self.dht
+                .set_value_at_subkey(&record, subkeys::BID_ANNOUNCEMENTS, data)
+                .await?;
 
             info!(
                 "Updated DHT bid registry for listing {}, now has {} announcements",
@@ -373,9 +379,14 @@ impl AuctionCoordinator {
         // Store verification result
         {
             let mut verifications = self.mpc.pending_verifications().lock().await;
-            verifications
-                .entry(listing_key.clone())
-                .and_modify(|state| state.verified = Some(verified));
+            if let Some(state) = verifications.get_mut(&listing_key) {
+                state.verified = Some(verified);
+            } else {
+                warn!(
+                    "No pending verification entry for listing {} — result dropped",
+                    listing_key
+                );
+            }
         }
 
         if verified {
@@ -384,22 +395,23 @@ impl AuctionCoordinator {
                 listing_key
             );
 
-            let listing_ops = ListingOperations::new(self.dht.clone());
-            match listing_ops.get_listing(&listing_key).await {
-                Ok(Some(listing)) => {
+            // The decryption key is stored locally by the seller when they create the listing.
+            // It is never published to the DHT (PublicListing omits it).
+            match self.get_decryption_key(&listing_key).await {
+                Some(dec_key) => {
                     if let Err(e) = self
                         .mpc
-                        .send_decryption_hash(&listing_key, &winner, &listing.decryption_key)
+                        .send_decryption_hash(&listing_key, &winner, &dec_key)
                         .await
                     {
                         error!("Failed to send decryption key to winner: {}", e);
                     }
                 }
-                Ok(None) => {
-                    warn!("Listing not found when trying to send decryption key");
-                }
-                Err(e) => {
-                    error!("Failed to retrieve listing: {}", e);
+                None => {
+                    warn!(
+                        "Decryption key not found locally for listing {}",
+                        listing_key
+                    );
                 }
             }
         } else {
@@ -481,7 +493,7 @@ impl AuctionCoordinator {
     }
 
     /// Watch a listing for deadline (if we're a bidder)
-    pub async fn watch_listing(&self, listing: Listing) {
+    pub async fn watch_listing(&self, listing: PublicListing) {
         let mut watched = self.watched_listings.lock().await;
         watched.insert(listing.key.clone(), listing.clone());
         info!(
@@ -497,11 +509,13 @@ impl AuctionCoordinator {
     pub async fn register_owned_listing(&self, record: OwnedDHTRecord) -> Result<()> {
         let key = record.key.clone();
 
-        // Initialize empty bid registry at subkey 2
+        // Initialize empty bid registry
         let registry = BidAnnouncementRegistry::new();
         let data = registry.to_bytes()?;
 
-        self.dht.set_value_at_subkey(&record, 2, data).await?;
+        self.dht
+            .set_value_at_subkey(&record, subkeys::BID_ANNOUNCEMENTS, data)
+            .await?;
         info!("Initialized bid registry for owned listing: {}", key);
 
         let mut owned = self.owned_listings.lock().await;
@@ -533,7 +547,10 @@ impl AuctionCoordinator {
         if let Some(record) = record {
             info!("We own this listing and bid on it, adding our bid to DHT registry");
 
-            let current_data = self.dht.get_value_at_subkey(listing_key, 2).await?;
+            let current_data = self
+                .dht
+                .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
+                .await?;
             let mut registry = if let Some(data) = current_data {
                 BidAnnouncementRegistry::from_bytes(&data)?
             } else {
@@ -544,7 +561,9 @@ impl AuctionCoordinator {
             registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
 
             let data = registry.to_bytes()?;
-            self.dht.set_value_at_subkey(&record, 2, data).await?;
+            self.dht
+                .set_value_at_subkey(&record, subkeys::BID_ANNOUNCEMENTS, data)
+                .await?;
 
             info!(
                 "Added our own bid to DHT registry for listing {}, now has {} announcements",
@@ -581,7 +600,11 @@ impl AuctionCoordinator {
     /// falling back to local announcements if the DHT read fails.
     pub async fn get_bid_count(&self, listing_key: &RecordKey) -> usize {
         // Try DHT bid registry first (authoritative source written by seller)
-        if let Ok(Some(data)) = self.dht.get_value_at_subkey(listing_key, 2).await {
+        if let Ok(Some(data)) = self
+            .dht
+            .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
+            .await
+        {
             if let Ok(registry) = BidAnnouncementRegistry::from_bytes(&data) {
                 return registry.announcements.len();
             }
@@ -600,6 +623,14 @@ impl AuctionCoordinator {
         keys.get(&key).cloned()
     }
 
+    /// Store a decryption key locally (e.g. seller stores it at listing creation time).
+    /// This is necessary because the DHT only stores `PublicListing` (no decryption key).
+    pub async fn store_decryption_key(&self, listing_key: &RecordKey, decryption_key: String) {
+        let key = listing_key.to_string();
+        let mut keys = self.decryption_keys.lock().await;
+        keys.insert(key, decryption_key);
+    }
+
     /// Fetch a listing and decrypt its content if we have the decryption key
     pub async fn fetch_and_decrypt_listing(&self, listing_key: &RecordKey) -> Result<String> {
         let listing_data = self
@@ -609,7 +640,7 @@ impl AuctionCoordinator {
             .map_err(|e| anyhow::anyhow!("Failed to fetch listing: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("Listing not found"))?;
 
-        let listing = Listing::from_cbor(&listing_data)
+        let listing = PublicListing::from_cbor(&listing_data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize listing: {e}"))?;
 
         let decryption_key = self.get_decryption_key(listing_key).await.ok_or_else(|| {
@@ -795,7 +826,7 @@ impl AuctionCoordinator {
     async fn handle_auction_end_wrapper(
         &self,
         listing_key: &RecordKey,
-        listing: &Listing,
+        listing: &PublicListing,
     ) -> Result<()> {
         // Check if we have a bid for this listing
         if !self.mpc.bid_storage().has_bid(listing_key).await {

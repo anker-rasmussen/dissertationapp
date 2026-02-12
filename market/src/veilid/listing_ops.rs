@@ -2,7 +2,7 @@ use tracing::info;
 use veilid_core::RecordKey;
 
 use crate::error::{MarketError, MarketResult};
-use crate::marketplace::Listing;
+use crate::marketplace::{Listing, PublicListing};
 use crate::traits::DhtStore;
 
 /// DHT operations specialized for marketplace listings.
@@ -22,8 +22,9 @@ impl<D: DhtStore> ListingOperations<D> {
         // Create a new DHT record
         let record = self.dht.create_record().await?;
 
-        // Serialize the listing to CBOR
+        // Serialize the public listing (without decryption key) to CBOR
         let listing_data = listing
+            .to_public()
             .to_cbor()
             .map_err(|e| MarketError::Serialization(format!("Failed to serialize listing: {e}")))?;
 
@@ -45,8 +46,9 @@ impl<D: DhtStore> ListingOperations<D> {
         record: &D::OwnedRecord,
         listing: &Listing,
     ) -> MarketResult<()> {
-        // Serialize the listing to CBOR
+        // Serialize the public listing (without decryption key) to CBOR
         let listing_data = listing
+            .to_public()
             .to_cbor()
             .map_err(|e| MarketError::Serialization(format!("Failed to serialize listing: {e}")))?;
 
@@ -58,15 +60,17 @@ impl<D: DhtStore> ListingOperations<D> {
         Ok(())
     }
 
-    /// Retrieve a listing from the DHT by its record key
-    pub async fn get_listing(&self, key: &RecordKey) -> MarketResult<Option<Listing>> {
+    /// Retrieve a listing from the DHT by its record key.
+    /// Returns a `PublicListing` (without decryption key) because the DHT
+    /// never stores the seller's private decryption key.
+    pub async fn get_listing(&self, key: &RecordKey) -> MarketResult<Option<PublicListing>> {
         // Get the value from the DHT
         let data = self.dht.get_value(key).await?;
 
         match data {
             Some(cbor_data) => {
                 // Deserialize from CBOR
-                let listing = Listing::from_cbor(&cbor_data).map_err(|e| {
+                let listing = PublicListing::from_cbor(&cbor_data).map_err(|e| {
                     MarketError::Serialization(format!(
                         "Failed to deserialize listing from DHT: {e}"
                     ))
@@ -100,6 +104,7 @@ impl<D: DhtStore> ListingOperations<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::marketplace::ListingStatus;
     use crate::mocks::{make_test_public_key, make_test_record_key, MockDht, MockTime};
 
     fn make_test_listing(time: &MockTime) -> Listing {
@@ -166,13 +171,13 @@ mod tests {
         let record = ops.publish_listing(&listing).await.unwrap();
         let key = MockDht::record_key(&record);
 
-        // Update the listing
-        listing.bid_count = 5;
+        // Update the listing status
+        listing.status = ListingStatus::Closed;
         ops.update_listing(&record, &listing).await.unwrap();
 
         // Verify the update
         let retrieved = ops.get_listing(&key).await.unwrap().unwrap();
-        assert_eq!(retrieved.bid_count, 5);
+        assert_eq!(retrieved.status, ListingStatus::Closed);
     }
 
     #[tokio::test]

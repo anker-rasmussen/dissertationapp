@@ -2,7 +2,7 @@
 
 use market::{
     encrypt_content, generate_key, Bid, BidOperations, BidRecord, CatalogEntry, DHTOperations,
-    DhtStore, Listing, ListingOperations,
+    DhtStore, Listing, ListingOperations, PublicListing,
 };
 use tracing::{info, warn};
 use veilid_core::RecordKey;
@@ -26,8 +26,12 @@ pub async fn create_and_publish_listing(
     duration_str: &str,
 ) -> anyhow::Result<CreateListingResult> {
     // Parse inputs
-    let reserve_price: u64 = reserve_price_str.parse().unwrap_or(10);
-    let duration: u64 = duration_str.parse().unwrap_or(360);
+    let reserve_price: u64 = reserve_price_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid reserve price '{}': {}", reserve_price_str, e))?;
+    let duration: u64 = duration_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid duration '{}': {}", duration_str, e))?;
 
     // Generate encryption key and encrypt content
     let key = generate_key();
@@ -62,6 +66,12 @@ pub async fn create_and_publish_listing(
 
     // Register with auction coordinator and per-seller catalog
     if let Some(coordinator) = state.coordinator() {
+        // Store decryption key locally so the seller can send it to the winner later.
+        // The DHT only stores PublicListing (no decryption key).
+        coordinator
+            .store_decryption_key(&record.key, listing.decryption_key.clone())
+            .await;
+
         // Ensure the master registry exists (creates on first listing)
         let _registry_key = coordinator
             .ensure_master_registry()
@@ -140,7 +150,7 @@ pub async fn create_and_publish_listing(
 }
 
 /// Fetch a listing from DHT by key string.
-pub async fn fetch_listing(dht: &DHTOperations, key_str: &str) -> anyhow::Result<Listing> {
+pub async fn fetch_listing(dht: &DHTOperations, key_str: &str) -> anyhow::Result<PublicListing> {
     let key = RecordKey::try_from(key_str)?;
     let listing_ops = ListingOperations::new(dht.clone());
 
