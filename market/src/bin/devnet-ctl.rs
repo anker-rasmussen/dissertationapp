@@ -113,8 +113,7 @@ fn stop_devnet() -> Result<(), String> {
 
     // Clean up local node data directories
     eprintln!("[devnet-ctl] Cleaning up local node data...");
-    if let Some(home) = dirs::home_dir() {
-        let data_dir = home.join(".local/share");
+    if let Some(data_dir) = dirs::data_local_dir() {
         if data_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&data_dir) {
                 for entry in entries.flatten() {

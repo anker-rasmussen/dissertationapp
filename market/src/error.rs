@@ -28,9 +28,61 @@ pub enum MarketError {
     #[error("Process execution failed: {0}")]
     Process(String),
 
+    #[error("Validation failed: {0}")]
+    Validation(String),
+
+    #[error("Operation timed out: {0}")]
+    Timeout(String),
+
+    #[error("Transport error: {0}")]
+    Transport(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
+impl From<bincode::Error> for MarketError {
+    fn from(e: bincode::Error) -> Self {
+        Self::Serialization(format!("Bincode error: {e}"))
+    }
+}
+
 /// Convenience type alias.
 pub type MarketResult<T> = Result<T, MarketError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_display_dht_error() {
+        let err = MarketError::Dht("Failed to write record".to_string());
+        let display = format!("{}", err);
+        assert_eq!(display, "DHT operation failed: Failed to write record");
+    }
+
+    #[test]
+    fn test_display_validation_error() {
+        let err = MarketError::Validation("Invalid bid amount".to_string());
+        let display = format!("{}", err);
+        assert_eq!(display, "Validation failed: Invalid bid amount");
+    }
+
+    #[test]
+    fn test_from_bincode_error() {
+        // Create a bincode error by attempting to deserialize invalid data
+        let invalid_data = vec![0xFF, 0xFF, 0xFF];
+        let bincode_err = bincode::deserialize::<u64>(&invalid_data).unwrap_err();
+
+        // Convert to MarketError
+        let market_err: MarketError = bincode_err.into();
+
+        // Verify it's a Serialization error
+        match market_err {
+            MarketError::Serialization(msg) => {
+                assert!(msg.contains("Bincode error:"));
+            }
+            _ => panic!("Expected Serialization variant"),
+        }
+    }
+}
