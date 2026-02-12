@@ -5,6 +5,9 @@ use veilid_core::RecordKey;
 
 use crate::error::MarketResult;
 
+/// Maximum size for a single DHT value (32KB, matching Veilid's limit).
+pub const MAX_DHT_VALUE_SIZE: usize = 32 * 1024;
+
 /// Abstraction over DHT storage operations.
 ///
 /// This trait enables testing of DHT-dependent code without requiring

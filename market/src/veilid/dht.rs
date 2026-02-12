@@ -105,6 +105,15 @@ impl DHTOperations {
     /// Set a value in a DHT record (requires write access via owner keypair)
     /// For simple records, use subkey 0
     pub async fn set_dht_value(&self, record: &OwnedDHTRecord, value: Vec<u8>) -> MarketResult<()> {
+        const MAX_DHT_VALUE_SIZE: usize = 32 * 1024; // 32KB Veilid limit
+        if value.len() > MAX_DHT_VALUE_SIZE {
+            return Err(MarketError::Dht(format!(
+                "DHT value size {} exceeds maximum {} bytes",
+                value.len(),
+                MAX_DHT_VALUE_SIZE
+            )));
+        }
+
         let routing_context = self.get_routing_context()?;
 
         // Open the record with owner keypair for write access
@@ -138,7 +147,7 @@ impl DHTOperations {
     /// For simple records, use subkey 0
     /// Returns None if the value hasn't been set yet
     pub async fn get_dht_value(&self, key: &RecordKey) -> MarketResult<Option<Vec<u8>>> {
-        self.get_value_at_subkey(key, 0).await
+        self.get_value_at_subkey(key, 0, true).await
     }
 
     /// Set a value at a specific subkey (requires write access)
@@ -148,6 +157,15 @@ impl DHTOperations {
         subkey: u32,
         value: Vec<u8>,
     ) -> MarketResult<()> {
+        const MAX_DHT_VALUE_SIZE: usize = 32 * 1024; // 32KB Veilid limit
+        if value.len() > MAX_DHT_VALUE_SIZE {
+            return Err(MarketError::Dht(format!(
+                "DHT value size {} exceeds maximum {} bytes",
+                value.len(),
+                MAX_DHT_VALUE_SIZE
+            )));
+        }
+
         let routing_context = self.get_routing_context()?;
 
         // Open the record with owner keypair for write access
@@ -182,10 +200,12 @@ impl DHTOperations {
 
     /// Get a value from a specific subkey
     /// Returns None if the value hasn't been set yet
+    /// When force_refresh is true, fetches the latest value from the network
     pub async fn get_value_at_subkey(
         &self,
         key: &RecordKey,
         subkey: u32,
+        force_refresh: bool,
     ) -> MarketResult<Option<Vec<u8>>> {
         let routing_context = self.get_routing_context()?;
 
@@ -196,9 +216,8 @@ impl DHTOperations {
             .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for reading: {e}")))?;
 
         // Get the value at specified subkey
-        // force_refresh=true ensures we get the latest value from the network
         let value_data = routing_context
-            .get_dht_value(key.clone(), subkey, true)
+            .get_dht_value(key.clone(), subkey, force_refresh)
             .await
             .map_err(|e| {
                 MarketError::Dht(format!("Failed to get DHT value from subkey {subkey}: {e}"))
@@ -260,8 +279,8 @@ impl DHTOperations {
                 MarketError::Dht(format!("Failed to open DHT record for watching: {e}"))
             })?;
 
-        // Watch subkey 0 only (single value record)
-        let subkeys = Some(ValueSubkeyRangeSet::single(0));
+        // Watch all subkeys (primary data, bid index, coordination, bidder registry)
+        let subkeys = Some(ValueSubkeyRangeSet::full());
         let expiration = None; // No expiration
         let count = None; // No watch limit
 
@@ -283,8 +302,8 @@ impl DHTOperations {
     pub async fn cancel_dht_watch(&self, key: &RecordKey) -> MarketResult<bool> {
         let routing_context = self.get_routing_context()?;
 
-        // Cancel watch on subkey 0
-        let subkeys = Some(ValueSubkeyRangeSet::single(0));
+        // Cancel watch on all subkeys
+        let subkeys = Some(ValueSubkeyRangeSet::full());
 
         let cancel_result = routing_context
             .cancel_dht_watch(key.clone(), subkeys)
@@ -323,7 +342,7 @@ impl DhtStore for DHTOperations {
     }
 
     async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> MarketResult<Option<Vec<u8>>> {
-        self.get_value_at_subkey(key, subkey).await
+        self.get_value_at_subkey(key, subkey, true).await
     }
 
     async fn set_subkey(
@@ -348,15 +367,5 @@ impl DhtStore for DHTOperations {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    // Note: These tests require a running Veilid node, so they're integration tests
-    // They should be run with: cargo test --test integration_tests
-
-    #[tokio::test]
-    #[ignore] // Requires running Veilid node
-    async fn test_create_and_retrieve() {
-        // This test would need a VeilidAPI instance
-        // See integration tests for actual implementation
-    }
-}
+// Note: DHTOperations tests require a running Veilid node.
+// See tests/integration/ for mock-based auction flow tests.
