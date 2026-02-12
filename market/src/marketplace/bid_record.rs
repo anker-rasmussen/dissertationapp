@@ -91,7 +91,7 @@ impl BidIndex {
         bids_sorted.sort_by(|a, b| {
             a.timestamp
                 .cmp(&b.timestamp)
-                .then_with(|| a.bidder.to_string().cmp(&b.bidder.to_string()))
+                .then_with(|| a.bidder.cmp(&b.bidder))
         });
         bids_sorted.into_iter().map(|b| b.bidder.clone()).collect()
     }
