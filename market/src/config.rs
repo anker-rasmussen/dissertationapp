@@ -56,3 +56,55 @@ pub fn now_unix() -> u64 {
         .expect("System clock is before Unix epoch")
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_now_unix_reasonable() {
+        let now = now_unix();
+        // Verify timestamp is reasonable (after 2023-11-01)
+        // 1700000000 = 2023-11-14 22:13:20 UTC
+        assert!(now > 1700000000, "Timestamp should be after 2023");
+        // Verify it's not too far in the future (before 2030)
+        // 1900000000 = 2030-03-15 01:06:40 UTC
+        assert!(now < 1900000000, "Timestamp should be before 2030");
+    }
+
+    #[test]
+    fn test_network_key_default() {
+        // Ensure env var is not set for this test
+        std::env::remove_var(MARKET_NETWORK_KEY_ENV);
+
+        let key = network_key();
+        assert_eq!(key, DEFAULT_NETWORK_KEY);
+    }
+
+    #[test]
+    fn test_network_key_from_env() {
+        // Set env var
+        std::env::set_var(MARKET_NETWORK_KEY_ENV, "custom-network");
+
+        let key = network_key();
+        assert_eq!(key, "custom-network");
+
+        // Clean up
+        std::env::remove_var(MARKET_NETWORK_KEY_ENV);
+    }
+
+    #[test]
+    fn test_subkey_constants() {
+        // Verify the expected subkey values
+        assert_eq!(subkeys::LISTING, 0);
+        assert_eq!(subkeys::BID_INDEX, 1);
+        assert_eq!(subkeys::BID_ANNOUNCEMENTS, 2);
+        assert_eq!(subkeys::BIDDER_REGISTRY, 3);
+    }
+
+    #[test]
+    fn test_dht_subkey_count() {
+        // Verify subkey count matches the number of defined subkeys
+        assert_eq!(DHT_SUBKEY_COUNT, 4);
+    }
+}
