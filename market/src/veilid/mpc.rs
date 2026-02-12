@@ -8,6 +8,19 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use veilid_core::{RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target, VeilidAPI};
 
+/// Calculate the base port for a given node offset.
+/// Formula: `5000 + (node_offset * 10)`
+const fn base_port_for_offset(node_offset: u16) -> u16 {
+    5000 + (node_offset * 10)
+}
+
+/// Calculate the port for a specific party relative to a base port.
+/// Formula: `base_port + party_id`
+#[allow(clippy::cast_possible_truncation)] // party count fits in u16
+const fn party_port(base_port: u16, party_id: usize) -> u16 {
+    base_port + party_id as u16
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 enum MpcMessage {
     Open {
@@ -52,7 +65,7 @@ impl MpcTunnelProxy {
         // Node 5: base 5050
         // Node 6: base 5060
         // Node 7: base 5070
-        let base_port = 5000 + (node_offset * 10);
+        let base_port = base_port_for_offset(node_offset);
 
         info!(
             "MPC TunnelProxy for Party {}: using base port {} (node offset {})",
@@ -80,8 +93,7 @@ impl MpcTunnelProxy {
                 continue;
             }
 
-            #[allow(clippy::cast_possible_truncation)] // party count fits in u16
-            let listen_port = self.inner.base_port + (pid as u16);
+            let listen_port = party_port(self.inner.base_port, pid);
             let proxy = self.clone();
             let route_id = route_id.clone();
 
@@ -237,8 +249,7 @@ impl MpcTunnelProxy {
                 // I (Sidecar 0) receive OPEN.
                 // I should connect to `localhost:5000` (my MP-SPDZ).
 
-                #[allow(clippy::cast_possible_truncation)] // party count fits in u16
-                let local_target_port = self.inner.base_port + (self.inner.party_id as u16);
+                let local_target_port = party_port(self.inner.base_port, self.inner.party_id);
                 let addr = format!("127.0.0.1:{local_target_port}");
 
                 match TcpStream::connect(&addr).await {
@@ -362,5 +373,114 @@ impl MpcTunnelProxy {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mpc_message_open_roundtrip() {
+        let msg = MpcMessage::Open { source_party_id: 5 };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: MpcMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            MpcMessage::Open { source_party_id } => assert_eq!(source_party_id, 5),
+            other => panic!("Expected Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mpc_message_data_roundtrip() {
+        let payload = vec![1, 2, 3, 4, 5];
+        let msg = MpcMessage::Data {
+            source_party_id: 2,
+            payload: payload.clone(),
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: MpcMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            MpcMessage::Data {
+                source_party_id,
+                payload: decoded_payload,
+            } => {
+                assert_eq!(source_party_id, 2);
+                assert_eq!(decoded_payload, payload);
+            }
+            other => panic!("Expected Data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mpc_message_close_roundtrip() {
+        let msg = MpcMessage::Close { source_party_id: 0 };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: MpcMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            MpcMessage::Close { source_party_id } => assert_eq!(source_party_id, 0),
+            other => panic!("Expected Close, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mpc_message_data_large_payload() {
+        let payload = vec![0xAB; 32 * 1024]; // 32KB (Veilid max)
+        let msg = MpcMessage::Data {
+            source_party_id: 1,
+            payload: payload.clone(),
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: MpcMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            MpcMessage::Data {
+                payload: decoded_payload,
+                ..
+            } => {
+                assert_eq!(decoded_payload.len(), 32 * 1024);
+                assert_eq!(decoded_payload, payload);
+            }
+            other => panic!("Expected Data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mpc_message_data_empty_payload() {
+        let msg = MpcMessage::Data {
+            source_party_id: 3,
+            payload: vec![],
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let decoded: MpcMessage = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            MpcMessage::Data {
+                source_party_id,
+                payload,
+            } => {
+                assert_eq!(source_party_id, 3);
+                assert!(payload.is_empty());
+            }
+            other => panic!("Expected Data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_base_port_calculation() {
+        assert_eq!(base_port_for_offset(5), 5050);
+        assert_eq!(base_port_for_offset(6), 5060);
+        assert_eq!(base_port_for_offset(7), 5070);
+        assert_eq!(base_port_for_offset(0), 5000);
+    }
+
+    #[test]
+    fn test_listen_port_calculation() {
+        let base = base_port_for_offset(5); // 5050
+        assert_eq!(party_port(base, 0), 5050);
+        assert_eq!(party_port(base, 1), 5051);
+        assert_eq!(party_port(base, 2), 5052);
+
+        let base = base_port_for_offset(7); // 5070
+        assert_eq!(party_port(base, 0), 5070);
+        assert_eq!(party_port(base, 3), 5073);
     }
 }

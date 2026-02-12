@@ -11,6 +11,18 @@ use super::mpc_execution::{parse_bidder_mpc_output, parse_seller_mpc_output};
 use super::mpc_orchestrator::MpcOrchestrator;
 use crate::config::subkeys;
 
+/// Verify a bid commitment against the revealed bid value and nonce.
+///
+/// Computes `SHA256(bid_value_le_bytes || nonce)` and compares with the stored commitment.
+/// This is the core commitment verification used in the Danish Sugar Beet auction protocol.
+pub fn verify_commitment(bid_value: u64, nonce: &[u8; 32], stored_commitment: &[u8; 32]) -> bool {
+    let mut hasher = Sha256::new();
+    hasher.update(bid_value.to_le_bytes());
+    hasher.update(nonce);
+    let computed: [u8; 32] = hasher.finalize().into();
+    computed == *stored_commitment
+}
+
 /// Named struct replacing the tuple `(PublicKey, u64, Option<bool>)` for pending verifications.
 #[derive(Debug, Clone)]
 pub struct VerificationState {
@@ -165,14 +177,8 @@ impl MpcOrchestrator {
             }
         };
 
-        // 4. Compute commitment: SHA256(bid_value || nonce)
-        let mut hasher = Sha256::new();
-        hasher.update(bid_value.to_le_bytes());
-        hasher.update(nonce);
-        let computed_commitment: [u8; 32] = hasher.finalize().into();
-
-        // 5. Compare with stored commitment
-        if computed_commitment != bid_record.commitment {
+        // 4. Verify commitment: SHA256(bid_value || nonce) == stored
+        if !verify_commitment(bid_value, nonce, &bid_record.commitment) {
             warn!("Commitment mismatch for winner {}", winner);
             return false;
         }
@@ -303,5 +309,65 @@ impl MpcOrchestrator {
                 Err(anyhow::anyhow!("Failed to send decryption hash: {e}"))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_commitment(bid_value: u64, nonce: &[u8; 32]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(bid_value.to_le_bytes());
+        hasher.update(nonce);
+        hasher.finalize().into()
+    }
+
+    #[test]
+    fn test_verify_commitment_valid() {
+        let nonce = [42u8; 32];
+        let bid_value = 100u64;
+        let commitment = make_commitment(bid_value, &nonce);
+        assert!(verify_commitment(bid_value, &nonce, &commitment));
+    }
+
+    #[test]
+    fn test_verify_commitment_wrong_bid_value() {
+        let nonce = [42u8; 32];
+        let commitment = make_commitment(100, &nonce);
+        assert!(!verify_commitment(200, &nonce, &commitment));
+    }
+
+    #[test]
+    fn test_verify_commitment_wrong_nonce() {
+        let nonce = [42u8; 32];
+        let wrong_nonce = [99u8; 32];
+        let commitment = make_commitment(100, &nonce);
+        assert!(!verify_commitment(100, &wrong_nonce, &commitment));
+    }
+
+    #[test]
+    fn test_verify_commitment_zero_bid() {
+        let nonce = [1u8; 32];
+        let commitment = make_commitment(0, &nonce);
+        assert!(verify_commitment(0, &nonce, &commitment));
+    }
+
+    #[test]
+    fn test_verify_commitment_max_bid() {
+        let nonce = [255u8; 32];
+        let commitment = make_commitment(u64::MAX, &nonce);
+        assert!(verify_commitment(u64::MAX, &nonce, &commitment));
+    }
+
+    #[test]
+    fn test_commitment_deterministic() {
+        let nonce = [7u8; 32];
+        let bid_value = 500u64;
+        let commitment1 = make_commitment(bid_value, &nonce);
+        let commitment2 = make_commitment(bid_value, &nonce);
+        assert_eq!(commitment1, commitment2);
+        assert!(verify_commitment(bid_value, &nonce, &commitment1));
+        assert!(verify_commitment(bid_value, &nonce, &commitment2));
     }
 }

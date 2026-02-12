@@ -60,6 +60,11 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate the `MARKET_NETWORK_KEY` env var
+    /// to avoid race conditions from parallel test execution.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_now_unix_reasonable() {
@@ -74,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_network_key_default() {
-        // Ensure env var is not set for this test
+        let _guard = ENV_MUTEX.lock().unwrap();
         std::env::remove_var(MARKET_NETWORK_KEY_ENV);
 
         let key = network_key();
@@ -83,7 +88,7 @@ mod tests {
 
     #[test]
     fn test_network_key_from_env() {
-        // Set env var
+        let _guard = ENV_MUTEX.lock().unwrap();
         std::env::set_var(MARKET_NETWORK_KEY_ENV, "custom-network");
 
         let key = network_key();
