@@ -14,7 +14,7 @@ use veilid_core::{PublicKey, RouteBlob, RouteId};
 pub struct RecordedMessage {
     pub target: TransportTarget,
     pub data: Vec<u8>,
-    pub timestamp: u64,
+    pub sequence_number: u64,
 }
 
 /// Mock transport for testing message sending.
@@ -122,11 +122,11 @@ impl MessageTransport for MockTransport {
             return Err(anyhow!("MockTransport: simulated send failure"));
         }
 
-        let timestamp = self.message_counter.fetch_add(1, Ordering::SeqCst);
+        let sequence_number = self.message_counter.fetch_add(1, Ordering::SeqCst);
         self.sent_messages.write().await.push(RecordedMessage {
             target,
             data: message,
-            timestamp,
+            sequence_number,
         });
 
         Ok(())
@@ -224,5 +224,138 @@ mod tests {
 
         let messages = transport.get_messages_to_nodes().await;
         assert_eq!(messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_import_route() {
+        let transport = MockTransport::new();
+
+        // Create a route blob
+        let (_route_id, blob) = transport.create_private_route().await.unwrap();
+
+        // Import the route
+        let imported_route_id = transport.import_remote_route(blob.clone()).unwrap();
+
+        // The imported route ID should match the blob's route ID
+        assert_eq!(imported_route_id, blob.route_id);
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_get_peers() {
+        use crate::mocks::make_test_public_key;
+
+        let transport = MockTransport::new();
+
+        // Initially no peers
+        let peers = transport.get_peers().await.unwrap();
+        assert!(peers.is_empty());
+
+        // Add some peers
+        let peer1 = make_test_public_key(1);
+        let peer2 = make_test_public_key(2);
+        let peer3 = make_test_public_key(3);
+
+        transport.add_peer(peer1.clone()).await;
+        transport.add_peer(peer2.clone()).await;
+        transport.add_peer(peer3.clone()).await;
+
+        // Get peers
+        let peers = transport.get_peers().await.unwrap();
+        assert_eq!(peers.len(), 3);
+        assert!(peers.contains(&peer1));
+        assert!(peers.contains(&peer2));
+        assert!(peers.contains(&peer3));
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_clear_messages() {
+        let transport = MockTransport::new();
+        let route_id = MockTransport::make_route_id(1);
+
+        transport
+            .send(TransportTarget::Route(route_id.clone()), b"msg1".to_vec())
+            .await
+            .unwrap();
+        transport
+            .send(TransportTarget::Route(route_id), b"msg2".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(transport.message_count().await, 2);
+
+        transport.clear_messages().await;
+
+        assert_eq!(transport.message_count().await, 0);
+        assert!(transport.get_sent_messages().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_default() {
+        let transport = MockTransport::default();
+
+        let route_id = MockTransport::make_route_id(1);
+        transport
+            .send(TransportTarget::Route(route_id), b"test".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(transport.message_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_get_messages_to_routes() {
+        use crate::mocks::make_test_public_key;
+
+        let transport = MockTransport::new();
+        let route_id = MockTransport::make_route_id(1);
+        let node_id = make_test_public_key(1);
+
+        // Send message to route
+        transport
+            .send(TransportTarget::Route(route_id), b"route_msg".to_vec())
+            .await
+            .unwrap();
+
+        // Send message to node
+        transport
+            .send(TransportTarget::Node(node_id), b"node_msg".to_vec())
+            .await
+            .unwrap();
+
+        // Get messages to routes
+        let route_messages = transport.get_messages_to_routes().await;
+        assert_eq!(route_messages.len(), 1);
+        assert_eq!(route_messages[0].data, b"route_msg".to_vec());
+
+        // Get messages to nodes
+        let node_messages = transport.get_messages_to_nodes().await;
+        assert_eq!(node_messages.len(), 1);
+        assert_eq!(node_messages[0].data, b"node_msg".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_sequence_numbers() {
+        let transport = MockTransport::new();
+        let route_id = MockTransport::make_route_id(1);
+
+        transport
+            .send(TransportTarget::Route(route_id.clone()), b"msg1".to_vec())
+            .await
+            .unwrap();
+        transport
+            .send(TransportTarget::Route(route_id.clone()), b"msg2".to_vec())
+            .await
+            .unwrap();
+        transport
+            .send(TransportTarget::Route(route_id), b"msg3".to_vec())
+            .await
+            .unwrap();
+
+        let messages = transport.get_sent_messages().await;
+
+        // Verify sequence numbers are incrementing
+        assert_eq!(messages[0].sequence_number, 0);
+        assert_eq!(messages[1].sequence_number, 1);
+        assert_eq!(messages[2].sequence_number, 2);
     }
 }

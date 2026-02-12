@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_random_clone_independent() {
+    fn test_mock_random_clone_shares_state() {
         let rng1 = MockRandom::new(42);
         let _ = rng1.random_bytes_32(); // Advance counter
 
@@ -133,5 +133,71 @@ mod tests {
             a, b,
             "Clone shares counter, so values differ after first call"
         );
+    }
+
+    #[test]
+    fn test_mock_random_fill_empty() {
+        let rng = MockRandom::new(42);
+
+        let mut buf = [];
+        rng.fill_bytes(&mut buf);
+
+        // Should handle empty slice without panic
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn test_mock_random_new_with_seed() {
+        let seed = 0xABCDEF1234567890;
+        let rng = MockRandom::new(seed);
+
+        // Verify the seed is used
+        let a = rng.random_bytes_32();
+
+        // Create another with different seed
+        let rng2 = MockRandom::new(seed + 1);
+        let b = rng2.random_bytes_32();
+
+        assert_ne!(a, b, "Different seeds should produce different values");
+    }
+
+    #[test]
+    fn test_mock_random_counter_accessor() {
+        let rng = MockRandom::new(42);
+
+        assert_eq!(rng.counter(), 0);
+
+        let _ = rng.random_bytes_32();
+        // 32 bytes = 4 counter increments (8 bytes each)
+        assert_eq!(rng.counter(), 4);
+
+        rng.reset();
+        assert_eq!(rng.counter(), 0);
+    }
+
+    #[test]
+    fn test_mock_random_fill_large_buffer() {
+        let rng = MockRandom::new(42);
+
+        let mut buf = [0u8; 100];
+        rng.fill_bytes(&mut buf);
+
+        // Verify all bytes were filled
+        assert!(buf.iter().any(|&b| b != 0), "Should have non-zero bytes");
+
+        // Verify counter advanced appropriately (100 bytes = 13 increments, ceil(100/8))
+        assert!(rng.counter() >= 12);
+    }
+
+    #[test]
+    fn test_mock_random_default_seed() {
+        let rng = MockRandom::default_seed();
+        let a = rng.random_bytes_32();
+
+        // Reset and verify reproducibility
+        rng.reset();
+        let b = rng.random_bytes_32();
+
+        assert_eq!(a, b, "Default seed should be reproducible");
     }
 }
