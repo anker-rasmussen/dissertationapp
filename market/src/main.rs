@@ -189,8 +189,9 @@ fn main() -> anyhow::Result<()> {
                 }
                 retries += 1;
                 if retries > 30 {
-                    error!("Timeout waiting for network attachment");
-                    break;
+                    error!("Timeout waiting for network attachment after 30s, giving up");
+                    let _ = node.shutdown().await;
+                    return;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
