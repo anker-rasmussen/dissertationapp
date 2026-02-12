@@ -5,6 +5,14 @@ use veilid_core::{PublicKey, RecordKey, RouteBlob};
 use crate::config::now_unix;
 use crate::traits::TimeProvider;
 
+/// Maximum allowed clock drift for message timestamps (5 minutes).
+pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300;
+
+/// Validate that a message timestamp is within acceptable drift of the current time.
+pub const fn validate_timestamp(message_timestamp: u64, current_time: u64) -> bool {
+    message_timestamp.abs_diff(current_time) <= MAX_TIMESTAMP_DRIFT_SECS
+}
+
 /// Registry of bid announcements stored in DHT (listing subkey 2)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BidAnnouncementRegistry {
@@ -369,5 +377,212 @@ mod tests {
             }
             other => panic!("Expected SellerRegistration, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bid_announcement_bincode_roundtrip() {
+        let listing_key = test_record_key();
+        let bidder = test_pubkey();
+        let bid_record_key = crate::mocks::dht::make_test_record_key(123);
+        let msg = AuctionMessage::bid_announcement_with_time(
+            listing_key.clone(),
+            bidder.clone(),
+            bid_record_key.clone(),
+            &MockTime::new(4000),
+        );
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
+        match decoded {
+            AuctionMessage::BidAnnouncement {
+                listing_key: decoded_listing,
+                bidder: decoded_bidder,
+                bid_record_key: decoded_bid_record,
+                timestamp,
+            } => {
+                assert_eq!(decoded_listing, listing_key);
+                assert_eq!(decoded_bidder, bidder);
+                assert_eq!(decoded_bid_record, bid_record_key);
+                assert_eq!(timestamp, 4000);
+            }
+            other => panic!("Expected BidAnnouncement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn winner_decryption_request_bincode_roundtrip() {
+        let listing_key = test_record_key();
+        let winner = test_pubkey();
+        let msg = AuctionMessage::winner_decryption_request_with_time(
+            listing_key.clone(),
+            winner.clone(),
+            &MockTime::new(6000),
+        );
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
+        match decoded {
+            AuctionMessage::WinnerDecryptionRequest {
+                listing_key: decoded_listing,
+                winner: decoded_winner,
+                timestamp,
+            } => {
+                assert_eq!(decoded_listing, listing_key);
+                assert_eq!(decoded_winner, winner);
+                assert_eq!(timestamp, 6000);
+            }
+            other => panic!("Expected WinnerDecryptionRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decryption_hash_transfer_bincode_roundtrip() {
+        let listing_key = test_record_key();
+        let winner = test_pubkey();
+        let decryption_hash = "test_hash_123".to_string();
+        let msg = AuctionMessage::decryption_hash_transfer_with_time(
+            listing_key.clone(),
+            winner.clone(),
+            decryption_hash.clone(),
+            &MockTime::new(7000),
+        );
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
+        match decoded {
+            AuctionMessage::DecryptionHashTransfer {
+                listing_key: decoded_listing,
+                winner: decoded_winner,
+                decryption_hash: decoded_hash,
+                timestamp,
+            } => {
+                assert_eq!(decoded_listing, listing_key);
+                assert_eq!(decoded_winner, winner);
+                assert_eq!(decoded_hash, decryption_hash);
+                assert_eq!(timestamp, 7000);
+            }
+            other => panic!("Expected DecryptionHashTransfer, got {other:?}"),
+        }
+    }
+
+    fn test_route_blob() -> RouteBlob {
+        // Create a test RouteBlob similar to MockTransport::make_route_id
+        let counter: u64 = 99;
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&counter.to_le_bytes());
+        for i in 8..32 {
+            bytes[i] = ((counter >> ((i % 8) * 8)) & 0xFF) as u8;
+        }
+
+        let encoded = data_encoding::BASE64URL_NOPAD.encode(&bytes);
+        let key_str = format!("VLD0:{}", encoded);
+        let route_id =
+            veilid_core::RouteId::try_from(key_str.as_str()).expect("Should create valid RouteId");
+
+        RouteBlob {
+            route_id,
+            blob: format!("test_route_blob_{}", counter).into_bytes(),
+        }
+    }
+
+    #[test]
+    fn mpc_route_announcement_bincode_roundtrip() {
+        let listing_key = test_record_key();
+        let party_pubkey = test_pubkey();
+        let route_blob = test_route_blob();
+        let msg = AuctionMessage::mpc_route_announcement_with_time(
+            listing_key.clone(),
+            party_pubkey.clone(),
+            route_blob.clone(),
+            &MockTime::new(8000),
+        );
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
+        match decoded {
+            AuctionMessage::MpcRouteAnnouncement {
+                listing_key: decoded_listing,
+                party_pubkey: decoded_party,
+                route_blob: decoded_blob,
+                timestamp,
+            } => {
+                assert_eq!(decoded_listing, listing_key);
+                assert_eq!(decoded_party, party_pubkey);
+                assert_eq!(decoded_blob.route_id, route_blob.route_id);
+                assert_eq!(decoded_blob.blob, route_blob.blob);
+                assert_eq!(timestamp, 8000);
+            }
+            other => panic!("Expected MpcRouteAnnouncement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn winner_bid_reveal_bincode_roundtrip() {
+        let listing_key = test_record_key();
+        let winner = test_pubkey();
+        let bid_value = 1000u64;
+        let nonce = [42u8; 32];
+        let msg = AuctionMessage::winner_bid_reveal_with_time(
+            listing_key.clone(),
+            winner.clone(),
+            bid_value,
+            nonce,
+            &MockTime::new(9000),
+        );
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
+        match decoded {
+            AuctionMessage::WinnerBidReveal {
+                listing_key: decoded_listing,
+                winner: decoded_winner,
+                bid_value: decoded_bid,
+                nonce: decoded_nonce,
+                timestamp,
+            } => {
+                assert_eq!(decoded_listing, listing_key);
+                assert_eq!(decoded_winner, winner);
+                assert_eq!(decoded_bid, bid_value);
+                assert_eq!(decoded_nonce, nonce);
+                assert_eq!(timestamp, 9000);
+            }
+            other => panic!("Expected WinnerBidReveal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_timestamp_exact_match() {
+        assert!(validate_timestamp(1000, 1000));
+    }
+
+    #[test]
+    fn test_validate_timestamp_within_drift_future() {
+        // Message 300 seconds in the future (exactly at limit)
+        assert!(validate_timestamp(1300, 1000));
+    }
+
+    #[test]
+    fn test_validate_timestamp_within_drift_past() {
+        // Message 300 seconds in the past (exactly at limit)
+        assert!(validate_timestamp(700, 1000));
+    }
+
+    #[test]
+    fn test_validate_timestamp_exceeds_drift_future() {
+        // Message 301 seconds in the future (just over limit)
+        assert!(!validate_timestamp(1301, 1000));
+    }
+
+    #[test]
+    fn test_validate_timestamp_exceeds_drift_past() {
+        // Message 301 seconds in the past (just over limit)
+        assert!(!validate_timestamp(699, 1000));
+    }
+
+    #[test]
+    fn test_validate_timestamp_zero() {
+        // Zero timestamp against a large current time
+        assert!(!validate_timestamp(0, 1000));
+    }
+
+    #[test]
+    fn test_validate_timestamp_large_drift() {
+        // Massive drift should fail
+        assert!(!validate_timestamp(0, 1_000_000));
     }
 }

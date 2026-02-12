@@ -52,9 +52,87 @@ pub struct Listing {
 
     /// Current status of the auction
     pub status: ListingStatus,
+}
 
-    /// Number of bids received (optional, for display purposes)
-    pub bid_count: u32,
+/// A listing with the decryption key stripped out, safe for DHT publication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicListing {
+    pub key: RecordKey,
+    pub seller: PublicKey,
+    pub title: String,
+    pub encrypted_content: Vec<u8>,
+    pub content_nonce: ContentNonce,
+    pub reserve_price: u64,
+    pub auction_end: u64,
+    pub created_at: u64,
+    pub status: ListingStatus,
+}
+
+impl PublicListing {
+    /// Check if the auction is still active (hasn't ended yet)
+    pub fn is_active(&self) -> bool {
+        self.is_active_at(now_unix())
+    }
+
+    /// Check if the auction is still active at a specific timestamp
+    pub fn is_active_at(&self, now: u64) -> bool {
+        self.status == ListingStatus::Active && self.auction_end > now
+    }
+
+    /// Check if the auction has ended
+    pub fn has_ended(&self) -> bool {
+        self.has_ended_at(now_unix())
+    }
+
+    /// Check if the auction has ended at a specific timestamp
+    pub const fn has_ended_at(&self, now: u64) -> bool {
+        self.auction_end <= now
+    }
+
+    /// Get time remaining in seconds (0 if ended)
+    pub fn time_remaining(&self) -> u64 {
+        self.time_remaining_at(now_unix())
+    }
+
+    /// Get time remaining at a specific timestamp
+    pub const fn time_remaining_at(&self, now: u64) -> u64 {
+        self.auction_end.saturating_sub(now)
+    }
+
+    /// Decrypt the encrypted content using the provided hex-encoded decryption key
+    /// Returns the decrypted content as a UTF-8 string
+    pub fn decrypt_content_with_key(
+        &self,
+        decryption_key_hex: &str,
+    ) -> Result<String, crate::error::MarketError> {
+        use crate::crypto::{decrypt_content, ContentKey};
+        use crate::error::MarketError;
+
+        // Decode hex string to bytes
+        let key_bytes = hex::decode(decryption_key_hex)
+            .map_err(|e| MarketError::Crypto(format!("Invalid hex key: {e}")))?;
+
+        // Convert to 32-byte array
+        let len = key_bytes.len();
+        let key: ContentKey = key_bytes
+            .try_into()
+            .map_err(|_| MarketError::Crypto(format!("Key must be 32 bytes, got {len} bytes")))?;
+
+        // Decrypt using the crypto module
+        decrypt_content(&self.encrypted_content, &key, &self.content_nonce)
+    }
+
+    /// Serialize the listing to CBOR bytes
+    pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
+        let mut buffer = Vec::new();
+        ciborium::into_writer(self, &mut buffer)?;
+        Ok(buffer)
+    }
+
+    /// Deserialize a public listing from CBOR bytes
+    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
+        ciborium::from_reader(data)
+    }
 }
 
 impl Listing {
@@ -131,6 +209,21 @@ impl Listing {
     /// Deserialize a listing from CBOR bytes
     pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
         ciborium::from_reader(data)
+    }
+
+    /// Create a `PublicListing` with the decryption key stripped out.
+    pub fn to_public(&self) -> PublicListing {
+        PublicListing {
+            key: self.key.clone(),
+            seller: self.seller.clone(),
+            title: self.title.clone(),
+            encrypted_content: self.encrypted_content.clone(),
+            content_nonce: self.content_nonce,
+            reserve_price: self.reserve_price,
+            auction_end: self.auction_end,
+            created_at: self.created_at,
+            status: self.status,
+        }
     }
 }
 
@@ -224,7 +317,6 @@ impl<T: TimeProvider> ListingBuilder<T> {
                     .ok_or("auction_duration is required")?,
             created_at,
             status: ListingStatus::Active,
-            bid_count: 0,
         })
     }
 }
@@ -264,7 +356,6 @@ mod tests {
         assert_eq!(listing.created_at, 1000);
         assert_eq!(listing.auction_end, 4600); // 1000 + 3600
         assert_eq!(listing.status, ListingStatus::Active);
-        assert_eq!(listing.bid_count, 0);
     }
 
     #[test]
@@ -401,7 +492,6 @@ mod tests {
         assert_eq!(original.auction_end, restored.auction_end);
         assert_eq!(original.created_at, restored.created_at);
         assert_eq!(original.status, restored.status);
-        assert_eq!(original.bid_count, restored.bid_count);
     }
 
     #[test]
@@ -451,5 +541,152 @@ mod tests {
 
         let result = listing.decrypt_content_with_key(&hex::encode(wrong_key));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_public_listing_serialization_roundtrip() {
+        let time = MockTime::new(1000);
+        let original = make_test_listing(&time);
+        let decryption_key = original.decryption_key.clone();
+
+        // Convert to PublicListing (strips decryption_key)
+        let public = original.to_public();
+
+        // Serialize to CBOR
+        let cbor = public.to_cbor().unwrap();
+
+        // Deserialize back
+        let restored = PublicListing::from_cbor(&cbor).unwrap();
+
+        // Verify all fields match
+        assert_eq!(public.key, restored.key);
+        assert_eq!(public.seller, restored.seller);
+        assert_eq!(public.title, restored.title);
+        assert_eq!(public.encrypted_content, restored.encrypted_content);
+        assert_eq!(public.content_nonce, restored.content_nonce);
+        assert_eq!(public.reserve_price, restored.reserve_price);
+        assert_eq!(public.auction_end, restored.auction_end);
+        assert_eq!(public.created_at, restored.created_at);
+        assert_eq!(public.status, restored.status);
+
+        // Verify the CBOR bytes do NOT contain the decryption key
+        let cbor_str = String::from_utf8_lossy(&cbor);
+        assert!(
+            !cbor_str.contains(&decryption_key),
+            "CBOR bytes must not contain the decryption key"
+        );
+    }
+
+    #[test]
+    fn test_public_listing_is_active() {
+        let time = MockTime::new(1000);
+        let listing = make_test_listing(&time);
+        let public = listing.to_public();
+
+        // Active during auction
+        assert!(public.is_active_at(1000));
+        assert!(public.is_active_at(4599));
+
+        // Not active after auction ends
+        assert!(!public.is_active_at(4600));
+        assert!(!public.is_active_at(5000));
+    }
+
+    #[test]
+    fn test_public_listing_has_ended() {
+        let time = MockTime::new(1000);
+        let listing = make_test_listing(&time);
+        let public = listing.to_public();
+
+        // Not ended during auction
+        assert!(!public.has_ended_at(1000));
+        assert!(!public.has_ended_at(4599));
+
+        // Ended at and after deadline
+        assert!(public.has_ended_at(4600));
+        assert!(public.has_ended_at(5000));
+    }
+
+    #[test]
+    fn test_public_listing_time_remaining() {
+        let time = MockTime::new(1000);
+        let listing = make_test_listing(&time);
+        let public = listing.to_public();
+
+        // Full time at start
+        assert_eq!(public.time_remaining_at(1000), 3600);
+
+        // Half time
+        assert_eq!(public.time_remaining_at(2800), 1800);
+
+        // Zero at end
+        assert_eq!(public.time_remaining_at(4600), 0);
+
+        // Zero after end
+        assert_eq!(public.time_remaining_at(5000), 0);
+    }
+
+    #[test]
+    fn test_public_listing_decrypt_content_wrong_key() {
+        use crate::crypto::{encrypt_content, generate_key};
+
+        let time = MockTime::new(1000);
+        let key = generate_key();
+        let wrong_key = generate_key();
+        let plaintext = "Secret";
+        let (ciphertext, nonce) = encrypt_content(plaintext, &key).unwrap();
+
+        let listing = Listing::builder_with_time(time)
+            .key(make_test_key())
+            .seller(make_test_pubkey())
+            .title("Test")
+            .encrypted_content(ciphertext, nonce, hex::encode(key))
+            .reserve_price(100)
+            .auction_duration(3600)
+            .build()
+            .unwrap();
+
+        let public = listing.to_public();
+
+        let result = public.decrypt_content_with_key(&hex::encode(wrong_key));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_listing_status_display() {
+        // Verify Debug formatting works for all ListingStatus variants
+        assert_eq!(format!("{:?}", ListingStatus::Active), "Active");
+        assert_eq!(format!("{:?}", ListingStatus::Closed), "Closed");
+        assert_eq!(format!("{:?}", ListingStatus::Completed), "Completed");
+        assert_eq!(format!("{:?}", ListingStatus::Cancelled), "Cancelled");
+    }
+
+    #[test]
+    fn test_listing_builder_all_fields() {
+        use crate::crypto::{encrypt_content, generate_key};
+
+        let time = MockTime::new(5000);
+        let key = generate_key();
+        let plaintext = "Detailed item description";
+        let (ciphertext, nonce) = encrypt_content(plaintext, &key).unwrap();
+
+        let listing = Listing::builder_with_time(time)
+            .key(make_test_key())
+            .seller(make_test_pubkey())
+            .title("Comprehensive Test Listing")
+            .encrypted_content(ciphertext, nonce, hex::encode(key))
+            .reserve_price(500)
+            .auction_duration(7200) // 2 hours
+            .build()
+            .unwrap();
+
+        assert_eq!(listing.title, "Comprehensive Test Listing");
+        assert_eq!(listing.reserve_price, 500);
+        assert_eq!(listing.created_at, 5000);
+        assert_eq!(listing.auction_end, 12200); // 5000 + 7200
+        assert_eq!(listing.status, ListingStatus::Active);
+        assert!(!listing.encrypted_content.is_empty());
+        assert_eq!(listing.content_nonce.len(), 12);
+        assert!(!listing.decryption_key.is_empty());
     }
 }
