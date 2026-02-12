@@ -22,6 +22,22 @@ use crate::marketplace::BidIndex;
 pub(crate) type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
 pub(crate) type VerificationMap = Arc<Mutex<HashMap<RecordKey, VerificationState>>>;
 
+/// Validate that the number of parties is sufficient for Shamir secret sharing.
+/// Requires at least 3 parties (seller + 2 bidders).
+pub const fn validate_auction_parties(num_parties: usize) -> Result<(), &'static str> {
+    if num_parties < 3 {
+        Err("Shamir secret sharing requires at least 3 parties")
+    } else {
+        Ok(())
+    }
+}
+
+/// Generate hosts file content for MP-SPDZ.
+/// All parties use localhost since Veilid handles actual routing.
+pub fn generate_hosts_content(num_parties: usize) -> String {
+    "127.0.0.1\n".repeat(num_parties)
+}
+
 /// Orchestrates MPC execution: route exchange, tunnel proxy lifecycle, bid verification.
 ///
 /// Extracted from `AuctionCoordinator` to separate MPC concerns from auction
@@ -116,7 +132,7 @@ impl MpcOrchestrator {
         let sorted_bidders = bid_index.sorted_bidders();
 
         // Shamir secret sharing requires at least 3 parties
-        if sorted_bidders.len() < 3 {
+        if validate_auction_parties(sorted_bidders.len()).is_err() {
             warn!(
                 "Auction for '{}' has only {} parties, but Shamir requires at least 3. Aborting MPC.",
                 listing_title, sorted_bidders.len()
@@ -302,10 +318,7 @@ impl MpcOrchestrator {
         let hosts_file_path = std::env::temp_dir().join(&hosts_file_name);
 
         // Write hosts file with all parties as localhost (Veilid handles actual routing)
-        let mut hosts_content = String::new();
-        for _ in 0..num_parties {
-            hosts_content.push_str("127.0.0.1\n");
-        }
+        let hosts_content = generate_hosts_content(num_parties);
         std::fs::write(&hosts_file_path, &hosts_content).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to write hosts file {}: {e}",
@@ -479,5 +492,42 @@ impl MpcOrchestrator {
     /// Get the DHT operations handle
     pub const fn dht(&self) -> &DHTOperations {
         &self.dht
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_auction_parties_minimum() {
+        assert!(validate_auction_parties(3).is_ok());
+    }
+
+    #[test]
+    fn test_validate_auction_parties_too_few() {
+        assert!(validate_auction_parties(0).is_err());
+        assert!(validate_auction_parties(1).is_err());
+        assert!(validate_auction_parties(2).is_err());
+    }
+
+    #[test]
+    fn test_validate_auction_parties_large() {
+        assert!(validate_auction_parties(10).is_ok());
+        assert!(validate_auction_parties(50).is_ok());
+    }
+
+    #[test]
+    fn test_hosts_file_content_generation() {
+        let content = generate_hosts_content(3);
+        assert_eq!(content, "127.0.0.1\n127.0.0.1\n127.0.0.1\n");
+        assert_eq!(content.lines().count(), 3);
+    }
+
+    #[test]
+    fn test_hosts_file_content_single_party() {
+        let content = generate_hosts_content(1);
+        assert_eq!(content, "127.0.0.1\n");
+        assert_eq!(content.lines().count(), 1);
     }
 }

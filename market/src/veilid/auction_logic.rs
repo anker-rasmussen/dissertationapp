@@ -800,4 +800,190 @@ mod tests {
 
         assert_eq!(logic.get_local_bid_count(&listing_key).await, 1);
     }
+
+    #[tokio::test]
+    async fn test_register_bid_announcement_for_unwatched_listing() {
+        let logic = create_test_logic();
+        // Register a bid for a listing we never watched
+        let unwatched_key = make_test_record_key(999);
+        let bidder = make_test_public_key(5);
+        let bid_key = make_test_record_key(50);
+
+        logic
+            .register_bid_announcement(&unwatched_key, bidder, bid_key)
+            .await;
+
+        // Bid should still be tracked (announcements are independent of watching)
+        assert_eq!(logic.get_local_bid_count(&unwatched_key).await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_watch_listing_already_expired() {
+        let dht = MockDht::new();
+        let transport = MockTransport::new();
+        let mpc = MockMpcRunner::new();
+        let time = MockTime::new(10000); // Current time far past any deadline
+        let my_node_id = make_test_public_key(1);
+        let bid_storage = BidStorage::new();
+
+        let logic = AuctionLogic::new(dht, transport, mpc, time.clone(), my_node_id, bid_storage);
+
+        // Create a listing that was created at time=100 with 1s duration (expired at 101)
+        let early_time = MockTime::new(100);
+        let listing = Listing::builder_with_time(early_time)
+            .key(make_test_record_key(1))
+            .seller(make_test_public_key(2))
+            .title("Already Expired")
+            .encrypted_content(vec![1, 2, 3], [0u8; 12], "abc123".to_string())
+            .reserve_price(100)
+            .auction_duration(1)
+            .build()
+            .unwrap();
+
+        logic.watch_listing(listing).await;
+
+        // Should immediately appear as expired since current time (10000) > deadline (101)
+        let expired = logic.get_expired_listings().await;
+        assert_eq!(expired.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_expired_listings_none_expired() {
+        let dht = MockDht::new();
+        let transport = MockTransport::new();
+        let mpc = MockMpcRunner::new();
+        let time = MockTime::new(1000);
+        let my_node_id = make_test_public_key(1);
+        let bid_storage = BidStorage::new();
+
+        let logic = AuctionLogic::new(dht, transport, mpc, time.clone(), my_node_id, bid_storage);
+
+        // Add two listings, both with long durations
+        let listing1 = Listing::builder_with_time(time.clone())
+            .key(make_test_record_key(1))
+            .seller(make_test_public_key(2))
+            .title("Item A")
+            .encrypted_content(vec![1], [0u8; 12], "a".to_string())
+            .reserve_price(100)
+            .auction_duration(7200)
+            .build()
+            .unwrap();
+        let listing2 = Listing::builder_with_time(time.clone())
+            .key(make_test_record_key(2))
+            .seller(make_test_public_key(3))
+            .title("Item B")
+            .encrypted_content(vec![2], [0u8; 12], "b".to_string())
+            .reserve_price(200)
+            .auction_duration(7200)
+            .build()
+            .unwrap();
+
+        logic.watch_listing(listing1).await;
+        logic.watch_listing(listing2).await;
+
+        let expired = logic.get_expired_listings().await;
+        assert!(expired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_expired_listings_mixed() {
+        let dht = MockDht::new();
+        let transport = MockTransport::new();
+        let mpc = MockMpcRunner::new();
+        let time = MockTime::new(1000);
+        let my_node_id = make_test_public_key(1);
+        let bid_storage = BidStorage::new();
+
+        let logic = AuctionLogic::new(dht, transport, mpc, time.clone(), my_node_id, bid_storage);
+
+        // Short auction: expires at 1000 + 60 = 1060
+        let short = Listing::builder_with_time(time.clone())
+            .key(make_test_record_key(1))
+            .seller(make_test_public_key(2))
+            .title("Short Auction")
+            .encrypted_content(vec![1], [0u8; 12], "a".to_string())
+            .reserve_price(100)
+            .auction_duration(60)
+            .build()
+            .unwrap();
+
+        // Long auction: expires at 1000 + 7200 = 8200
+        let long = Listing::builder_with_time(time.clone())
+            .key(make_test_record_key(2))
+            .seller(make_test_public_key(3))
+            .title("Long Auction")
+            .encrypted_content(vec![2], [0u8; 12], "b".to_string())
+            .reserve_price(200)
+            .auction_duration(7200)
+            .build()
+            .unwrap();
+
+        logic.watch_listing(short).await;
+        logic.watch_listing(long).await;
+
+        // Advance past short deadline but before long deadline
+        time.set(2000);
+
+        let expired = logic.get_expired_listings().await;
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].1.title, "Short Auction");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_listings_independent_bids() {
+        let logic = create_test_logic();
+        let listing_a = make_test_record_key(1);
+        let listing_b = make_test_record_key(2);
+
+        // Register bids for listing A
+        logic
+            .register_bid_announcement(
+                &listing_a,
+                make_test_public_key(10),
+                make_test_record_key(100),
+            )
+            .await;
+        logic
+            .register_bid_announcement(
+                &listing_a,
+                make_test_public_key(11),
+                make_test_record_key(110),
+            )
+            .await;
+
+        // Register bids for listing B
+        logic
+            .register_bid_announcement(
+                &listing_b,
+                make_test_public_key(20),
+                make_test_record_key(200),
+            )
+            .await;
+
+        // Bids should be independent
+        assert_eq!(logic.get_local_bid_count(&listing_a).await, 2);
+        assert_eq!(logic.get_local_bid_count(&listing_b).await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_store_decryption_key_overwrite() {
+        let logic = create_test_logic();
+        let listing_key = make_test_record_key(1);
+
+        logic
+            .store_decryption_key(&listing_key, "first_key".to_string())
+            .await;
+        assert_eq!(
+            logic.get_decryption_key(&listing_key).await,
+            Some("first_key".to_string())
+        );
+
+        logic
+            .store_decryption_key(&listing_key, "second_key".to_string())
+            .await;
+        assert_eq!(
+            logic.get_decryption_key(&listing_key).await,
+            Some("second_key".to_string())
+        );
+    }
 }

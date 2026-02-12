@@ -585,4 +585,75 @@ mod tests {
         // Massive drift should fail
         assert!(!validate_timestamp(0, 1_000_000));
     }
+
+    #[test]
+    fn test_validate_timestamp_far_future() {
+        // 1 hour in the future (3600 seconds >> 300 second limit)
+        assert!(!validate_timestamp(4600, 1000));
+    }
+
+    #[test]
+    fn test_validate_timestamp_symmetry() {
+        // Drift in both directions should behave identically at boundary
+        assert!(validate_timestamp(700, 1000)); // -300
+        assert!(validate_timestamp(1300, 1000)); // +300
+        assert!(!validate_timestamp(699, 1000)); // -301
+        assert!(!validate_timestamp(1301, 1000)); // +301
+    }
+
+    #[test]
+    fn test_bid_announcement_registry_new() {
+        let registry = BidAnnouncementRegistry::new();
+        assert!(registry.announcements.is_empty());
+    }
+
+    #[test]
+    fn test_bid_announcement_registry_add_and_dedup() {
+        let mut registry = BidAnnouncementRegistry::new();
+        let bidder = test_pubkey();
+        let bid_key = test_record_key();
+
+        registry.add(bidder.clone(), bid_key.clone(), 1000);
+        assert_eq!(registry.announcements.len(), 1);
+
+        // Adding same bidder again should be deduplicated
+        registry.add(bidder.clone(), bid_key.clone(), 2000);
+        assert_eq!(registry.announcements.len(), 1);
+
+        // Adding different bidder should work
+        let bidder2 = crate::mocks::dht::make_test_public_key(43);
+        registry.add(bidder2, bid_key, 3000);
+        assert_eq!(registry.announcements.len(), 2);
+    }
+
+    #[test]
+    fn test_bid_announcement_registry_cbor_roundtrip() {
+        let mut registry = BidAnnouncementRegistry::new();
+        let bidder1 = crate::mocks::dht::make_test_public_key(1);
+        let bidder2 = crate::mocks::dht::make_test_public_key(2);
+        let key1 = crate::mocks::dht::make_test_record_key(10);
+        let key2 = crate::mocks::dht::make_test_record_key(20);
+
+        registry.add(bidder1.clone(), key1.clone(), 100);
+        registry.add(bidder2.clone(), key2.clone(), 200);
+
+        let bytes = registry.to_bytes().unwrap();
+        let restored = BidAnnouncementRegistry::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.announcements.len(), 2);
+        assert_eq!(restored.announcements[0].0, bidder1);
+        assert_eq!(restored.announcements[0].1, key1);
+        assert_eq!(restored.announcements[0].2, 100);
+        assert_eq!(restored.announcements[1].0, bidder2);
+        assert_eq!(restored.announcements[1].1, key2);
+        assert_eq!(restored.announcements[1].2, 200);
+    }
+
+    #[test]
+    fn test_bid_announcement_registry_empty_roundtrip() {
+        let registry = BidAnnouncementRegistry::new();
+        let bytes = registry.to_bytes().unwrap();
+        let restored = BidAnnouncementRegistry::from_bytes(&bytes).unwrap();
+        assert!(restored.announcements.is_empty());
+    }
 }

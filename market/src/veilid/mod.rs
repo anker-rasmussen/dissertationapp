@@ -11,6 +11,7 @@ mod mpc_execution;
 pub mod mpc_orchestrator;
 pub mod mpc_routes;
 mod mpc_verification;
+pub use mpc_verification::verify_commitment;
 pub mod node;
 pub mod registry;
 
