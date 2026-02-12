@@ -37,6 +37,8 @@ struct MpcTunnelProxyInner {
     /// Note: This simple model assumes one connection per party pair (which MP-SPDZ usually does).
     /// If multiple connections are needed, we need SessionIDs.
     sessions: Mutex<HashMap<usize, tokio::net::tcp::OwnedWriteHalf>>,
+    /// Buffer for data received before Open message (race condition)
+    pending_data: Mutex<HashMap<usize, Vec<Vec<u8>>>>,
 }
 
 impl MpcTunnelProxy {
@@ -64,6 +66,7 @@ impl MpcTunnelProxy {
                 party_routes,
                 base_port,
                 sessions: Mutex::new(HashMap::new()),
+                pending_data: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -92,12 +95,20 @@ impl MpcTunnelProxy {
         Ok(())
     }
 
-    /// Cleanup resources (no-op since we no longer spawn external processes)
+    /// Cleanup resources: clear active sessions to drop TCP connections.
     pub fn cleanup(&self) {
         info!(
             "Cleaning up MPC tunnel proxy for Party {}",
             self.inner.party_id
         );
+        // Clear all active sessions to drop TCP connections
+        // Note: We can't async here (Drop context), so we use try_lock
+        if let Ok(mut sessions) = self.inner.sessions.try_lock() {
+            sessions.clear();
+        }
+        if let Ok(mut pending) = self.inner.pending_data.try_lock() {
+            pending.clear();
+        }
     }
 
     async fn run_outgoing_proxy(
@@ -200,6 +211,7 @@ impl MpcTunnelProxy {
     }
 
     /// Process incoming Veilid message (AppMessage)
+    #[allow(clippy::too_many_lines)]
     pub async fn process_message(&self, message: Vec<u8>) -> Result<()> {
         let mpc_msg: MpcMessage = bincode::deserialize(&message)?;
 
@@ -251,6 +263,26 @@ impl MpcTunnelProxy {
                         {
                             let mut sessions = self.inner.sessions.lock().await;
                             sessions.insert(source_party_id, wr);
+                        }
+
+                        // Flush any buffered data that arrived before this Open message
+                        {
+                            let mut pending = self.inner.pending_data.lock().await;
+                            if let Some(buffered) = pending.remove(&source_party_id) {
+                                let mut sessions = self.inner.sessions.lock().await;
+                                if let Some(wr) = sessions.get_mut(&source_party_id) {
+                                    for payload in buffered {
+                                        if let Err(e) = wr.write_all(&payload).await {
+                                            error!(
+                                                "Failed to flush buffered data for Party {}: {}",
+                                                source_party_id, e
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    info!("Flushed buffered data for Party {}", source_party_id);
+                                }
+                            }
                         }
 
                         // Spawn read loop for the "Response" path (Server -> Client)
@@ -311,12 +343,16 @@ impl MpcTunnelProxy {
                             "Failed to write to local MP-SPDZ for Party {}: {}",
                             source_party_id, e
                         );
-                        // Close session?
                     }
                 } else {
-                    // warn!("Received Data for unknown session from Party {}", source_party_id);
-                    // This might happen if OPEN hasn't processed yet or race condition.
-                    // For now, ignore.
+                    // Buffer data pending Open message (race condition)
+                    debug!(
+                        "Buffering data from Party {} (no session yet)",
+                        source_party_id
+                    );
+                    drop(sessions); // Release sessions lock before acquiring pending_data lock
+                    let mut pending = self.inner.pending_data.lock().await;
+                    pending.entry(source_party_id).or_default().push(payload);
                 }
             }
             MpcMessage::Close { source_party_id } => {

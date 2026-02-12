@@ -16,6 +16,7 @@ use super::mpc_execution::{compile_mpc_program, spawn_shamir_party, MpcCleanupGu
 use super::mpc_routes::MpcRouteManager;
 pub use super::mpc_verification::VerificationState;
 use crate::config;
+use crate::config::subkeys;
 use crate::marketplace::BidIndex;
 
 pub(crate) type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
@@ -141,7 +142,8 @@ impl MpcOrchestrator {
                     .await?;
 
                 // Wait for all parties to be ready
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                info!("Waiting 2s for route propagation...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
                 // Trigger MPC execution
                 self.execute_mpc_auction(
@@ -242,7 +244,15 @@ impl MpcOrchestrator {
 
             info!("Route collection: have {}/{} routes", received, expected);
 
-            if received >= expected || start.elapsed() >= max_wait {
+            if received >= expected {
+                return Ok(routes);
+            }
+            if start.elapsed() >= max_wait {
+                if received < expected {
+                    return Err(anyhow::anyhow!(
+                        "Incomplete route exchange: got {received}/{expected} routes after {max_wait:?}"
+                    ));
+                }
                 return Ok(routes);
             }
 
@@ -272,7 +282,7 @@ impl MpcOrchestrator {
             .await
             .ok_or_else(|| anyhow::anyhow!("Bid value not found in storage"))?;
 
-        info!("My bid value: {}", bid_value);
+        debug!("Bid value retrieved from local storage");
 
         // Start MPC tunnel proxy with the routes
         let tunnel_proxy =
@@ -286,9 +296,9 @@ impl MpcOrchestrator {
             .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
 
         // Generate hosts file in temp dir (MP-SPDZ needs a real file for -ip)
-        let node_id_str = self.my_node_id.to_string();
-        let node_prefix = node_id_str.get(5..10).unwrap_or("unknown"); // Extract first 5 chars after "VLD0:"
-        let hosts_file_name = format!("HOSTS-{node_prefix}");
+        let listing_key_str = listing_key.to_string();
+        let listing_prefix = listing_key_str.get(5..15).unwrap_or("unknown");
+        let hosts_file_name = format!("HOSTS-{listing_prefix}");
         let hosts_file_path = std::env::temp_dir().join(&hosts_file_name);
 
         // Write hosts file with all parties as localhost (Veilid handles actual routing)
@@ -312,8 +322,8 @@ impl MpcOrchestrator {
         let _cleanup_guard = MpcCleanupGuard::new(tunnel_proxy, hosts_file_path.clone());
 
         // Wait for all parties to be ready
-        info!("Waiting 5 seconds for all parties to be ready...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        info!("Waiting 3 seconds for all parties to be ready...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         // Compile MPC program for the specific number of parties
         compile_mpc_program(&mp_spdz_dir, num_parties).await?;
@@ -398,8 +408,11 @@ impl MpcOrchestrator {
         let mut bid_index = BidIndex::new(listing_key.clone());
         let bid_ops = BidOperations::new(self.dht.clone());
 
-        // Read bid registry from DHT subkey 2
-        let registry_data = self.dht.get_value_at_subkey(listing_key, 2).await?;
+        // Read bid registry from DHT
+        let registry_data = self
+            .dht
+            .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
+            .await?;
 
         let bidder_list = if let Some(data) = registry_data {
             let registry = BidAnnouncementRegistry::from_bytes(&data)?;
