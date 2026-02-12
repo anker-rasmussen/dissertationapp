@@ -99,10 +99,15 @@ pub(crate) async fn spawn_shamir_party(
         // stdin is dropped here, sending EOF
     }
 
-    child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to execute shamir-party.x: {e}"))
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|e| anyhow::anyhow!("Failed to execute shamir-party.x: {e}")),
+        Err(_) => Err(anyhow::anyhow!("MPC execution timed out after 120 seconds")),
+    }
 }
 
 /// Parse seller (party 0) MPC output to extract the winner party ID and winning bid.
@@ -184,5 +189,106 @@ impl Drop for MpcCleanupGuard {
             proxy.cleanup();
         }
         let _ = std::fs::remove_file(&self.hosts_file);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_seller_output_valid() {
+        let output = r#"
+MP-SPDZ starting...
+Loading program...
+Winning bid: 42
+Winner: Party 2
+MPC execution completed
+"#;
+        let result = parse_seller_mpc_output(output);
+        assert_eq!(result, Some((2, 42)));
+    }
+
+    #[test]
+    fn test_parse_seller_output_no_winner() {
+        let output = r#"
+MP-SPDZ starting...
+Winning bid: 100
+MPC execution completed
+"#;
+        let result = parse_seller_mpc_output(output);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_seller_output_no_bid() {
+        let output = r#"
+MP-SPDZ starting...
+Winner: Party 1
+MPC execution completed
+"#;
+        let result = parse_seller_mpc_output(output);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_seller_output_empty() {
+        let output = "";
+        let result = parse_seller_mpc_output(output);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_seller_output_party_zero() {
+        let output = r#"
+MP-SPDZ starting...
+Winning bid: 999
+Winner: Party 0
+MPC execution completed
+"#;
+        let result = parse_seller_mpc_output(output);
+        assert_eq!(result, Some((0, 999)));
+    }
+
+    #[test]
+    fn test_parse_bidder_output_won() {
+        let output = r#"
+MP-SPDZ starting...
+Loading program...
+You won: 1
+MPC execution completed
+"#;
+        let result = parse_bidder_mpc_output(output);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_parse_bidder_output_lost() {
+        let output = r#"
+MP-SPDZ starting...
+Loading program...
+You won: 0
+MPC execution completed
+"#;
+        let result = parse_bidder_mpc_output(output);
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_parse_bidder_output_empty() {
+        let output = "";
+        let result = parse_bidder_mpc_output(output);
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_parse_bidder_output_no_result_line() {
+        let output = r#"
+MP-SPDZ starting...
+Loading program...
+MPC execution completed
+"#;
+        let result = parse_bidder_mpc_output(output);
+        assert!(!result);
     }
 }

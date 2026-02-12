@@ -12,6 +12,10 @@ pub struct MpcResult {
     pub party_id: usize,
     /// Total number of parties in the computation.
     pub num_parties: usize,
+    /// Winning bid value (only available to party 0 / seller).
+    pub winner_bid: Option<u64>,
+    /// Winner's party ID (only available to party 0 / seller).
+    pub winner_party_id: Option<usize>,
 }
 
 /// Abstraction over MPC process execution.

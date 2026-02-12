@@ -265,6 +265,8 @@ impl MpcRunner for MockMpcRunner {
             is_winner,
             party_id,
             num_parties,
+            winner_bid: None,
+            winner_party_id: None,
         })
     }
 
@@ -410,5 +412,166 @@ mod tests {
         assert!(!result0.is_winner);
         assert!(result1.is_winner);
         assert!(!result2.is_winner);
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_write_hosts() {
+        let runner = MockMpcRunner::new();
+
+        runner.write_hosts("hosts_test", 3).await.unwrap();
+        runner.write_hosts("hosts_auction", 5).await.unwrap();
+
+        let hosts = runner.get_hosts_files().await;
+        assert_eq!(hosts.get("hosts_test"), Some(&3));
+        assert_eq!(hosts.get("hosts_auction"), Some(&5));
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_runner_new() {
+        let runner = MockMpcRunner::new();
+
+        // Verify defaults
+        assert!(runner.get_compilations().await.is_empty());
+        assert!(runner.get_executions().await.is_empty());
+        assert!(runner.get_inputs().await.is_empty());
+        assert!(runner.get_hosts_files().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_runner_shared_state() {
+        let runner1 = MockMpcRunner::new();
+
+        // Record some operations on runner1
+        runner1.compile("test_prog", 2).await.unwrap();
+        runner1.execute(0, 2, 100).await.unwrap();
+
+        // Clone the runner
+        let runner2 = runner1.clone();
+
+        // Both should see the same compilations and executions
+        assert!(runner2.was_compiled("test_prog").await);
+        assert_eq!(runner2.get_compilations().await.len(), 1);
+        assert_eq!(runner2.get_executions().await.len(), 1);
+
+        // Operations on runner2 should affect runner1
+        runner2.write_input(1, 200).await.unwrap();
+        assert_eq!(runner1.get_inputs().await.get(&1), Some(&200));
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_runner_clear() {
+        let runner = MockMpcRunner::new();
+
+        // Add some data
+        runner.compile("test", 2).await.unwrap();
+        runner.execute(0, 2, 100).await.unwrap();
+        runner.write_input(0, 100).await.unwrap();
+        runner.write_hosts("hosts", 2).await.unwrap();
+
+        // Clear everything
+        runner.clear().await;
+
+        // All should be empty
+        assert!(runner.get_compilations().await.is_empty());
+        assert!(runner.get_executions().await.is_empty());
+        assert!(runner.get_inputs().await.is_empty());
+        assert!(runner.get_hosts_files().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_shared_bid_registry_clear() {
+        let registry = SharedBidRegistry::new();
+
+        registry.register_bid(0, 100).await;
+        registry.register_bid(1, 200).await;
+
+        assert_eq!(registry.calculate_winner().await, Some(1));
+
+        registry.clear().await;
+
+        // After clear, no winner
+        assert_eq!(registry.calculate_winner().await, None);
+        assert!(registry.get_bids().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_shared_bid_registry_get_bids() {
+        let registry = SharedBidRegistry::new();
+
+        registry.register_bid_with_timestamp(0, 100, 10).await;
+        registry.register_bid_with_timestamp(1, 200, 20).await;
+
+        let bids = registry.get_bids().await;
+        assert_eq!(bids.get(&0), Some(&(100, 10)));
+        assert_eq!(bids.get(&1), Some(&(200, 20)));
+    }
+
+    #[tokio::test]
+    async fn test_shared_bid_registry_default() {
+        let registry = SharedBidRegistry::default();
+
+        registry.register_bid(0, 100).await;
+        assert_eq!(registry.calculate_winner().await, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_shared_bid_registry_empty_winner() {
+        let registry = SharedBidRegistry::new();
+
+        // No bids registered, no winner
+        assert_eq!(registry.calculate_winner().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_runner_default() {
+        let runner = MockMpcRunner::default();
+
+        // Should be able to use it normally
+        runner.compile("test", 2).await.unwrap();
+        assert!(runner.was_compiled("test").await);
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_fail_mode_write_hosts() {
+        let runner = MockMpcRunner::new();
+        runner.set_fail_mode(true).await;
+
+        assert!(runner.write_hosts("test", 2).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_runner_set_winner_strategy() {
+        let runner = MockMpcRunner::new();
+
+        // Set to fixed strategy
+        runner.set_winner_strategy(WinnerStrategy::Fixed(2)).await;
+
+        let result = runner.execute(2, 3, 100).await.unwrap();
+        assert!(result.is_winner);
+
+        // Set to calculate from bids
+        runner
+            .set_winner_strategy(WinnerStrategy::CalculateFromBids)
+            .await;
+
+        runner.bid_registry().register_bid(0, 100).await;
+        runner.bid_registry().register_bid(1, 200).await;
+
+        let result0 = runner.execute(0, 2, 100).await.unwrap();
+        let result1 = runner.execute(1, 2, 200).await.unwrap();
+
+        assert!(!result0.is_winner);
+        assert!(result1.is_winner);
+    }
+
+    #[tokio::test]
+    async fn test_mock_mpc_runner_bid_registry_accessor() {
+        let runner = MockMpcRunner::new();
+
+        runner.bid_registry().register_bid(0, 100).await;
+        runner.bid_registry().register_bid(1, 200).await;
+
+        let bids = runner.bid_registry().get_bids().await;
+        assert_eq!(bids.len(), 2);
     }
 }
