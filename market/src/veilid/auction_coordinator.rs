@@ -8,7 +8,7 @@ use veilid_core::{
     PublicKey, RecordKey, RouteBlob, SafetySelection, Sequencing, Target, VeilidAPI,
 };
 
-use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
+use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry, BidAnnouncementTracker};
 use super::bid_storage::BidStorage;
 use super::dht::{DHTOperations, OwnedDHTRecord};
 use super::listing_ops::ListingOperations;
@@ -17,8 +17,6 @@ use super::registry::{RegistryEntry, RegistryOperations};
 use crate::config::subkeys;
 use crate::marketplace::PublicListing;
 use crate::traits::DhtStore;
-
-type BidAnnouncementMap = Arc<Mutex<HashMap<RecordKey, Vec<(PublicKey, RecordKey)>>>>;
 
 /// Coordinates auction execution: monitors deadlines, triggers MPC
 pub struct AuctionCoordinator {
@@ -31,8 +29,8 @@ pub struct AuctionCoordinator {
     watched_listings: Arc<Mutex<HashMap<RecordKey, PublicListing>>>,
     /// Listings we own (as seller): Map<listing_key, OwnedDHTRecord>
     owned_listings: Arc<Mutex<HashMap<RecordKey, OwnedDHTRecord>>>,
-    /// Collected bid announcements: Map<listing_key, Vec<(bidder, bid_record_key)>>
-    bid_announcements: BidAnnouncementMap,
+    /// Collected bid announcements (deduped per listing)
+    bid_announcements: BidAnnouncementTracker,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
     decryption_keys: Arc<Mutex<HashMap<RecordKey, String>>>,
     /// MPC orchestrator (owns tunnel proxy, routes, verifications)
@@ -74,7 +72,7 @@ impl AuctionCoordinator {
             registry_ops,
             watched_listings: Arc::new(Mutex::new(HashMap::new())),
             owned_listings: Arc::new(Mutex::new(HashMap::new())),
-            bid_announcements: Arc::new(Mutex::new(HashMap::new())),
+            bid_announcements: BidAnnouncementTracker::new(),
             decryption_keys: Arc::new(Mutex::new(HashMap::new())),
             mpc,
             pending_seller_registrations: Arc::new(Mutex::new(Vec::new())),
@@ -173,17 +171,17 @@ impl AuctionCoordinator {
         );
 
         // Store the announcement locally
-        let mut announcements = self.bid_announcements.lock().await;
-        let list = announcements.entry(listing_key.clone()).or_default();
-
-        if !list.iter().any(|(b, _)| b == &bidder) {
-            list.push((bidder.clone(), bid_record_key.clone()));
+        if self
+            .bid_announcements
+            .register(&listing_key, bidder.clone(), bid_record_key.clone())
+            .await
+        {
+            let count = self.bid_announcements.count(&listing_key).await;
             info!(
                 "Stored bid announcement, total announcements for this listing: {}",
-                list.len()
+                count
             );
         }
-        drop(announcements);
 
         // If we own this listing, update DHT bid registry
         let record = {
@@ -580,17 +578,17 @@ impl AuctionCoordinator {
         bidder: PublicKey,
         bid_record_key: RecordKey,
     ) {
-        let mut announcements = self.bid_announcements.lock().await;
-        let list = announcements.entry(listing_key.clone()).or_default();
-
-        if !list.iter().any(|(b, _)| b == &bidder) {
-            list.push((bidder, bid_record_key));
+        if self
+            .bid_announcements
+            .register(listing_key, bidder, bid_record_key)
+            .await
+        {
+            let count = self.bid_announcements.count(listing_key).await;
             info!(
                 "Registered local bid announcement, total announcements for this listing: {}",
-                list.len()
+                count
             );
         }
-        drop(announcements);
     }
 
     /// Get the number of bids for a listing from DHT registry (authoritative),
@@ -608,8 +606,7 @@ impl AuctionCoordinator {
         }
 
         // Fall back to local announcements
-        let announcements = self.bid_announcements.lock().await;
-        announcements.get(listing_key).map_or(0, std::vec::Vec::len)
+        self.bid_announcements.count(listing_key).await
     }
 
     /// Check if the current node received a decryption key for a listing
@@ -838,10 +835,7 @@ impl AuctionCoordinator {
         info!("We bid on this listing, our bid record: {}", our_bid_key);
 
         // Get local announcements as fallback
-        let local_announcements = {
-            let announcements = self.bid_announcements.lock().await;
-            announcements.get(listing_key).cloned()
-        };
+        let local_announcements = self.bid_announcements.get(listing_key).await;
 
         let bid_index = self
             .mpc
