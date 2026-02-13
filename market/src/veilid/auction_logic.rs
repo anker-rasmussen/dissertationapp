@@ -19,7 +19,7 @@ use crate::veilid::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use crate::veilid::bid_ops::BidOperations;
 use crate::veilid::bid_storage::BidStorage;
 
-type BidAnnouncementMap = Arc<Mutex<HashMap<String, Vec<(PublicKey, RecordKey)>>>>;
+type BidAnnouncementMap = Arc<Mutex<HashMap<RecordKey, Vec<(PublicKey, RecordKey)>>>>;
 
 /// Testable auction coordination logic.
 ///
@@ -43,7 +43,7 @@ where
     /// Collected bid announcements: Map<listing_key, Vec<(bidder, bid_record_key)>>
     bid_announcements: BidAnnouncementMap,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
-    decryption_keys: Arc<Mutex<HashMap<String, String>>>,
+    decryption_keys: Arc<Mutex<HashMap<RecordKey, String>>>,
 }
 
 impl<D, T, M, C> AuctionLogic<D, T, M, C>
@@ -109,9 +109,8 @@ where
         bidder: PublicKey,
         bid_record_key: RecordKey,
     ) {
-        let key = listing_key.to_string();
         let mut announcements = self.bid_announcements.lock().await;
-        let list = announcements.entry(key).or_insert_with(Vec::new);
+        let list = announcements.entry(listing_key.clone()).or_default();
 
         // Avoid duplicates
         if !list.iter().any(|(b, _)| b == &bidder) {
@@ -123,23 +122,23 @@ where
 
     /// Get the number of bids for a listing from local announcements.
     pub async fn get_local_bid_count(&self, listing_key: &RecordKey) -> usize {
-        let key = listing_key.to_string();
         let announcements = self.bid_announcements.lock().await;
-        announcements.get(&key).map_or(0, std::vec::Vec::len)
+        announcements.get(listing_key).map_or(0, std::vec::Vec::len)
     }
 
     /// Store a received decryption key.
     pub async fn store_decryption_key(&self, listing_key: &RecordKey, key: String) {
-        let k = listing_key.to_string();
-        self.decryption_keys.lock().await.insert(k, key);
+        self.decryption_keys
+            .lock()
+            .await
+            .insert(listing_key.clone(), key);
         info!("Stored decryption key for listing {}", listing_key);
     }
 
     /// Get a stored decryption key.
     pub async fn get_decryption_key(&self, listing_key: &RecordKey) -> Option<String> {
-        let key = listing_key.to_string();
         let keys = self.decryption_keys.lock().await;
-        keys.get(&key).cloned()
+        keys.get(listing_key).cloned()
     }
 
     /// Broadcast a bid announcement to all peers.
@@ -183,9 +182,8 @@ where
             registry.announcements
         } else {
             info!("No DHT bid registry found, using local announcements");
-            let key = listing_key.to_string();
             let announcements = self.bid_announcements.lock().await;
-            match announcements.get(&key) {
+            match announcements.get(listing_key) {
                 Some(list) => list
                     .iter()
                     .map(|(bidder, bid_key)| (bidder.clone(), bid_key.clone(), 0))
