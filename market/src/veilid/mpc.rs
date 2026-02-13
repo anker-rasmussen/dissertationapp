@@ -277,22 +277,23 @@ impl MpcTunnelProxy {
                         }
 
                         // Flush any buffered data that arrived before this Open message
-                        {
+                        let buffered = {
                             let mut pending = self.inner.pending_data.lock().await;
-                            if let Some(buffered) = pending.remove(&source_party_id) {
-                                let mut sessions = self.inner.sessions.lock().await;
-                                if let Some(wr) = sessions.get_mut(&source_party_id) {
-                                    for payload in buffered {
-                                        if let Err(e) = wr.write_all(&payload).await {
-                                            error!(
-                                                "Failed to flush buffered data for Party {}: {}",
-                                                source_party_id, e
-                                            );
-                                            break;
-                                        }
+                            pending.remove(&source_party_id)
+                        };
+                        if let Some(buffered) = buffered {
+                            let mut sessions = self.inner.sessions.lock().await;
+                            if let Some(wr) = sessions.get_mut(&source_party_id) {
+                                for payload in buffered {
+                                    if let Err(e) = wr.write_all(&payload).await {
+                                        error!(
+                                            "Failed to flush buffered data for Party {}: {}",
+                                            source_party_id, e
+                                        );
+                                        break;
                                     }
-                                    info!("Flushed buffered data for Party {}", source_party_id);
                                 }
+                                info!("Flushed buffered data for Party {}", source_party_id);
                             }
                         }
 
