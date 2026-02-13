@@ -111,7 +111,7 @@ where
     ) {
         let key = listing_key.to_string();
         let mut announcements = self.bid_announcements.lock().await;
-        let list = announcements.entry(key).or_insert_with(Vec::new);
+        let list = announcements.entry(key).or_default();
 
         // Avoid duplicates
         if !list.iter().any(|(b, _)| b == &bidder) {
