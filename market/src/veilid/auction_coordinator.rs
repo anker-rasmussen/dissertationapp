@@ -18,7 +18,7 @@ use crate::config::subkeys;
 use crate::marketplace::PublicListing;
 use crate::traits::DhtStore;
 
-type BidAnnouncementMap = Arc<Mutex<HashMap<String, Vec<(PublicKey, RecordKey)>>>>;
+type BidAnnouncementMap = Arc<Mutex<HashMap<RecordKey, Vec<(PublicKey, RecordKey)>>>>;
 
 /// Coordinates auction execution: monitors deadlines, triggers MPC
 pub struct AuctionCoordinator {
@@ -34,7 +34,7 @@ pub struct AuctionCoordinator {
     /// Collected bid announcements: Map<listing_key, Vec<(bidder, bid_record_key)>>
     bid_announcements: BidAnnouncementMap,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
-    decryption_keys: Arc<Mutex<HashMap<String, String>>>,
+    decryption_keys: Arc<Mutex<HashMap<RecordKey, String>>>,
     /// MPC orchestrator (owns tunnel proxy, routes, verifications)
     mpc: Arc<MpcOrchestrator>,
     /// Buffered SellerRegistrations received before the registry key was known.
@@ -173,9 +173,8 @@ impl AuctionCoordinator {
         );
 
         // Store the announcement locally
-        let key = listing_key.to_string();
         let mut announcements = self.bid_announcements.lock().await;
-        let list = announcements.entry(key.clone()).or_default();
+        let list = announcements.entry(listing_key.clone()).or_default();
 
         if !list.iter().any(|(b, _)| b == &bidder) {
             list.push((bidder.clone(), bid_record_key.clone()));
@@ -318,9 +317,8 @@ impl AuctionCoordinator {
                 decryption_hash
             );
 
-            let key = listing_key.to_string();
             let mut keys = self.decryption_keys.lock().await;
-            keys.insert(key, decryption_hash);
+            keys.insert(listing_key.clone(), decryption_hash);
             info!("Stored decryption key for listing {}", listing_key);
 
             drop(keys);
@@ -582,9 +580,8 @@ impl AuctionCoordinator {
         bidder: PublicKey,
         bid_record_key: RecordKey,
     ) {
-        let key = listing_key.to_string();
         let mut announcements = self.bid_announcements.lock().await;
-        let list = announcements.entry(key).or_default();
+        let list = announcements.entry(listing_key.clone()).or_default();
 
         if !list.iter().any(|(b, _)| b == &bidder) {
             list.push((bidder, bid_record_key));
@@ -611,24 +608,21 @@ impl AuctionCoordinator {
         }
 
         // Fall back to local announcements
-        let key = listing_key.to_string();
         let announcements = self.bid_announcements.lock().await;
-        announcements.get(&key).map_or(0, std::vec::Vec::len)
+        announcements.get(listing_key).map_or(0, std::vec::Vec::len)
     }
 
     /// Check if the current node received a decryption key for a listing
     pub async fn get_decryption_key(&self, listing_key: &RecordKey) -> Option<String> {
-        let key = listing_key.to_string();
         let keys = self.decryption_keys.lock().await;
-        keys.get(&key).cloned()
+        keys.get(listing_key).cloned()
     }
 
     /// Store a decryption key locally (e.g. seller stores it at listing creation time).
     /// This is necessary because the DHT only stores `PublicListing` (no decryption key).
     pub async fn store_decryption_key(&self, listing_key: &RecordKey, decryption_key: String) {
-        let key = listing_key.to_string();
         let mut keys = self.decryption_keys.lock().await;
-        keys.insert(key, decryption_key);
+        keys.insert(listing_key.clone(), decryption_key);
     }
 
     /// Fetch a listing and decrypt its content if we have the decryption key
@@ -845,9 +839,8 @@ impl AuctionCoordinator {
 
         // Get local announcements as fallback
         let local_announcements = {
-            let key = listing_key.to_string();
             let announcements = self.bid_announcements.lock().await;
-            announcements.get(&key).cloned()
+            announcements.get(listing_key).cloned()
         };
 
         let bid_index = self
