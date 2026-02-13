@@ -68,6 +68,37 @@ pub struct PublicListing {
     pub status: ListingStatus,
 }
 
+// --- Private helper functions for shared logic between Listing and PublicListing ---
+
+fn is_active_impl(status: ListingStatus, auction_end: u64, now: u64) -> bool {
+    status == ListingStatus::Active && auction_end > now
+}
+
+const fn has_ended_impl(auction_end: u64, now: u64) -> bool {
+    auction_end <= now
+}
+
+const fn time_remaining_impl(auction_end: u64, now: u64) -> u64 {
+    auction_end.saturating_sub(now)
+}
+
+fn decrypt_content_impl(
+    encrypted_content: &[u8],
+    content_nonce: &ContentNonce,
+    decryption_key_hex: &str,
+) -> Result<String, crate::error::MarketError> {
+    use crate::crypto::{decrypt_content, ContentKey};
+    use crate::error::MarketError;
+
+    let key_bytes = hex::decode(decryption_key_hex)
+        .map_err(|e| MarketError::Crypto(format!("Invalid hex key: {e}")))?;
+    let len = key_bytes.len();
+    let key: ContentKey = key_bytes
+        .try_into()
+        .map_err(|_| MarketError::Crypto(format!("Key must be 32 bytes, got {len} bytes")))?;
+    decrypt_content(encrypted_content, &key, content_nonce)
+}
+
 impl PublicListing {
     /// Check if the auction is still active (hasn't ended yet)
     pub fn is_active(&self) -> bool {
@@ -76,7 +107,7 @@ impl PublicListing {
 
     /// Check if the auction is still active at a specific timestamp
     pub fn is_active_at(&self, now: u64) -> bool {
-        self.status == ListingStatus::Active && self.auction_end > now
+        is_active_impl(self.status, self.auction_end, now)
     }
 
     /// Check if the auction has ended
@@ -86,7 +117,7 @@ impl PublicListing {
 
     /// Check if the auction has ended at a specific timestamp
     pub const fn has_ended_at(&self, now: u64) -> bool {
-        self.auction_end <= now
+        has_ended_impl(self.auction_end, now)
     }
 
     /// Get time remaining in seconds (0 if ended)
@@ -96,7 +127,7 @@ impl PublicListing {
 
     /// Get time remaining at a specific timestamp
     pub const fn time_remaining_at(&self, now: u64) -> u64 {
-        self.auction_end.saturating_sub(now)
+        time_remaining_impl(self.auction_end, now)
     }
 
     /// Decrypt the encrypted content using the provided hex-encoded decryption key
@@ -105,21 +136,11 @@ impl PublicListing {
         &self,
         decryption_key_hex: &str,
     ) -> Result<String, crate::error::MarketError> {
-        use crate::crypto::{decrypt_content, ContentKey};
-        use crate::error::MarketError;
-
-        // Decode hex string to bytes
-        let key_bytes = hex::decode(decryption_key_hex)
-            .map_err(|e| MarketError::Crypto(format!("Invalid hex key: {e}")))?;
-
-        // Convert to 32-byte array
-        let len = key_bytes.len();
-        let key: ContentKey = key_bytes
-            .try_into()
-            .map_err(|_| MarketError::Crypto(format!("Key must be 32 bytes, got {len} bytes")))?;
-
-        // Decrypt using the crypto module
-        decrypt_content(&self.encrypted_content, &key, &self.content_nonce)
+        decrypt_content_impl(
+            &self.encrypted_content,
+            &self.content_nonce,
+            decryption_key_hex,
+        )
     }
 
     /// Serialize the listing to CBOR bytes
@@ -153,7 +174,7 @@ impl Listing {
 
     /// Check if the auction is still active at a specific timestamp
     pub fn is_active_at(&self, now: u64) -> bool {
-        self.status == ListingStatus::Active && self.auction_end > now
+        is_active_impl(self.status, self.auction_end, now)
     }
 
     /// Check if the auction has ended
@@ -163,7 +184,7 @@ impl Listing {
 
     /// Check if the auction has ended at a specific timestamp
     pub const fn has_ended_at(&self, now: u64) -> bool {
-        self.auction_end <= now
+        has_ended_impl(self.auction_end, now)
     }
 
     /// Get time remaining in seconds (0 if ended)
@@ -173,7 +194,7 @@ impl Listing {
 
     /// Get time remaining at a specific timestamp
     pub const fn time_remaining_at(&self, now: u64) -> u64 {
-        self.auction_end.saturating_sub(now)
+        time_remaining_impl(self.auction_end, now)
     }
 
     /// Decrypt the encrypted content using the provided hex-encoded decryption key
@@ -182,21 +203,11 @@ impl Listing {
         &self,
         decryption_key_hex: &str,
     ) -> Result<String, crate::error::MarketError> {
-        use crate::crypto::{decrypt_content, ContentKey};
-        use crate::error::MarketError;
-
-        // Decode hex string to bytes
-        let key_bytes = hex::decode(decryption_key_hex)
-            .map_err(|e| MarketError::Crypto(format!("Invalid hex key: {e}")))?;
-
-        // Convert to 32-byte array
-        let len = key_bytes.len();
-        let key: ContentKey = key_bytes
-            .try_into()
-            .map_err(|_| MarketError::Crypto(format!("Key must be 32 bytes, got {len} bytes")))?;
-
-        // Decrypt using the crypto module
-        decrypt_content(&self.encrypted_content, &key, &self.content_nonce)
+        decrypt_content_impl(
+            &self.encrypted_content,
+            &self.content_nonce,
+            decryption_key_hex,
+        )
     }
 
     /// Serialize the listing to CBOR bytes
