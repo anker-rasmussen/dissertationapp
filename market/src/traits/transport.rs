@@ -1,8 +1,9 @@
 //! Message transport abstraction for testable network operations.
 
-use anyhow::Result;
 use async_trait::async_trait;
 use veilid_core::{PublicKey, RouteBlob, RouteId};
+
+use crate::error::MarketResult;
 
 /// Target for sending messages.
 #[derive(Debug, Clone)]
@@ -20,23 +21,23 @@ pub enum TransportTarget {
 #[async_trait]
 pub trait MessageTransport: Send + Sync + Clone {
     /// Send a message to the specified target.
-    async fn send(&self, target: TransportTarget, message: Vec<u8>) -> Result<()>;
+    async fn send(&self, target: TransportTarget, message: Vec<u8>) -> MarketResult<()>;
 
     /// Create a new private route for receiving messages.
     ///
     /// Returns the route ID and the route blob that can be shared with others.
-    async fn create_private_route(&self) -> Result<(RouteId, RouteBlob)>;
+    async fn create_private_route(&self) -> MarketResult<(RouteId, RouteBlob)>;
 
     /// Import a remote private route so we can send to it.
     ///
     /// Returns the route ID that can be used as a target.
-    fn import_remote_route(&self, blob: RouteBlob) -> Result<RouteId>;
+    fn import_remote_route(&self, blob: RouteBlob) -> MarketResult<RouteId>;
 
     /// Get all connected peer node IDs.
-    async fn get_peers(&self) -> Result<Vec<PublicKey>>;
+    async fn get_peers(&self) -> MarketResult<Vec<PublicKey>>;
 
     /// Broadcast a message to all connected peers.
-    async fn broadcast(&self, message: Vec<u8>) -> Result<usize> {
+    async fn broadcast(&self, message: Vec<u8>) -> MarketResult<usize> {
         let peers = self.get_peers().await?;
         let mut sent_count = 0;
         for peer in peers {
