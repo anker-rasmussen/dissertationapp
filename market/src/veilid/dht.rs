@@ -34,13 +34,8 @@ impl DHTOperations {
         }
     }
 
-    /// Get a routing context with the appropriate safety selection (internal)
-    fn get_routing_context(&self) -> MarketResult<veilid_core::RoutingContext> {
-        self.get_routing_context_pub()
-    }
-
-    /// Get a routing context with the appropriate safety selection (public)
-    pub fn get_routing_context_pub(&self) -> MarketResult<veilid_core::RoutingContext> {
+    /// Get a routing context with the appropriate safety selection
+    pub fn routing_context(&self) -> MarketResult<veilid_core::RoutingContext> {
         let mut routing_context = self
             .api
             .routing_context()
@@ -61,7 +56,7 @@ impl DHTOperations {
     /// Create a new DHT record with the default crypto system (VLD0)
     /// Returns the OwnedDHTRecord that includes the owner keypair for write access
     pub async fn create_dht_record(&self) -> MarketResult<OwnedDHTRecord> {
-        let routing_context = self.get_routing_context()?;
+        let routing_context = self.routing_context()?;
 
         // Create DHT schema with configured subkeys:
         // - Subkey 0: Primary data (e.g., listing)
@@ -91,7 +86,7 @@ impl DHTOperations {
     /// Open an existing DHT record for read/write access
     /// Returns the record descriptor if successful
     pub async fn open_record(&self, key: &RecordKey) -> MarketResult<DHTRecordDescriptor> {
-        let routing_context = self.get_routing_context()?;
+        let routing_context = self.routing_context()?;
 
         let descriptor = routing_context
             .open_dht_record(key.clone(), None)
@@ -114,7 +109,7 @@ impl DHTOperations {
             )));
         }
 
-        let routing_context = self.get_routing_context()?;
+        let routing_context = self.routing_context()?;
 
         // Open the record with owner keypair for write access
         let _ = routing_context
@@ -166,7 +161,7 @@ impl DHTOperations {
             )));
         }
 
-        let routing_context = self.get_routing_context()?;
+        let routing_context = self.routing_context()?;
 
         // Open the record with owner keypair for write access
         let _ = routing_context
@@ -207,7 +202,7 @@ impl DHTOperations {
         subkey: u32,
         force_refresh: bool,
     ) -> MarketResult<Option<Vec<u8>>> {
-        let routing_context = self.get_routing_context()?;
+        let routing_context = self.routing_context()?;
 
         // Open the record first
         let _ = routing_context
@@ -246,7 +241,7 @@ impl DHTOperations {
     /// Delete a DHT record
     /// This removes the record from the DHT entirely
     pub async fn delete_dht_record(&self, key: &RecordKey) -> MarketResult<()> {
-        let routing_context = self.get_routing_context()?;
+        let routing_context = self.routing_context()?;
 
         // Open the record first
         let _ = routing_context
@@ -269,7 +264,7 @@ impl DHTOperations {
     /// Watch a DHT record for changes
     /// Returns true if watch was successfully established
     pub async fn watch_dht_record(&self, key: &RecordKey) -> MarketResult<bool> {
-        let routing_context = self.get_routing_context()?;
+        let routing_context = self.routing_context()?;
 
         // Open the record first
         let _ = routing_context
@@ -300,7 +295,7 @@ impl DHTOperations {
 
     /// Cancel watching a DHT record
     pub async fn cancel_dht_watch(&self, key: &RecordKey) -> MarketResult<bool> {
-        let routing_context = self.get_routing_context()?;
+        let routing_context = self.routing_context()?;
 
         // Cancel watch on all subkeys
         let subkeys = Some(ValueSubkeyRangeSet::full());
