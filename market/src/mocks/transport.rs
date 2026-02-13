@@ -1,7 +1,7 @@
 //! Mock message transport for testing.
 
+use crate::error::{MarketError, MarketResult};
 use crate::traits::{MessageTransport, TransportTarget};
-use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -117,9 +117,9 @@ impl Default for MockTransport {
 
 #[async_trait]
 impl MessageTransport for MockTransport {
-    async fn send(&self, target: TransportTarget, message: Vec<u8>) -> Result<()> {
+    async fn send(&self, target: TransportTarget, message: Vec<u8>) -> MarketResult<()> {
         if *self.fail_sends.read().await {
-            return Err(anyhow!("MockTransport: simulated send failure"));
+            return Err(MarketError::Transport("simulated send failure".into()));
         }
 
         let sequence_number = self.message_counter.fetch_add(1, Ordering::SeqCst);
@@ -132,7 +132,7 @@ impl MessageTransport for MockTransport {
         Ok(())
     }
 
-    async fn create_private_route(&self) -> Result<(RouteId, RouteBlob)> {
+    async fn create_private_route(&self) -> MarketResult<(RouteId, RouteBlob)> {
         let counter = self.route_counter.fetch_add(1, Ordering::SeqCst);
         let route_id = Self::make_route_id(counter);
 
@@ -150,11 +150,11 @@ impl MessageTransport for MockTransport {
         Ok((route_id, blob))
     }
 
-    fn import_remote_route(&self, blob: RouteBlob) -> Result<RouteId> {
+    fn import_remote_route(&self, blob: RouteBlob) -> MarketResult<RouteId> {
         Ok(blob.route_id)
     }
 
-    async fn get_peers(&self) -> Result<Vec<PublicKey>> {
+    async fn get_peers(&self) -> MarketResult<Vec<PublicKey>> {
         Ok(self.peers.read().await.clone())
     }
 }
