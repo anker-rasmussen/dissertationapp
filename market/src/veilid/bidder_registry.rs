@@ -100,7 +100,7 @@ impl BidderRegistryOps {
         let max_retries = 10;
         let mut retry_delay = std::time::Duration::from_millis(50);
 
-        let routing_context = self.dht.get_routing_context_pub()?;
+        let routing_context = self.dht.routing_context()?;
 
         // Open the listing record
         let _ = routing_context
@@ -186,7 +186,7 @@ impl BidderRegistryOps {
 
     /// Fetch all registered bidders for a listing
     pub async fn fetch_bidders(&self, listing_key: &RecordKey) -> Result<BidderRegistry> {
-        let routing_context = self.dht.get_routing_context_pub()?;
+        let routing_context = self.dht.routing_context()?;
 
         match routing_context
             .open_dht_record(listing_key.clone(), None)

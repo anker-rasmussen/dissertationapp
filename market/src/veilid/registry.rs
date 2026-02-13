@@ -209,7 +209,7 @@ impl RegistryOperations {
     /// means any node that knows the record key can write to it.
     /// On the same node, a second call will fail (record already in local store).
     pub async fn create_master_registry(&mut self) -> MarketResult<RecordKey> {
-        let routing_context = self.dht.get_routing_context_pub()?;
+        let routing_context = self.dht.routing_context()?;
         let schema = DHTSchema::dflt(1)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
 
@@ -266,7 +266,7 @@ impl RegistryOperations {
             .ok_or_else(|| MarketError::InvalidState("Master registry key not known yet".into()))?
             .clone();
 
-        let routing_context = self.dht.get_routing_context_pub()?;
+        let routing_context = self.dht.routing_context()?;
 
         // Open with shared keypair for write access
         let _ = routing_context
@@ -379,7 +379,7 @@ impl RegistryOperations {
             return Ok(record.key.clone());
         }
 
-        let routing_context = self.dht.get_routing_context_pub()?;
+        let routing_context = self.dht.routing_context()?;
         let schema = DHTSchema::dflt(1)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
         let descriptor = routing_context
@@ -428,7 +428,7 @@ impl RegistryOperations {
             .as_ref()
             .ok_or_else(|| MarketError::InvalidState("Seller catalog not created yet".into()))?;
 
-        let routing_context = self.dht.get_routing_context_pub()?;
+        let routing_context = self.dht.routing_context()?;
         let _ = routing_context
             .open_dht_record(record.key.clone(), Some(record.owner.clone()))
             .await
@@ -476,7 +476,7 @@ impl RegistryOperations {
         };
         let key = key.clone();
 
-        let routing_context = self.dht.get_routing_context_pub()?;
+        let routing_context = self.dht.routing_context()?;
         let _ = routing_context
             .open_dht_record(key.clone(), None)
             .await
@@ -512,7 +512,7 @@ impl RegistryOperations {
         &self,
         catalog_key: &RecordKey,
     ) -> MarketResult<SellerCatalog> {
-        let routing_context = self.dht.get_routing_context_pub()?;
+        let routing_context = self.dht.routing_context()?;
         let _ = routing_context
             .open_dht_record(catalog_key.clone(), None)
             .await
