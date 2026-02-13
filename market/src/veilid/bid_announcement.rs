@@ -1,5 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::sync::Mutex;
 use veilid_core::{PublicKey, RecordKey, RouteBlob};
 
 use crate::config::now_unix;
@@ -47,6 +49,58 @@ impl BidAnnouncementRegistry {
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         ciborium::from_reader(data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize bid registry: {e}"))
+    }
+}
+
+/// In-memory tracker for bid announcements, shared by both
+/// `AuctionCoordinator` (real Veilid) and `AuctionLogic` (mock-testable).
+///
+/// Provides dedup-on-insert and per-listing lookup without exposing
+/// the internal `Mutex<HashMap<…>>` to callers.
+pub struct BidAnnouncementTracker {
+    announcements: Mutex<HashMap<RecordKey, Vec<(PublicKey, RecordKey)>>>,
+}
+
+impl Default for BidAnnouncementTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BidAnnouncementTracker {
+    pub fn new() -> Self {
+        Self {
+            announcements: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register a bid announcement. Returns `true` if the bidder was new.
+    pub async fn register(
+        &self,
+        listing_key: &RecordKey,
+        bidder: PublicKey,
+        bid_record_key: RecordKey,
+    ) -> bool {
+        let mut map = self.announcements.lock().await;
+        let list = map.entry(listing_key.clone()).or_default();
+        let is_new = !list.iter().any(|(b, _)| b == &bidder);
+        if is_new {
+            list.push((bidder, bid_record_key));
+        }
+        drop(map);
+        is_new
+    }
+
+    /// Number of unique bidders for a listing.
+    pub async fn count(&self, listing_key: &RecordKey) -> usize {
+        let map = self.announcements.lock().await;
+        map.get(listing_key).map_or(0, Vec::len)
+    }
+
+    /// Clone the announcement list for a listing, if any.
+    pub async fn get(&self, listing_key: &RecordKey) -> Option<Vec<(PublicKey, RecordKey)>> {
+        let map = self.announcements.lock().await;
+        map.get(listing_key).cloned()
     }
 }
 

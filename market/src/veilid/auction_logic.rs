@@ -15,11 +15,11 @@ use crate::marketplace::{BidIndex, Listing};
 use crate::traits::{
     DhtStore, MessageTransport, MpcResult, MpcRunner, TimeProvider, TransportTarget,
 };
-use crate::veilid::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
+use crate::veilid::bid_announcement::{
+    AuctionMessage, BidAnnouncementRegistry, BidAnnouncementTracker,
+};
 use crate::veilid::bid_ops::BidOperations;
 use crate::veilid::bid_storage::BidStorage;
-
-type BidAnnouncementMap = Arc<Mutex<HashMap<RecordKey, Vec<(PublicKey, RecordKey)>>>>;
 
 /// Testable auction coordination logic.
 ///
@@ -40,8 +40,8 @@ where
     bid_storage: BidStorage,
     /// Listings we're monitoring
     watched_listings: Arc<Mutex<HashMap<RecordKey, Listing>>>,
-    /// Collected bid announcements: Map<listing_key, Vec<(bidder, bid_record_key)>>
-    bid_announcements: BidAnnouncementMap,
+    /// Collected bid announcements (deduped per listing)
+    bid_announcements: BidAnnouncementTracker,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
     decryption_keys: Arc<Mutex<HashMap<RecordKey, String>>>,
 }
@@ -70,7 +70,7 @@ where
             my_node_id,
             bid_storage,
             watched_listings: Arc::new(Mutex::new(HashMap::new())),
-            bid_announcements: Arc::new(Mutex::new(HashMap::new())),
+            bid_announcements: BidAnnouncementTracker::new(),
             decryption_keys: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -109,21 +109,19 @@ where
         bidder: PublicKey,
         bid_record_key: RecordKey,
     ) {
-        let mut announcements = self.bid_announcements.lock().await;
-        let list = announcements.entry(listing_key.clone()).or_default();
-
-        // Avoid duplicates
-        if !list.iter().any(|(b, _)| b == &bidder) {
-            list.push((bidder, bid_record_key));
-            info!("Registered bid announcement, total: {}", list.len());
+        if self
+            .bid_announcements
+            .register(listing_key, bidder, bid_record_key)
+            .await
+        {
+            let count = self.bid_announcements.count(listing_key).await;
+            info!("Registered bid announcement, total: {}", count);
         }
-        drop(announcements);
     }
 
     /// Get the number of bids for a listing from local announcements.
     pub async fn get_local_bid_count(&self, listing_key: &RecordKey) -> usize {
-        let announcements = self.bid_announcements.lock().await;
-        announcements.get(listing_key).map_or(0, std::vec::Vec::len)
+        self.bid_announcements.count(listing_key).await
     }
 
     /// Store a received decryption key.
@@ -182,8 +180,7 @@ where
             registry.announcements
         } else {
             info!("No DHT bid registry found, using local announcements");
-            let announcements = self.bid_announcements.lock().await;
-            match announcements.get(listing_key) {
+            match self.bid_announcements.get(listing_key).await {
                 Some(list) => list
                     .iter()
                     .map(|(bidder, bid_key)| (bidder.clone(), bid_key.clone(), 0))
