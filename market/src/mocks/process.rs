@@ -1,7 +1,7 @@
 //! Mock MPC runner for testing.
 
+use crate::error::{MarketError, MarketResult};
 use crate::traits::{MpcResult, MpcRunner};
-use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -223,9 +223,9 @@ impl Default for MockMpcRunner {
 
 #[async_trait]
 impl MpcRunner for MockMpcRunner {
-    async fn compile(&self, program: &str, num_parties: usize) -> Result<()> {
+    async fn compile(&self, program: &str, num_parties: usize) -> MarketResult<()> {
         if *self.fail_mode.read().await {
-            return Err(anyhow!("MockMpcRunner: simulated compile failure"));
+            return Err(MarketError::Mpc("simulated compile failure".into()));
         }
 
         self.compilations
@@ -240,9 +240,9 @@ impl MpcRunner for MockMpcRunner {
         party_id: usize,
         num_parties: usize,
         input_value: u64,
-    ) -> Result<MpcResult> {
+    ) -> MarketResult<MpcResult> {
         if *self.fail_mode.read().await {
-            return Err(anyhow!("MockMpcRunner: simulated execute failure"));
+            return Err(MarketError::Mpc("simulated execute failure".into()));
         }
 
         self.executions.write().await.push(RecordedExecution {
@@ -270,18 +270,18 @@ impl MpcRunner for MockMpcRunner {
         })
     }
 
-    async fn write_input(&self, party_id: usize, value: u64) -> Result<()> {
+    async fn write_input(&self, party_id: usize, value: u64) -> MarketResult<()> {
         if *self.fail_mode.read().await {
-            return Err(anyhow!("MockMpcRunner: simulated write_input failure"));
+            return Err(MarketError::Mpc("simulated write_input failure".into()));
         }
 
         self.inputs.write().await.insert(party_id, value);
         Ok(())
     }
 
-    async fn write_hosts(&self, hosts_name: &str, num_parties: usize) -> Result<()> {
+    async fn write_hosts(&self, hosts_name: &str, num_parties: usize) -> MarketResult<()> {
         if *self.fail_mode.read().await {
-            return Err(anyhow!("MockMpcRunner: simulated write_hosts failure"));
+            return Err(MarketError::Mpc("simulated write_hosts failure".into()));
         }
 
         self.hosts_files

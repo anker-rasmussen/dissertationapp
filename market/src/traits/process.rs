@@ -1,7 +1,8 @@
 //! MPC process runner abstraction for testable MPC operations.
 
-use anyhow::Result;
 use async_trait::async_trait;
+
+use crate::error::MarketResult;
 
 /// Result of an MPC auction computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub trait MpcRunner: Send + Sync + Clone {
     /// # Arguments
     /// * `program` - Name of the MPC program to compile
     /// * `num_parties` - Number of parties participating
-    async fn compile(&self, program: &str, num_parties: usize) -> Result<()>;
+    async fn compile(&self, program: &str, num_parties: usize) -> MarketResult<()>;
 
     /// Execute an MPC auction computation.
     ///
@@ -45,19 +46,19 @@ pub trait MpcRunner: Send + Sync + Clone {
         party_id: usize,
         num_parties: usize,
         input_value: u64,
-    ) -> Result<MpcResult>;
+    ) -> MarketResult<MpcResult>;
 
     /// Write input file for MP-SPDZ.
     ///
     /// # Arguments
     /// * `party_id` - This party's ID
     /// * `value` - The input value to write
-    async fn write_input(&self, party_id: usize, value: u64) -> Result<()>;
+    async fn write_input(&self, party_id: usize, value: u64) -> MarketResult<()>;
 
     /// Write hosts file for MP-SPDZ.
     ///
     /// # Arguments
     /// * `hosts_name` - Name of the hosts file
     /// * `num_parties` - Number of parties (one localhost entry per party)
-    async fn write_hosts(&self, hosts_name: &str, num_parties: usize) -> Result<()>;
+    async fn write_hosts(&self, hosts_name: &str, num_parties: usize) -> MarketResult<()>;
 }
