@@ -95,13 +95,14 @@ impl Bid {
     /// Verify that a revealed bid matches its commitment
     pub fn verify_commitment(&self) -> bool {
         use sha2::{Digest, Sha256};
+        use subtle::ConstantTimeEq;
 
         if let Some(nonce) = &self.reveal_nonce {
             let mut hasher = Sha256::new();
             hasher.update(self.amount.to_le_bytes());
             hasher.update(nonce);
             let computed: [u8; 32] = hasher.finalize().into();
-            computed == self.commitment
+            computed.ct_eq(&self.commitment).into()
         } else {
             false
         }
