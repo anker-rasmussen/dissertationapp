@@ -16,11 +16,13 @@ use crate::error::{MarketError, MarketResult};
 /// Computes `SHA256(bid_value_le_bytes || nonce)` and compares with the stored commitment.
 /// This is the core commitment verification used in the Danish Sugar Beet auction protocol.
 pub fn verify_commitment(bid_value: u64, nonce: &[u8; 32], stored_commitment: &[u8; 32]) -> bool {
+    use subtle::ConstantTimeEq;
+
     let mut hasher = Sha256::new();
     hasher.update(bid_value.to_le_bytes());
     hasher.update(nonce);
     let computed: [u8; 32] = hasher.finalize().into();
-    computed == *stored_commitment
+    computed.ct_eq(stored_commitment).into()
 }
 
 /// Named struct replacing the tuple `(PublicKey, u64, Option<bool>)` for pending verifications.
@@ -61,10 +63,7 @@ impl MpcOrchestrator {
                     verified: None,
                 },
             );
-            info!(
-                "Stored pending verification: winner={}, bid={}",
-                winner_pubkey, bid
-            );
+            info!("Stored pending verification for winner {}", winner_pubkey);
 
             // Send WinnerDecryptionRequest to winner via their MPC route (challenge)
             info!(
@@ -183,10 +182,7 @@ impl MpcOrchestrator {
             return false;
         }
 
-        info!(
-            "Commitment verified for winner {} with bid value {}",
-            winner, bid_value
-        );
+        info!("Commitment verified for winner {}", winner);
         true
     }
 

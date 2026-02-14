@@ -11,7 +11,11 @@ use crate::error::{MarketError, MarketResult};
 
 /// Calculate the base port for a given node offset.
 /// Formula: `5000 + (node_offset * 10)`
+///
+/// # Panics
+/// Panics if `node_offset > 6000` (would overflow valid port range).
 const fn base_port_for_offset(node_offset: u16) -> u16 {
+    assert!(node_offset <= 6000, "node_offset too large for port range");
     5000 + (node_offset * 10)
 }
 
@@ -177,7 +181,7 @@ impl MpcTunnelProxy {
             let target_route_clone = target_route.clone();
             let my_pid = self.inner.party_id;
 
-            let mut buf = vec![0u8; 32000]; // Keep under 32KB
+            let mut buf = vec![0u8; 31000]; // Keep under 32KB with bincode envelope overhead
             loop {
                 let n = match rd.read(&mut buf).await {
                     Ok(0) => break, // EOF
@@ -315,7 +319,7 @@ impl MpcTunnelProxy {
                                     return;
                                 };
 
-                                let mut buf = vec![0u8; 32000];
+                                let mut buf = vec![0u8; 31000];
                                 loop {
                                     let n = match rd.read(&mut buf).await {
                                         Ok(0) | Err(_) => break,
@@ -362,6 +366,12 @@ impl MpcTunnelProxy {
                     );
                     drop(sessions); // Release sessions lock before acquiring pending_data lock
                     let mut pending = self.inner.pending_data.lock().await;
+                    let total: usize = pending.values().flat_map(|v| v.iter()).map(Vec::len).sum();
+                    if total + payload.len() > 10 * 1024 * 1024 {
+                        return Err(MarketError::Network(
+                            "MPC pending data buffer exceeded 10MB limit".into(),
+                        ));
+                    }
                     pending.entry(source_party_id).or_default().push(payload);
                 }
             }

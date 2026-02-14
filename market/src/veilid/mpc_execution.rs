@@ -104,17 +104,44 @@ pub(crate) async fn spawn_shamir_party(
         // stdin is dropped here, sending EOF
     }
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(result) => result
-            .map_err(|e| MarketError::Process(format!("Failed to execute shamir-party.x: {e}"))),
-        Err(_) => Err(MarketError::Timeout(
-            "MPC execution timed out after 120 seconds".into(),
-        )),
+    // Collect stdout/stderr in background tasks so we keep &mut child for kill()
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stdout_pipe, &mut buf)
+            .await
+            .unwrap_or(0);
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stderr_pipe, &mut buf)
+            .await
+            .unwrap_or(0);
+        buf
+    });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(120), child.wait()).await {
+        Ok(Ok(status)) => {
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+        Ok(Err(e)) => Err(MarketError::Process(format!(
+            "Failed to execute shamir-party.x: {e}"
+        ))),
+        Err(_) => {
+            let _ = child.kill().await;
+            Err(MarketError::Timeout(
+                "MPC execution timed out after 120 seconds".into(),
+            ))
+        }
     }
 }
 
@@ -130,8 +157,8 @@ pub(crate) fn parse_seller_mpc_output(stdout: &str) -> Option<(usize, u64)> {
         if line.contains("Winning bid:") {
             if let Some(bid_str) = line.split(':').next_back() {
                 winning_bid = bid_str.trim().parse().ok();
-                if let Some(bid) = winning_bid {
-                    info!("Parsed winning bid from MPC output: {}", bid);
+                if winning_bid.is_some() {
+                    info!("Parsed winning bid from MPC output");
                 }
             }
         }
