@@ -129,36 +129,45 @@ impl MpcRouteManager {
         Ok(())
     }
 
-    /// Register a route announcement received from another party
+    /// Register a route announcement received from another party.
+    ///
+    /// Always re-imports the route blob so Veilid refreshes its internal
+    /// relay state — this recovers from transient `dead_remote_routes` events
+    /// that would otherwise leave a stale handle in [`received_routes`].
     pub async fn register_route_announcement(
         &self,
         party_pubkey: PublicKey,
         route_blob: RouteBlob,
     ) -> MarketResult<()> {
-        let mut routes = self.received_routes.lock().await;
-
-        if routes.contains_key(&party_pubkey) {
-            debug!(
-                "Already have route for party {}, ignoring duplicate",
-                party_pubkey
-            );
-            return Ok(());
-        }
-
-        // Import the remote private route so we can send to it
-        let _ = self
+        // Always import — re-importing a known blob refreshes Veilid's
+        // internal route state, which recovers dead routes.
+        let imported_route = self
             .api
             .import_remote_private_route(route_blob.blob.clone())
             .map_err(|e| MarketError::Network(format!("Failed to import remote route: {e}")))?;
 
-        let route_id = route_blob.route_id.clone();
+        let mut routes = self.received_routes.lock().await;
 
-        routes.insert(party_pubkey.clone(), route_id.clone());
+        if let Some(existing) = routes.get(&party_pubkey) {
+            if *existing == imported_route {
+                // Same route handle — re-import refreshed it, no map change.
+                return Ok(());
+            }
+            // Different route (party recreated it); release old handle.
+            info!(
+                "Replacing route for party {} (old: {}, new: {})",
+                party_pubkey, existing, imported_route
+            );
+            let _ = self.api.release_private_route(existing.clone());
+        } else {
+            info!(
+                "Registered and imported route for party {}: {}",
+                party_pubkey, imported_route
+            );
+        }
+
+        routes.insert(party_pubkey.clone(), imported_route);
         drop(routes);
-        info!(
-            "Registered and imported route for party {}: {}",
-            party_pubkey, route_id
-        );
         Ok(())
     }
 
