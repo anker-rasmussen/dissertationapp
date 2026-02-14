@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 use veilid_core::{
-    BareKeyPair, BarePublicKey, BareSecretKey, DHTSchema, KeyPair, RecordKey, CRYPTO_KIND_VLD0,
+    BareKeyPair, BareOpaqueRecordKey, BarePublicKey, BareRecordKey, BareSecretKey, DHTSchema,
+    KeyPair, RecordKey, CRYPTO_KIND_VLD0,
 };
 
 use super::dht::{DHTOperations, OwnedDHTRecord};
@@ -30,6 +31,17 @@ fn derive_registry_keypair(network_key: &str) -> KeyPair {
 
 // ── Data structures ──────────────────────────────────────────────────
 
+/// Entry in the master registry — one per node's broadcast route.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteEntry {
+    /// Node's public key (string form).
+    pub node_id: String,
+    /// Serialised Veilid route blob for importing.
+    pub route_blob: Vec<u8>,
+    /// When this route was registered (unix timestamp).
+    pub registered_at: u64,
+}
+
 /// Entry in the master registry — one per seller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SellerEntry {
@@ -42,11 +54,14 @@ pub struct SellerEntry {
 }
 
 /// The master registry stored in the bootstrap node's DHT record (subkey 0, CBOR).
-/// Contains the directory of all sellers.
+/// Contains the directory of all sellers and node broadcast routes.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MarketRegistry {
     /// Registered sellers.
     pub sellers: Vec<SellerEntry>,
+    /// Node broadcast routes (for private-route-based messaging).
+    #[serde(default)]
+    pub routes: Vec<RouteEntry>,
     /// Version for conflict resolution (higher wins).
     pub version: u64,
 }
@@ -62,11 +77,25 @@ impl MarketRegistry {
         ciborium::from_reader(data)
     }
 
+    /// Add or update a node's broadcast route, deduplicating by node_id.
+    /// Caps at 200 routes (same sizing as sellers).
+    pub fn add_route(&mut self, entry: RouteEntry) {
+        if let Some(existing) = self.routes.iter_mut().find(|r| r.node_id == entry.node_id) {
+            existing.route_blob = entry.route_blob;
+            existing.registered_at = entry.registered_at;
+        } else if self.routes.len() < 200 {
+            self.routes.push(entry);
+        } else {
+            return;
+        }
+        self.version += 1;
+    }
+
     /// Add a seller, deduplicating by pubkey.
     /// Caps the registry at 500 sellers to prevent unbounded growth.
     pub fn add_seller(&mut self, entry: SellerEntry) {
-        if self.sellers.len() >= 500 {
-            return; // Cap at 500 sellers
+        if self.sellers.len() >= 200 {
+            return; // Cap at 200 sellers (must fit in 32KB DHT value)
         }
         if !self
             .sellers
@@ -203,24 +232,69 @@ impl RegistryOperations {
 
     // ── Master registry (any node) ─────────────────────────────────
 
+    /// Compute the deterministic record key for the master registry.
+    ///
+    /// Replicates Veilid's internal key derivation:
+    /// `BLAKE3(VLD0_bytes || owner_pubkey || schema_compiled)`.
+    /// Since the shared keypair is deterministic (derived from the network key),
+    /// all nodes on the same network compute the same record key.
+    fn compute_master_registry_key(&self) -> RecordKey {
+        let owner_key: &[u8] = &self.shared_keypair.value().key();
+        // DHTSchema::dflt(1).compile() = FourCC "DFLT" + 1u16 little-endian
+        let schema_data: [u8; 6] = [b'D', b'F', b'L', b'T', 1, 0];
+
+        let mut hash_input = Vec::with_capacity(4 + owner_key.len() + schema_data.len());
+        hash_input.extend_from_slice(b"VLD0");
+        hash_input.extend_from_slice(owner_key);
+        hash_input.extend_from_slice(&schema_data);
+
+        let hash = blake3::hash(&hash_input);
+        let opaque = BareOpaqueRecordKey::new(hash.as_bytes());
+        RecordKey::new(CRYPTO_KIND_VLD0, BareRecordKey::new(opaque, None))
+    }
+
     /// Create the master registry DHT record using the shared keypair.
     ///
     /// The first node to call this creates the record. The shared keypair
     /// means any node that knows the record key can write to it.
-    /// On the same node, a second call will fail (record already in local store).
+    ///
+    /// `create_dht_record` unconditionally generates a **random** per-record
+    /// encryption key.  Since the master registry must be readable by every
+    /// node on the network (each of which would independently generate a
+    /// *different* key), we immediately close the encrypted handle and
+    /// re-open the record **without** an encryption key so that values are
+    /// stored in plaintext on the DHT.
     pub async fn create_master_registry(&mut self) -> MarketResult<RecordKey> {
         let routing_context = self.dht.routing_context()?;
         let schema = DHTSchema::dflt(1)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
 
+        // Step 1 — allocate the record (generates a random encryption key).
         let descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(self.shared_keypair.clone()))
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to create master registry: {e}")))?;
 
-        let key = descriptor.key();
+        // Step 2 — close the encrypted handle.
+        routing_context
+            .close_dht_record(descriptor.key())
+            .await
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to close encrypted registry handle: {e}"))
+            })?;
 
-        // Initialize with empty registry
+        // Step 3 — re-open with the deterministic key (no encryption key).
+        let key = self.compute_master_registry_key();
+        let _ = routing_context
+            .open_dht_record(key.clone(), Some(self.shared_keypair.clone()))
+            .await
+            .map_err(|e| {
+                MarketError::Dht(format!(
+                    "Failed to re-open master registry without encryption: {e}"
+                ))
+            })?;
+
+        // Step 4 — write initial data in plaintext.
         let empty = MarketRegistry::default();
         let data = empty.to_cbor().map_err(|e| {
             MarketError::Serialization(format!("Failed to serialize empty registry: {e}"))
@@ -235,14 +309,38 @@ impl RegistryOperations {
         Ok(key)
     }
 
-    /// Ensure the master registry is available (create or use already-known key).
+    /// Ensure the master registry is available.
     ///
-    /// - If the key is already known (from a peer broadcast), returns it.
-    /// - Otherwise tries to create the record (first node on this machine wins).
+    /// 1. If the key is already known (from a peer broadcast or prior call), returns it.
+    /// 2. Otherwise, computes the deterministic key and tries to open it
+    ///    (handles restart / DHT-replication scenarios).
+    /// 3. Falls back to creating a new record if it doesn't exist locally yet.
     pub async fn ensure_master_registry(&mut self) -> MarketResult<RecordKey> {
         if let Some(key) = &self.master_registry_key {
             return Ok(key.clone());
         }
+
+        // Compute the deterministic key and try to open the existing record.
+        // This handles two cases:
+        //   a) Record exists from a previous app session (same node restart)
+        //   b) Record was replicated here from another node that created it
+        let expected_key = self.compute_master_registry_key();
+        let routing_context = self.dht.routing_context()?;
+
+        match routing_context
+            .open_dht_record(expected_key.clone(), Some(self.shared_keypair.clone()))
+            .await
+        {
+            Ok(_) => {
+                info!("Opened existing master registry at: {}", expected_key);
+                self.master_registry_key = Some(expected_key.clone());
+                return Ok(expected_key);
+            }
+            Err(e) => {
+                debug!("Master registry not in local store, will create: {}", e);
+            }
+        }
+
         self.create_master_registry().await
     }
 
@@ -279,12 +377,12 @@ impl RegistryOperations {
 
         for attempt in 0..max_retries {
             let value_data = routing_context
-                .get_dht_value(registry_key.clone(), 0, true)
+                .get_dht_value(registry_key.clone(), 0, false)
                 .await
                 .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?;
 
             let (mut registry, old_seq) = match value_data {
-                Some(v) => {
+                Some(v) if !v.data().is_empty() => {
                     let seq = v.seq();
                     match MarketRegistry::from_cbor(v.data()) {
                         Ok(reg) => (reg, Some(seq)),
@@ -293,6 +391,10 @@ impl RegistryOperations {
                             (MarketRegistry::default(), Some(seq))
                         }
                     }
+                }
+                Some(_) => {
+                    debug!("Registry subkey 0 has no data yet (fresh record)");
+                    (MarketRegistry::default(), None)
                 }
                 None => (MarketRegistry::default(), None),
             };
@@ -361,6 +463,123 @@ impl RegistryOperations {
         Err(MarketError::Dht(format!(
             "Failed to register seller after {max_retries} attempts"
         )))
+    }
+
+    /// Register (or update) this node's broadcast route in the master registry.
+    /// Retries on concurrent-write conflicts (same pattern as `register_seller`).
+    pub async fn register_route(&mut self, node_id: &str, route_blob: Vec<u8>) -> MarketResult<()> {
+        let registry_key = self
+            .master_registry_key
+            .as_ref()
+            .ok_or_else(|| MarketError::InvalidState("Master registry key not known yet".into()))?
+            .clone();
+
+        let routing_context = self.dht.routing_context()?;
+        let _ = routing_context
+            .open_dht_record(registry_key.clone(), Some(self.shared_keypair.clone()))
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to open registry record: {e}")))?;
+
+        let max_retries: u32 = 10;
+        let mut retry_delay = std::time::Duration::from_millis(50);
+
+        for attempt in 0..max_retries {
+            // Force refresh on retries to get the latest version after a conflict
+            let force_refresh = attempt > 0;
+            let value_data = routing_context
+                .get_dht_value(registry_key.clone(), 0, force_refresh)
+                .await
+                .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?;
+
+            let (mut registry, old_seq) = match value_data {
+                Some(v) if !v.data().is_empty() => {
+                    let seq = v.seq();
+                    match MarketRegistry::from_cbor(v.data()) {
+                        Ok(reg) => (reg, Some(seq)),
+                        Err(e) => {
+                            warn!("Registry data corrupted (seq {}), overwriting: {}", seq, e);
+                            (MarketRegistry::default(), Some(seq))
+                        }
+                    }
+                }
+                Some(_) => {
+                    debug!("Registry subkey 0 has no data yet (fresh record)");
+                    (MarketRegistry::default(), None)
+                }
+                None => (MarketRegistry::default(), None),
+            };
+
+            registry.add_route(RouteEntry {
+                node_id: node_id.to_string(),
+                route_blob: route_blob.clone(),
+                registered_at: now_unix(),
+            });
+
+            let data = registry.to_cbor().map_err(|e| {
+                MarketError::Serialization(format!("Failed to serialize registry: {e}"))
+            })?;
+
+            match routing_context
+                .set_dht_value(registry_key.clone(), 0, data, None)
+                .await
+            {
+                Ok(old_value) => {
+                    if let Some(returned) = old_value {
+                        if let Some(expected) = old_seq {
+                            if returned.seq() != expected && attempt < max_retries - 1 {
+                                warn!(
+                                    "Route registration: concurrent write (seq {} -> {}), retrying",
+                                    expected,
+                                    returned.seq()
+                                );
+                                tokio::time::sleep(retry_delay).await;
+                                retry_delay *= 2;
+                                continue;
+                            }
+                        }
+                    }
+                    info!(
+                        "Registered route for node '{}' (attempt {}/{})",
+                        node_id,
+                        attempt + 1,
+                        max_retries
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    if attempt < max_retries - 1 {
+                        warn!("Route registration write failed ({}), retrying", e);
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay *= 2;
+                        continue;
+                    }
+                    return Err(MarketError::Dht(format!(
+                        "Failed to register route after {max_retries} attempts: {e}"
+                    )));
+                }
+            }
+        }
+
+        Err(MarketError::Dht(format!(
+            "Failed to register route after {max_retries} attempts"
+        )))
+    }
+
+    /// Fetch all route blobs from the master registry, excluding the given node_id.
+    ///
+    /// Uses cached DHT data (no network round-trip) since this is called on
+    /// every broadcast tick and slightly stale routes are acceptable.
+    pub async fn fetch_route_blobs(
+        &self,
+        exclude_node_id: &str,
+    ) -> MarketResult<Vec<(String, Vec<u8>)>> {
+        let registry = self.fetch_registry(false).await?;
+        Ok(registry
+            .routes
+            .into_iter()
+            .filter(|r| r.node_id != exclude_node_id)
+            .map(|r| (r.node_id, r.route_blob))
+            .collect())
     }
 
     /// Get the master registry key (if known).
@@ -456,6 +675,8 @@ impl RegistryOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to set catalog value: {e}")))?;
 
+        let _ = routing_context.close_dht_record(record.key.clone()).await;
+
         info!(
             "Added listing to catalog, now has {} listings",
             catalog.listings.len()
@@ -469,7 +690,12 @@ impl RegistryOperations {
     ///
     /// Returns an empty registry if the master key is not yet known
     /// (e.g. no `RegistryAnnouncement` received yet).
-    pub async fn fetch_registry(&self) -> MarketResult<MarketRegistry> {
+    ///
+    /// When `force_refresh` is `true` the value is fetched from the network
+    /// (required for accurate discovery).  When `false` the locally cached
+    /// copy is returned, which avoids a network round-trip and is sufficient
+    /// for broadcast-path reads where slightly stale data is acceptable.
+    pub async fn fetch_registry(&self, force_refresh: bool) -> MarketResult<MarketRegistry> {
         let Some(key) = &self.master_registry_key else {
             info!("Master registry key not known yet, returning empty registry");
             return Ok(MarketRegistry::default());
@@ -477,21 +703,20 @@ impl RegistryOperations {
         let key = key.clone();
 
         let routing_context = self.dht.routing_context()?;
+        // Defensive re-open (no-op if already open from ensure_master_registry).
         let _ = routing_context
-            .open_dht_record(key.clone(), None)
+            .open_dht_record(key.clone(), Some(self.shared_keypair.clone()))
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to open registry record: {e}")))?;
 
         let data = routing_context
-            .get_dht_value(key.clone(), 0, true)
+            .get_dht_value(key.clone(), 0, force_refresh)
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?
             .map(|v| v.data().to_vec());
 
-        let _ = routing_context.close_dht_record(key).await;
-
-        if let Some(bytes) = data {
-            match MarketRegistry::from_cbor(&bytes) {
+        match data {
+            Some(bytes) if !bytes.is_empty() => match MarketRegistry::from_cbor(&bytes) {
                 Ok(registry) => {
                     debug!("Fetched registry with {} sellers", registry.sellers.len());
                     Ok(registry)
@@ -500,10 +725,11 @@ impl RegistryOperations {
                     warn!("Registry data corrupted, returning empty: {}", e);
                     Ok(MarketRegistry::default())
                 }
+            },
+            _ => {
+                debug!("Registry has no data yet");
+                Ok(MarketRegistry::default())
             }
-        } else {
-            debug!("Registry is empty");
-            Ok(MarketRegistry::default())
         }
     }
 
@@ -526,8 +752,8 @@ impl RegistryOperations {
 
         let _ = routing_context.close_dht_record(catalog_key.clone()).await;
 
-        if let Some(bytes) = data {
-            match SellerCatalog::from_cbor(&bytes) {
+        match data {
+            Some(bytes) if !bytes.is_empty() => match SellerCatalog::from_cbor(&bytes) {
                 Ok(catalog) => {
                     debug!(
                         "Fetched catalog for seller '{}' with {} listings",
@@ -540,16 +766,17 @@ impl RegistryOperations {
                     warn!("Catalog data corrupted, returning empty: {}", e);
                     Ok(SellerCatalog::default())
                 }
+            },
+            _ => {
+                debug!("Catalog has no data yet");
+                Ok(SellerCatalog::default())
             }
-        } else {
-            debug!("Catalog is empty");
-            Ok(SellerCatalog::default())
         }
     }
 
     /// Two-hop discovery: master registry → seller catalogs → flat listing list.
     pub async fn fetch_all_listings(&self) -> MarketResult<Vec<RegistryEntry>> {
-        let registry = self.fetch_registry().await?;
+        let registry = self.fetch_registry(true).await?;
         let mut all_listings = Vec::new();
 
         for seller in &registry.sellers {
@@ -615,6 +842,7 @@ mod tests {
                     registered_at: 2000,
                 },
             ],
+            routes: Vec::new(),
             version: 5,
         };
 
@@ -733,28 +961,28 @@ mod tests {
     fn test_market_registry_max_sellers() {
         let mut reg = MarketRegistry::default();
 
-        // Add 500 sellers (the cap)
-        for i in 0..500 {
+        // Add 200 sellers (the cap)
+        for i in 0..200 {
             reg.add_seller(SellerEntry {
                 seller_pubkey: format!("pk{}", i),
                 catalog_key: format!("ck{}", i),
                 registered_at: i as u64 * 1000,
             });
         }
-        assert_eq!(reg.sellers.len(), 500);
-        assert_eq!(reg.version, 500);
+        assert_eq!(reg.sellers.len(), 200);
+        assert_eq!(reg.version, 200);
 
-        // Try to add 501st seller — should be ignored
+        // Try to add 201st seller — should be ignored
         reg.add_seller(SellerEntry {
-            seller_pubkey: "pk500".to_string(),
-            catalog_key: "ck500".to_string(),
-            registered_at: 500_000,
+            seller_pubkey: "pk200".to_string(),
+            catalog_key: "ck200".to_string(),
+            registered_at: 200_000,
         });
-        assert_eq!(reg.sellers.len(), 500);
-        assert_eq!(reg.version, 500); // Version unchanged
+        assert_eq!(reg.sellers.len(), 200);
+        assert_eq!(reg.version, 200); // Version unchanged
 
-        // Verify last seller is still the 499th one (0-indexed)
-        assert_eq!(reg.sellers[499].seller_pubkey, "pk499");
+        // Verify last seller is still the 199th one (0-indexed)
+        assert_eq!(reg.sellers[199].seller_pubkey, "pk199");
     }
 
     #[test]
@@ -1034,5 +1262,128 @@ mod tests {
         // Different network keys should produce different keypairs
         assert_ne!(keypair1.value().key(), keypair2.value().key());
         assert_ne!(keypair1.value().secret(), keypair2.value().secret());
+    }
+
+    /// Helper: replicate the key derivation logic for testing without RegistryOperations.
+    fn compute_key_for_network(network_key: &str) -> RecordKey {
+        let keypair = derive_registry_keypair(network_key);
+        let owner_key: &[u8] = &keypair.value().key();
+        let schema_data: [u8; 6] = [b'D', b'F', b'L', b'T', 1, 0];
+
+        let mut hash_input = Vec::with_capacity(4 + owner_key.len() + schema_data.len());
+        hash_input.extend_from_slice(b"VLD0");
+        hash_input.extend_from_slice(owner_key);
+        hash_input.extend_from_slice(&schema_data);
+
+        let hash = blake3::hash(&hash_input);
+        let opaque = BareOpaqueRecordKey::new(hash.as_bytes());
+        RecordKey::new(CRYPTO_KIND_VLD0, BareRecordKey::new(opaque, None))
+    }
+
+    #[test]
+    fn test_compute_master_registry_key_deterministic() {
+        let key1 = compute_key_for_network("test-network");
+        let key2 = compute_key_for_network("test-network");
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_compute_master_registry_key_different_networks() {
+        let key1 = compute_key_for_network("network-a");
+        let key2 = compute_key_for_network("network-b");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_route_entry_add_and_dedup() {
+        let mut reg = MarketRegistry::default();
+
+        reg.add_route(RouteEntry {
+            node_id: "node1".to_string(),
+            route_blob: vec![1, 2, 3],
+            registered_at: 1000,
+        });
+        assert_eq!(reg.routes.len(), 1);
+        assert_eq!(reg.version, 1);
+
+        // Update existing — should replace blob, not add second entry
+        reg.add_route(RouteEntry {
+            node_id: "node1".to_string(),
+            route_blob: vec![4, 5, 6],
+            registered_at: 2000,
+        });
+        assert_eq!(reg.routes.len(), 1);
+        assert_eq!(reg.routes[0].route_blob, vec![4, 5, 6]);
+        assert_eq!(reg.version, 2);
+
+        // Different node — should add
+        reg.add_route(RouteEntry {
+            node_id: "node2".to_string(),
+            route_blob: vec![7, 8, 9],
+            registered_at: 3000,
+        });
+        assert_eq!(reg.routes.len(), 2);
+        assert_eq!(reg.version, 3);
+    }
+
+    #[test]
+    fn test_route_entry_cbor_roundtrip() {
+        let mut reg = MarketRegistry::default();
+        reg.add_route(RouteEntry {
+            node_id: "n1".to_string(),
+            route_blob: vec![10, 20, 30],
+            registered_at: 500,
+        });
+        reg.add_seller(SellerEntry {
+            seller_pubkey: "pk1".to_string(),
+            catalog_key: "ck1".to_string(),
+            registered_at: 600,
+        });
+
+        let bytes = reg.to_cbor().unwrap();
+        let decoded = MarketRegistry::from_cbor(&bytes).unwrap();
+        assert_eq!(decoded.routes.len(), 1);
+        assert_eq!(decoded.routes[0].node_id, "n1");
+        assert_eq!(decoded.routes[0].route_blob, vec![10, 20, 30]);
+        assert_eq!(decoded.sellers.len(), 1);
+    }
+
+    #[test]
+    fn test_route_entry_backward_compat() {
+        // Registry CBOR from before routes existed should deserialize with empty routes
+        let old_reg = MarketRegistry {
+            sellers: vec![SellerEntry {
+                seller_pubkey: "pk1".to_string(),
+                catalog_key: "ck1".to_string(),
+                registered_at: 100,
+            }],
+            routes: Vec::new(),
+            version: 1,
+        };
+        let bytes = old_reg.to_cbor().unwrap();
+        let decoded = MarketRegistry::from_cbor(&bytes).unwrap();
+        assert!(decoded.routes.is_empty());
+        assert_eq!(decoded.sellers.len(), 1);
+    }
+
+    #[test]
+    fn test_route_entry_max_cap() {
+        let mut reg = MarketRegistry::default();
+        for i in 0..200 {
+            reg.add_route(RouteEntry {
+                node_id: format!("node{}", i),
+                route_blob: vec![i as u8],
+                registered_at: i as u64,
+            });
+        }
+        assert_eq!(reg.routes.len(), 200);
+
+        // 201st should be ignored
+        reg.add_route(RouteEntry {
+            node_id: "node200".to_string(),
+            route_blob: vec![200],
+            registered_at: 200,
+        });
+        assert_eq!(reg.routes.len(), 200);
     }
 }

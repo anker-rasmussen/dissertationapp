@@ -183,6 +183,19 @@ pub enum AuctionMessage {
 }
 
 impl AuctionMessage {
+    /// Extract the timestamp from any message variant.
+    pub const fn timestamp(&self) -> u64 {
+        match self {
+            Self::BidAnnouncement { timestamp, .. }
+            | Self::WinnerDecryptionRequest { timestamp, .. }
+            | Self::DecryptionHashTransfer { timestamp, .. }
+            | Self::MpcRouteAnnouncement { timestamp, .. }
+            | Self::WinnerBidReveal { timestamp, .. }
+            | Self::SellerRegistration { timestamp, .. }
+            | Self::RegistryAnnouncement { timestamp, .. } => *timestamp,
+        }
+    }
+
     /// Create a bid announcement using system time.
     pub fn bid_announcement(
         listing_key: RecordKey,

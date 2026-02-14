@@ -1,43 +1,115 @@
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use veilid_core::{
-    PublicKey, RecordKey, RouteBlob, SafetySelection, Sequencing, Target, VeilidAPI,
+    PublicKey, RecordKey, RouteBlob, RouteId, Sequencing, Stability, Target, VeilidAPI,
+    CRYPTO_KIND_VLD0,
 };
 
-use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry, BidAnnouncementTracker};
+use super::auction_logic::AuctionLogic;
+use super::bid_announcement::{validate_timestamp, AuctionMessage, BidAnnouncementRegistry};
 use super::bid_storage::BidStorage;
 use super::dht::{DHTOperations, OwnedDHTRecord};
 use super::listing_ops::ListingOperations;
 use super::mpc_orchestrator::MpcOrchestrator;
 use super::registry::{RegistryEntry, RegistryOperations};
-use crate::config::subkeys;
+use crate::config::{now_unix, subkeys};
 use crate::error::{MarketError, MarketResult};
 use crate::marketplace::PublicListing;
-use crate::traits::DhtStore;
+use crate::traits::{
+    DhtStore, MessageTransport, MpcResult, MpcRunner, SystemTimeProvider, TransportTarget,
+};
 
-/// Coordinates auction execution: monitors deadlines, triggers MPC
+// ---------------------------------------------------------------------------
+// Stub transport and MPC runner for the embedded AuctionLogic.
+//
+// AuctionCoordinator delegates **state management** (watched_listings,
+// bid_announcements, decryption_keys) to AuctionLogic so that the same code
+// tested with mocks runs in production.  Transport and MPC execution stay in
+// AuctionCoordinator (via VeilidAPI / MpcOrchestrator), so these stubs exist
+// solely to satisfy the generic type parameters.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct CoordinatorTransport;
+
+#[async_trait]
+impl MessageTransport for CoordinatorTransport {
+    async fn send(&self, _: TransportTarget, _: Vec<u8>) -> MarketResult<()> {
+        Err(MarketError::InvalidState(
+            "Use AuctionCoordinator broadcast methods".into(),
+        ))
+    }
+    async fn create_private_route(&self) -> MarketResult<(RouteId, RouteBlob)> {
+        Err(MarketError::InvalidState(
+            "Use MpcOrchestrator for routes".into(),
+        ))
+    }
+    fn import_remote_route(&self, _: RouteBlob) -> MarketResult<RouteId> {
+        Err(MarketError::InvalidState(
+            "Use MpcOrchestrator for routes".into(),
+        ))
+    }
+    async fn get_peers(&self) -> MarketResult<Vec<PublicKey>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Clone)]
+struct CoordinatorMpcRunner;
+
+#[async_trait]
+impl MpcRunner for CoordinatorMpcRunner {
+    async fn compile(&self, _: &str, _: usize) -> MarketResult<()> {
+        Err(MarketError::InvalidState(
+            "Use MpcOrchestrator for MPC".into(),
+        ))
+    }
+    async fn execute(&self, _: usize, _: usize, _: u64) -> MarketResult<MpcResult> {
+        Err(MarketError::InvalidState(
+            "Use MpcOrchestrator for MPC".into(),
+        ))
+    }
+    async fn write_input(&self, _: usize, _: u64) -> MarketResult<()> {
+        Err(MarketError::InvalidState(
+            "Use MpcOrchestrator for MPC".into(),
+        ))
+    }
+    async fn write_hosts(&self, _: &str, _: usize) -> MarketResult<()> {
+        Err(MarketError::InvalidState(
+            "Use MpcOrchestrator for MPC".into(),
+        ))
+    }
+}
+
+/// Type alias for the embedded AuctionLogic with production implementations.
+type CoordinatorLogic =
+    AuctionLogic<DHTOperations, CoordinatorTransport, CoordinatorMpcRunner, SystemTimeProvider>;
+
+/// Coordinates auction execution: monitors deadlines, triggers MPC.
+///
+/// Delegates shared state management (watched listings, bid announcements,
+/// decryption keys) to [`AuctionLogic`] so the same code path tested with
+/// mocks is used in production.
 pub struct AuctionCoordinator {
     api: VeilidAPI,
     dht: DHTOperations,
     my_node_id: PublicKey,
+    /// Core auction state machine — the tested generic layer.
+    logic: CoordinatorLogic,
     /// Per-seller registry operations (shared via Arc<Mutex>)
     registry_ops: Arc<Mutex<RegistryOperations>>,
-    /// Listings we're monitoring
-    watched_listings: Arc<Mutex<HashMap<RecordKey, PublicListing>>>,
     /// Listings we own (as seller): Map<listing_key, OwnedDHTRecord>
     owned_listings: Arc<Mutex<HashMap<RecordKey, OwnedDHTRecord>>>,
-    /// Collected bid announcements (deduped per listing)
-    bid_announcements: BidAnnouncementTracker,
-    /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
-    decryption_keys: Arc<Mutex<HashMap<RecordKey, String>>>,
     /// MPC orchestrator (owns tunnel proxy, routes, verifications)
     mpc: Arc<MpcOrchestrator>,
     /// Buffered SellerRegistrations received before the registry key was known.
-    /// Replayed once a `RegistryAnnouncement` sets the key.
     pending_seller_registrations: Arc<Mutex<Vec<(PublicKey, RecordKey)>>>,
+    /// Our own broadcast private route blob (published to the registry).
+    my_route_blob: Mutex<Option<Vec<u8>>>,
     /// Token used to signal graceful shutdown of background tasks.
     shutdown: CancellationToken,
 }
@@ -56,7 +128,7 @@ impl AuctionCoordinator {
             api.clone(),
             dht.clone(),
             my_node_id.clone(),
-            bid_storage,
+            bid_storage.clone(),
             node_offset,
         ));
 
@@ -65,17 +137,25 @@ impl AuctionCoordinator {
             network_key,
         )));
 
+        let logic = AuctionLogic::new(
+            dht.clone(),
+            CoordinatorTransport,
+            CoordinatorMpcRunner,
+            SystemTimeProvider,
+            my_node_id.clone(),
+            bid_storage,
+        );
+
         Self {
             api,
             dht,
             my_node_id,
+            logic,
             registry_ops,
-            watched_listings: Arc::new(Mutex::new(HashMap::new())),
             owned_listings: Arc::new(Mutex::new(HashMap::new())),
-            bid_announcements: BidAnnouncementTracker::new(),
-            decryption_keys: Arc::new(Mutex::new(HashMap::new())),
             mpc,
             pending_seller_registrations: Arc::new(Mutex::new(Vec::new())),
+            my_route_blob: Mutex::new(None),
             shutdown,
         }
     }
@@ -97,6 +177,14 @@ impl AuctionCoordinator {
 
     /// Handle auction coordination messages
     async fn handle_auction_message(&self, message: AuctionMessage) -> MarketResult<()> {
+        if !validate_timestamp(message.timestamp(), now_unix()) {
+            warn!(
+                "Rejecting message with stale/future timestamp (drift > 5 min): {}",
+                message.timestamp()
+            );
+            return Ok(());
+        }
+
         match message {
             AuctionMessage::BidAnnouncement {
                 listing_key,
@@ -170,18 +258,10 @@ impl AuctionCoordinator {
             listing_key, bidder
         );
 
-        // Store the announcement locally
-        if self
-            .bid_announcements
-            .register(&listing_key, bidder.clone(), bid_record_key.clone())
-            .await
-        {
-            let count = self.bid_announcements.count(&listing_key).await;
-            info!(
-                "Stored bid announcement, total announcements for this listing: {}",
-                count
-            );
-        }
+        // Delegate local announcement tracking to AuctionLogic
+        self.logic
+            .register_bid_announcement(&listing_key, bidder.clone(), bid_record_key.clone())
+            .await;
 
         // If we own this listing, update DHT bid registry
         let record = {
@@ -309,20 +389,13 @@ impl AuctionCoordinator {
             listing_key, winner
         );
 
+        // Delegate state management to AuctionLogic
+        self.logic
+            .process_decryption_transfer(listing_key.clone(), winner.clone(), decryption_hash)
+            .await?;
+
         if winner == self.my_node_id {
-            info!(
-                "I am the auction winner! Received decryption key: {}",
-                decryption_hash
-            );
-
-            let mut keys = self.decryption_keys.lock().await;
-            keys.insert(listing_key.clone(), decryption_hash);
-            info!("Stored decryption key for listing {}", listing_key);
-
-            drop(keys);
             self.mpc.cleanup_route_manager(&listing_key).await;
-        } else {
-            debug!("Decryption hash transfer not for me, ignoring");
         }
         Ok(())
     }
@@ -490,15 +563,9 @@ impl AuctionCoordinator {
 
     /// Watch a listing for deadline (if we're a bidder)
     pub async fn watch_listing(&self, listing: PublicListing) {
-        let mut watched = self.watched_listings.lock().await;
-        watched.insert(listing.key.clone(), listing.clone());
-        info!(
-            "Now watching listing '{}' for auction deadline",
-            listing.title
-        );
-        drop(watched);
-
-        self.mpc.ensure_route_manager(&listing.key).await;
+        let key = listing.key.clone();
+        self.logic.watch_listing(listing).await;
+        self.mpc.ensure_route_manager(&key).await;
     }
 
     /// Register an owned listing (for sellers who created it)
@@ -578,17 +645,9 @@ impl AuctionCoordinator {
         bidder: PublicKey,
         bid_record_key: RecordKey,
     ) {
-        if self
-            .bid_announcements
-            .register(listing_key, bidder, bid_record_key)
-            .await
-        {
-            let count = self.bid_announcements.count(listing_key).await;
-            info!(
-                "Registered local bid announcement, total announcements for this listing: {}",
-                count
-            );
-        }
+        self.logic
+            .register_bid_announcement(listing_key, bidder, bid_record_key)
+            .await;
     }
 
     /// Get the number of bids for a listing from DHT registry (authoritative),
@@ -605,21 +664,21 @@ impl AuctionCoordinator {
             }
         }
 
-        // Fall back to local announcements
-        self.bid_announcements.count(listing_key).await
+        // Fall back to local announcements (delegated to AuctionLogic)
+        self.logic.get_local_bid_count(listing_key).await
     }
 
     /// Check if the current node received a decryption key for a listing
     pub async fn get_decryption_key(&self, listing_key: &RecordKey) -> Option<String> {
-        let keys = self.decryption_keys.lock().await;
-        keys.get(listing_key).cloned()
+        self.logic.get_decryption_key(listing_key).await
     }
 
     /// Store a decryption key locally (e.g. seller stores it at listing creation time).
     /// This is necessary because the DHT only stores `PublicListing` (no decryption key).
     pub async fn store_decryption_key(&self, listing_key: &RecordKey, decryption_key: String) {
-        let mut keys = self.decryption_keys.lock().await;
-        keys.insert(listing_key.clone(), decryption_key);
+        self.logic
+            .store_decryption_key(listing_key, decryption_key)
+            .await;
     }
 
     /// Fetch a listing and decrypt its content if we have the decryption key
@@ -676,32 +735,50 @@ impl AuctionCoordinator {
         Ok(())
     }
 
-    /// Broadcast a message to all known peers.
+    /// Broadcast a message to all known peers via private routes stored in the
+    /// master registry.  Without the `footgun` feature Veilid rejects
+    /// `Target::NodeId` for `app_message`, so we import each peer's route blob,
+    /// send to `Target::RouteId`, and release the imported route afterwards.
     async fn broadcast_message(&self, data: &[u8]) -> MarketResult<usize> {
-        let routing_context = self
-            .api
-            .routing_context()?
-            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))?;
+        let route_blobs = {
+            let ops = self.registry_ops.lock().await;
+            ops.fetch_route_blobs(&self.my_node_id.to_string()).await?
+        };
 
-        let state = self.api.get_state().await?;
+        if route_blobs.is_empty() {
+            warn!("No peer route blobs in registry, nothing to broadcast");
+            return Ok(0);
+        }
+
+        let routing_context = self.api.routing_context()?;
 
         let mut sent_count = 0;
-        for peer in &state.network.peers {
-            for node_id in &peer.node_ids {
-                match routing_context
-                    .app_message(Target::NodeId(node_id.clone()), data.to_vec())
-                    .await
-                {
-                    Ok(()) => {
-                        sent_count += 1;
-                        break;
+        for (node_id, blob) in &route_blobs {
+            match self.api.import_remote_private_route(blob.clone()) {
+                Ok(route_id) => {
+                    match routing_context
+                        .app_message(Target::RouteId(route_id.clone()), data.to_vec())
+                        .await
+                    {
+                        Ok(()) => {
+                            sent_count += 1;
+                        }
+                        Err(e) => {
+                            debug!("Failed to send to node {} via route: {}", node_id, e);
+                        }
                     }
-                    Err(e) => {
-                        debug!("Failed to send to peer {}: {}", node_id, e);
-                    }
+                    let _ = self.api.release_private_route(route_id);
+                }
+                Err(e) => {
+                    debug!("Failed to import route for node {}: {}", node_id, e);
                 }
             }
         }
+
+        if sent_count == 0 {
+            warn!("Broadcast failed for all {} route blobs", route_blobs.len());
+        }
+
         Ok(sent_count)
     }
 
@@ -763,12 +840,56 @@ impl AuctionCoordinator {
         self.shutdown.clone()
     }
 
+    /// Create a private route for this node and register it in the master registry
+    /// so that other nodes can send us messages via `Target::RouteId`.
+    async fn create_and_register_broadcast_route(&self) -> MarketResult<()> {
+        let route_blob = self
+            .api
+            .new_custom_private_route(
+                &[CRYPTO_KIND_VLD0],
+                Stability::LowLatency,
+                Sequencing::PreferOrdered,
+            )
+            .await
+            .map_err(|e| MarketError::Network(format!("Failed to create broadcast route: {e}")))?;
+
+        let blob_bytes = route_blob.blob.clone();
+        info!(
+            "Created broadcast private route: {} ({} bytes)",
+            route_blob.route_id,
+            blob_bytes.len()
+        );
+
+        // Store locally
+        *self.my_route_blob.lock().await = Some(blob_bytes.clone());
+
+        // Publish to master registry
+        let mut ops = self.registry_ops.lock().await;
+        ops.register_route(&self.my_node_id.to_string(), blob_bytes)
+            .await?;
+        drop(ops);
+
+        info!("Broadcast route registered in master registry");
+        Ok(())
+    }
+
     /// Start background deadline monitoring.
     pub fn start_monitoring(self: Arc<Self>) {
         info!("Starting auction deadline monitor");
         let token = self.shutdown.clone();
 
         tokio::spawn(async move {
+            // Every node independently opens/creates the deterministic master
+            // registry on startup.  The key is derived from the shared network
+            // keypair, so all nodes converge on the same DHT record without
+            // needing a broadcast.
+            match self.ensure_master_registry().await {
+                Ok(key) => info!("Master registry ready at startup: {}", key),
+                Err(e) => warn!("Failed to initialise master registry at startup: {}", e),
+            }
+
+            let mut broadcast_route_ready = false;
+
             let mut tick_count: u32 = 0;
             loop {
                 tokio::select! {
@@ -780,6 +901,25 @@ impl AuctionCoordinator {
                 }
                 tick_count = tick_count.wrapping_add(1);
 
+                // Create broadcast route on first tick, then refresh every 6 ticks
+                // (~60s) to prevent relay nodes from dropping stale routes.
+                let should_refresh_route = !broadcast_route_ready || (tick_count % 6 == 0);
+                if should_refresh_route {
+                    match self.create_and_register_broadcast_route().await {
+                        Ok(()) => {
+                            if broadcast_route_ready {
+                                debug!("Broadcast route refreshed (tick {})", tick_count);
+                            } else {
+                                info!("Broadcast route ready (tick {})", tick_count);
+                            }
+                            broadcast_route_ready = true;
+                        }
+                        Err(e) => {
+                            warn!("Broadcast route not ready yet (tick {}): {}", tick_count, e);
+                        }
+                    }
+                }
+
                 // Re-broadcast registry key for late joiners:
                 // every tick for the first 6 ticks (~60s), then every 3rd tick (~30s)
                 let should_broadcast = tick_count <= 6 || tick_count % 3 == 0;
@@ -789,21 +929,19 @@ impl AuctionCoordinator {
                     }
                 }
 
-                let watched = self.watched_listings.lock().await.clone();
+                let expired = self.logic.get_expired_listings().await;
 
-                for (key, listing) in watched {
-                    if listing.time_remaining() == 0 {
-                        info!("Auction deadline reached for listing '{}'", listing.title);
+                for (key, listing) in expired {
+                    info!("Auction deadline reached for listing '{}'", listing.title);
 
-                        if let Err(e) = self.handle_auction_end_wrapper(&key, &listing).await {
-                            error!(
-                                "Failed to handle auction end for '{}': {}",
-                                listing.title, e
-                            );
-                        }
-
-                        self.watched_listings.lock().await.remove(&key);
+                    if let Err(e) = self.handle_auction_end_wrapper(&key, &listing).await {
+                        error!(
+                            "Failed to handle auction end for '{}': {}",
+                            listing.title, e
+                        );
                     }
+
+                    self.logic.unwatch_listing(&key).await;
                 }
             }
         });
@@ -830,16 +968,34 @@ impl AuctionCoordinator {
 
         info!("We bid on this listing, our bid record: {}", our_bid_key);
 
-        // Get local announcements as fallback
-        let local_announcements = self.bid_announcements.get(listing_key).await;
+        // Get local announcements as fallback (delegated to AuctionLogic)
+        let local_announcements = self.logic.get_bid_announcements(listing_key).await;
 
         let bid_index = self
             .mpc
             .discover_bids_from_storage(listing_key, local_announcements.as_ref())
             .await?;
 
+        // Refresh our broadcast route before MPC exchange — routes go stale
+        // if relay nodes drop them, so create a fresh one now.
+        if let Err(e) = self.create_and_register_broadcast_route().await {
+            warn!("Failed to refresh broadcast route before MPC: {}", e);
+        }
+
+        // Small delay for peers to also refresh their routes
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        // Fetch peer route blobs for MPC route broadcasting (with force_refresh
+        // to pick up any recently re-registered routes from peers)
+        let peer_route_blobs = {
+            let ops = self.registry_ops.lock().await;
+            ops.fetch_route_blobs(&self.my_node_id.to_string())
+                .await
+                .unwrap_or_default()
+        };
+
         self.mpc
-            .handle_auction_end(listing_key, bid_index, &listing.title)
+            .handle_auction_end(listing_key, bid_index, &listing.title, &peer_route_blobs)
             .await
     }
 }

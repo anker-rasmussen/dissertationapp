@@ -11,7 +11,7 @@ use veilid_core::{PublicKey, RecordKey};
 
 use crate::config::subkeys;
 use crate::error::{MarketError, MarketResult};
-use crate::marketplace::{BidIndex, Listing};
+use crate::marketplace::{BidIndex, PublicListing};
 use crate::traits::{
     DhtStore, MessageTransport, MpcResult, MpcRunner, TimeProvider, TransportTarget,
 };
@@ -39,7 +39,7 @@ where
     my_node_id: PublicKey,
     bid_storage: BidStorage,
     /// Listings we're monitoring
-    watched_listings: Arc<Mutex<HashMap<RecordKey, Listing>>>,
+    watched_listings: Arc<Mutex<HashMap<RecordKey, PublicListing>>>,
     /// Collected bid announcements (deduped per listing)
     bid_announcements: BidAnnouncementTracker,
     /// Received decryption keys for won auctions: Map<listing_key, decryption_key_hex>
@@ -76,7 +76,7 @@ where
     }
 
     /// Watch a listing for deadline.
-    pub async fn watch_listing(&self, listing: Listing) {
+    pub async fn watch_listing(&self, listing: PublicListing) {
         let mut watched = self.watched_listings.lock().await;
         info!(
             "Now watching listing '{}' for auction deadline",
@@ -86,7 +86,7 @@ where
     }
 
     /// Get all watched listings that have reached their deadline.
-    pub async fn get_expired_listings(&self) -> Vec<(RecordKey, Listing)> {
+    pub async fn get_expired_listings(&self) -> Vec<(RecordKey, PublicListing)> {
         let now = self.time.now_unix();
         let watched = self.watched_listings.lock().await;
         watched
@@ -122,6 +122,14 @@ where
     /// Get the number of bids for a listing from local announcements.
     pub async fn get_local_bid_count(&self, listing_key: &RecordKey) -> usize {
         self.bid_announcements.count(listing_key).await
+    }
+
+    /// Get the full bid announcement list for a listing.
+    pub async fn get_bid_announcements(
+        &self,
+        listing_key: &RecordKey,
+    ) -> Option<Vec<(PublicKey, RecordKey)>> {
+        self.bid_announcements.get(listing_key).await
     }
 
     /// Store a received decryption key.
@@ -339,7 +347,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marketplace::BidRecord;
+    use crate::marketplace::{BidRecord, Listing};
     use crate::mocks::{
         make_test_public_key, make_test_record_key, MockDht, MockMpcRunner, MockTime, MockTransport,
     };
@@ -373,7 +381,7 @@ mod tests {
         let time = MockTime::new(1000);
         let listing = make_test_listing(&time);
 
-        logic.watch_listing(listing.clone()).await;
+        logic.watch_listing(listing.to_public()).await;
 
         let expired = logic.get_expired_listings().await;
         assert!(expired.is_empty()); // Not expired yet
@@ -608,7 +616,7 @@ mod tests {
         let listing = make_test_listing(&time);
         let key = listing.key.clone();
 
-        logic.watch_listing(listing).await;
+        logic.watch_listing(listing.to_public()).await;
         logic.unwatch_listing(&key).await;
 
         // Listing should be removed
@@ -659,7 +667,7 @@ mod tests {
         // Create a listing that ends at time 4600 (1000 + 3600)
         let listing = make_test_listing(&time);
         let listing_key = listing.key.clone();
-        logic.watch_listing(listing).await;
+        logic.watch_listing(listing.to_public()).await;
 
         // At time 1000, the listing is not expired
         let expired = logic.get_expired_listings().await;
@@ -837,7 +845,7 @@ mod tests {
             .build()
             .unwrap();
 
-        logic.watch_listing(listing).await;
+        logic.watch_listing(listing.to_public()).await;
 
         // Should immediately appear as expired since current time (10000) > deadline (101)
         let expired = logic.get_expired_listings().await;
@@ -875,8 +883,8 @@ mod tests {
             .build()
             .unwrap();
 
-        logic.watch_listing(listing1).await;
-        logic.watch_listing(listing2).await;
+        logic.watch_listing(listing1.to_public()).await;
+        logic.watch_listing(listing2.to_public()).await;
 
         let expired = logic.get_expired_listings().await;
         assert!(expired.is_empty());
@@ -915,8 +923,8 @@ mod tests {
             .build()
             .unwrap();
 
-        logic.watch_listing(short).await;
-        logic.watch_listing(long).await;
+        logic.watch_listing(short.to_public()).await;
+        logic.watch_listing(long.to_public()).await;
 
         // Advance past short deadline but before long deadline
         time.set(2000);

@@ -11,7 +11,7 @@ struct BidEntry {
     bid_key: Option<RecordKey>,
 }
 
-type BidMap = Arc<RwLock<HashMap<String, BidEntry>>>;
+type BidMap = Arc<RwLock<HashMap<RecordKey, BidEntry>>>;
 
 /// Stores bid values locally so we can reveal them during MPC
 /// This is kept in memory - in production should be encrypted on disk
@@ -29,11 +29,10 @@ impl BidStorage {
 
     /// Store a bid value for later reveal
     pub async fn store_bid(&self, listing_key: &RecordKey, value: u64, nonce: [u8; 32]) {
-        let key = listing_key.to_string();
         self.bids
             .write()
             .await
-            .entry(key)
+            .entry(listing_key.clone())
             .or_insert_with(|| BidEntry {
                 value: None,
                 bid_key: None,
@@ -43,11 +42,10 @@ impl BidStorage {
 
     /// Store the bid record key for later coordination
     pub async fn store_bid_key(&self, listing_key: &RecordKey, bid_key: &RecordKey) {
-        let key = listing_key.to_string();
         self.bids
             .write()
             .await
-            .entry(key)
+            .entry(listing_key.clone())
             .or_insert_with(|| BidEntry {
                 value: None,
                 bid_key: None,
@@ -58,24 +56,21 @@ impl BidStorage {
     /// Retrieve a bid value for MPC execution.
     /// Returns `None` if only the bid key has been stored (no actual value yet).
     pub async fn get_bid(&self, listing_key: &RecordKey) -> Option<(u64, [u8; 32])> {
-        let key = listing_key.to_string();
         let bids = self.bids.read().await;
-        bids.get(&key).and_then(|e| e.value)
+        bids.get(listing_key).and_then(|e| e.value)
     }
 
     /// Retrieve the bid record key
     pub async fn get_bid_key(&self, listing_key: &RecordKey) -> Option<RecordKey> {
-        let key = listing_key.to_string();
         let bids = self.bids.read().await;
-        bids.get(&key).and_then(|e| e.bid_key.clone())
+        bids.get(listing_key).and_then(|e| e.bid_key.clone())
     }
 
     /// Check if we have a bid value for this listing.
     /// Returns `false` if only the bid key has been stored.
     pub async fn has_bid(&self, listing_key: &RecordKey) -> bool {
-        let key = listing_key.to_string();
         let bids = self.bids.read().await;
-        bids.get(&key).is_some_and(|e| e.value.is_some())
+        bids.get(listing_key).is_some_and(|e| e.value.is_some())
     }
 }
 
