@@ -634,7 +634,6 @@ async fn test_e2e_smoke_dht_operations() {
     }
 }
 
-
 /// Coordinator messaging test - verifies bid announcements work.
 #[tokio::test]
 #[ignore] // Run with: cargo nextest run --ignored
@@ -712,7 +711,6 @@ async fn test_e2e_smoke_coordinator_local_registration() {
         Err(_) => panic!("Coordinator messaging test timed out"),
     }
 }
-
 
 /// Diagnostic test for isolated debugging of single node startup.
 /// Run with:
@@ -1227,6 +1225,12 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
             .register_owned_listing(listing_record.clone())
             .await?;
 
+        // Store decryption key locally so the seller can send it to the winner
+        seller
+            .coordinator
+            .store_decryption_key(&listing_record.key, listing.decryption_key.clone())
+            .await;
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1477,6 +1481,12 @@ async fn test_e2e_full_mpc_execution_happy_path() {
             .coordinator
             .register_owned_listing(listing_record.clone())
             .await?;
+
+        // Store decryption key locally so the seller can send it to the winner
+        seller
+            .coordinator
+            .store_decryption_key(&listing_record.key, listing.decryption_key.clone())
+            .await;
 
         // All three place bids with real commitments
         let now = std::time::SystemTime::now()
@@ -1735,6 +1745,12 @@ async fn test_e2e_full_winner_verification_and_decryption() {
             .coordinator
             .register_owned_listing(listing_record.clone())
             .await?;
+
+        // Store decryption key locally so the seller can send it to the winner
+        seller
+            .coordinator
+            .store_decryption_key(&listing_record.key, listing.decryption_key.clone())
+            .await;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
