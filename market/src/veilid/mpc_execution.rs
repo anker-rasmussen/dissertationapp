@@ -1,14 +1,14 @@
 //! MP-SPDZ program compilation, process spawning, and output parsing.
 
-use anyhow::Result;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{error, info};
 
 use super::mpc::MpcTunnelProxy;
+use crate::error::{MarketError, MarketResult};
 
 /// Compile the MPC program for the given number of parties using MP-SPDZ's `compile.py`.
-pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -> Result<()> {
+pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -> MarketResult<()> {
     info!("Compiling auction_n program for {} parties...", num_parties);
 
     let compile_output = Command::new(format!("{mp_spdz_dir}/compile.py"))
@@ -38,12 +38,14 @@ pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -
                 if !stderr.is_empty() {
                     error!("Compile errors: {}", stderr);
                 }
-                Err(anyhow::anyhow!(
+                Err(MarketError::Process(format!(
                     "Failed to compile MPC program for {num_parties} parties"
-                ))
+                )))
             }
         }
-        Err(e) => Err(anyhow::anyhow!("Failed to run compile.py: {e}")),
+        Err(e) => Err(MarketError::Process(format!(
+            "Failed to run compile.py: {e}"
+        ))),
     }
 }
 
@@ -54,7 +56,7 @@ pub(crate) async fn spawn_shamir_party(
     num_parties: usize,
     hosts_file: &std::path::Path,
     bid_value: u64,
-) -> Result<std::process::Output> {
+) -> MarketResult<std::process::Output> {
     info!(
         "Executing MP-SPDZ auction_n-{} program (Shamir, interactive)...",
         num_parties
@@ -81,21 +83,24 @@ pub(crate) async fn spawn_shamir_party(
     let mut child = match spawn_result {
         Ok(child) => child,
         Err(e) => {
-            return Err(anyhow::anyhow!("Failed to spawn shamir-party.x: {e}"));
+            return Err(MarketError::Process(format!(
+                "Failed to spawn shamir-party.x: {e}"
+            )));
         }
     };
 
     // Write bid value to stdin, then close the pipe (EOF)
     {
         use tokio::io::AsyncWriteExt;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to open stdin pipe to shamir-party.x"))?;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            MarketError::Process("Failed to open stdin pipe to shamir-party.x".into())
+        })?;
         stdin
             .write_all(format!("{bid_value}\n").as_bytes())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to write bid value to stdin: {e}"))?;
+            .map_err(|e| {
+                MarketError::Process(format!("Failed to write bid value to stdin: {e}"))
+            })?;
         // stdin is dropped here, sending EOF
     }
 
@@ -105,8 +110,11 @@ pub(crate) async fn spawn_shamir_party(
     )
     .await
     {
-        Ok(result) => result.map_err(|e| anyhow::anyhow!("Failed to execute shamir-party.x: {e}")),
-        Err(_) => Err(anyhow::anyhow!("MPC execution timed out after 120 seconds")),
+        Ok(result) => result
+            .map_err(|e| MarketError::Process(format!("Failed to execute shamir-party.x: {e}"))),
+        Err(_) => Err(MarketError::Timeout(
+            "MPC execution timed out after 120 seconds".into(),
+        )),
     }
 }
 

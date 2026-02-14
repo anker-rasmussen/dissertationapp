@@ -1,10 +1,10 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use veilid_core::{PublicKey, RecordKey, RouteBlob};
 
 use crate::config::now_unix;
+use crate::error::{MarketError, MarketResult};
 use crate::traits::TimeProvider;
 
 /// Maximum allowed clock drift for message timestamps (5 minutes).
@@ -38,17 +38,19 @@ impl BidAnnouncementRegistry {
     }
 
     /// Serialize to bytes for DHT storage (CBOR, matching other DHT types)
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+    pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
         let mut buf = Vec::new();
-        ciborium::into_writer(self, &mut buf)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bid registry: {e}"))?;
+        ciborium::into_writer(self, &mut buf).map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize bid registry: {e}"))
+        })?;
         Ok(buf)
     }
 
     /// Deserialize from bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        ciborium::from_reader(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize bid registry: {e}"))
+    pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
+        ciborium::from_reader(data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to deserialize bid registry: {e}"))
+        })
     }
 }
 
@@ -365,15 +367,17 @@ impl AuctionMessage {
     }
 
     /// Serialize to bytes for transmission
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize auction message: {e}"))
+    pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize auction message: {e}"))
+        })
     }
 
     /// Deserialize from bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize auction message: {e}"))
+    pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
+        bincode::deserialize(data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to deserialize auction message: {e}"))
+        })
     }
 }
 

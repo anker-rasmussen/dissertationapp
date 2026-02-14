@@ -1,10 +1,10 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use veilid_core::{PublicKey, RecordKey};
 
 use super::dht::DHTOperations;
 use crate::config::now_unix;
+use crate::error::{MarketError, MarketResult};
 use crate::traits::TimeProvider;
 
 /// Registry entry for a bidder on a specific listing
@@ -65,16 +65,18 @@ impl BidderRegistry {
         }
     }
 
-    pub fn to_cbor(&self) -> Result<Vec<u8>> {
+    pub fn to_cbor(&self) -> MarketResult<Vec<u8>> {
         let mut data = Vec::new();
-        ciborium::ser::into_writer(self, &mut data)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize bidder registry: {e}"))?;
+        ciborium::ser::into_writer(self, &mut data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize bidder registry: {e}"))
+        })?;
         Ok(data)
     }
 
-    pub fn from_cbor(data: &[u8]) -> Result<Self> {
-        ciborium::de::from_reader(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize bidder registry: {e}"))
+    pub fn from_cbor(data: &[u8]) -> MarketResult<Self> {
+        ciborium::de::from_reader(data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to deserialize bidder registry: {e}"))
+        })
     }
 }
 
@@ -96,7 +98,7 @@ impl BidderRegistryOps {
         listing_key: &RecordKey,
         bidder: PublicKey,
         bid_record_key: RecordKey,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         let max_retries = 10;
         let mut retry_delay = std::time::Duration::from_millis(50);
 
@@ -106,7 +108,7 @@ impl BidderRegistryOps {
         let _ = routing_context
             .open_dht_record(listing_key.clone(), None)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to open listing record: {e}"))?;
+            .map_err(|e| MarketError::Dht(format!("Failed to open listing record: {e}")))?;
 
         for attempt in 0..max_retries {
             // Read current registry
@@ -171,21 +173,21 @@ impl BidderRegistryOps {
                         continue;
                     }
                     let _ = routing_context.close_dht_record(listing_key.clone()).await;
-                    return Err(anyhow::anyhow!(
+                    return Err(MarketError::Dht(format!(
                         "Failed to register bidder after {max_retries} attempts: {e}"
-                    ));
+                    )));
                 }
             }
         }
 
         let _ = routing_context.close_dht_record(listing_key.clone()).await;
-        Err(anyhow::anyhow!(
+        Err(MarketError::Dht(format!(
             "Failed to register bidder after {max_retries} retries"
-        ))
+        )))
     }
 
     /// Fetch all registered bidders for a listing
-    pub async fn fetch_bidders(&self, listing_key: &RecordKey) -> Result<BidderRegistry> {
+    pub async fn fetch_bidders(&self, listing_key: &RecordKey) -> MarketResult<BidderRegistry> {
         let routing_context = self.dht.routing_context()?;
 
         match routing_context
@@ -210,7 +212,9 @@ impl BidderRegistryOps {
                     Ok(BidderRegistry::new(listing_key.clone()))
                 }
             }
-            Err(e) => Err(anyhow::anyhow!("Failed to open listing record: {e}")),
+            Err(e) => Err(MarketError::Dht(format!(
+                "Failed to open listing record: {e}"
+            ))),
         }
     }
 }

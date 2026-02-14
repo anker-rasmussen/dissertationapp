@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,6 +6,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use veilid_core::{RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target, VeilidAPI};
+
+use crate::error::{MarketError, MarketResult};
 
 /// Calculate the base port for a given node offset.
 /// Formula: `5000 + (node_offset * 10)`
@@ -84,7 +85,7 @@ impl MpcTunnelProxy {
         }
     }
 
-    pub fn run(&self) -> Result<()> {
+    pub fn run(&self) -> MarketResult<()> {
         info!("Starting MPC TunnelProxy for Party {}", self.inner.party_id);
 
         // Setup outgoing proxies - listen directly on MP-SPDZ ports
@@ -128,11 +129,11 @@ impl MpcTunnelProxy {
         listen_port: u16,
         target_pid: usize,
         target_route: RouteId,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         let addr = format!("127.0.0.1:{listen_port}");
         let listener = TcpListener::bind(&addr)
             .await
-            .context(format!("Failed to bind proxy at {addr}"))?;
+            .map_err(|e| MarketError::Network(format!("Failed to bind proxy at {addr}: {e}")))?;
 
         info!(
             "Listening for MP-SPDZ connection to Party {} on port {}",
@@ -155,15 +156,13 @@ impl MpcTunnelProxy {
             let ctx = self
                 .inner
                 .api
-                .routing_context()
-                .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
+                .routing_context()?
                 .with_safety(SafetySelection::Safe(SafetySpec {
                     preferred_route: None,
                     hop_count: 2, // Default
                     stability: Stability::Reliable,
                     sequencing: Sequencing::PreferOrdered,
-                }))
-                .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))?;
+                }))?;
 
             // Send Open message
             let open_msg = MpcMessage::Open {
@@ -171,8 +170,7 @@ impl MpcTunnelProxy {
             };
             let data = bincode::serialize(&open_msg)?;
             ctx.app_message(Target::RouteId(target_route.clone()), data)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to send Open: {e}"))?;
+                .await?;
 
             // Read loop: TCP -> Veilid
             let ctx_clone = ctx.clone();
@@ -224,7 +222,7 @@ impl MpcTunnelProxy {
 
     /// Process incoming Veilid message (AppMessage)
     #[allow(clippy::too_many_lines)]
-    pub async fn process_message(&self, message: Vec<u8>) -> Result<()> {
+    pub async fn process_message(&self, message: Vec<u8>) -> MarketResult<()> {
         let mpc_msg: MpcMessage = bincode::deserialize(&message)?;
 
         match mpc_msg {

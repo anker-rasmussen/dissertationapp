@@ -3,7 +3,6 @@
 //! This module extracts the business logic from AuctionCoordinator
 //! into generic, testable components.
 
-use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -11,6 +10,7 @@ use tracing::{debug, info, warn};
 use veilid_core::{PublicKey, RecordKey};
 
 use crate::config::subkeys;
+use crate::error::{MarketError, MarketResult};
 use crate::marketplace::{BidIndex, Listing};
 use crate::traits::{
     DhtStore, MessageTransport, MpcResult, MpcRunner, TimeProvider, TransportTarget,
@@ -144,7 +144,7 @@ where
         &self,
         listing_key: &RecordKey,
         bid_record_key: &RecordKey,
-    ) -> Result<usize> {
+    ) -> MarketResult<usize> {
         let announcement = AuctionMessage::BidAnnouncement {
             listing_key: listing_key.clone(),
             bidder: self.my_node_id.clone(),
@@ -159,7 +159,7 @@ where
     }
 
     /// Discover bids from DHT registry.
-    pub async fn discover_bids(&self, listing_key: &RecordKey) -> Result<BidIndex> {
+    pub async fn discover_bids(&self, listing_key: &RecordKey) -> MarketResult<BidIndex> {
         info!("Discovering bids from DHT bid registry");
 
         let mut bid_index = BidIndex::new(listing_key.clone());
@@ -236,7 +236,7 @@ where
         party_id: usize,
         num_parties: usize,
         bid_value: u64,
-    ) -> Result<MpcResult> {
+    ) -> MarketResult<MpcResult> {
         // Write input
         self.mpc.write_input(party_id, bid_value).await?;
 
@@ -266,7 +266,7 @@ where
         bidder: PublicKey,
         bid_record_key: RecordKey,
         _timestamp: u64,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Processing bid announcement for listing {} from {}",
             listing_key, bidder
@@ -282,7 +282,7 @@ where
         listing_key: RecordKey,
         winner: PublicKey,
         decryption_hash: String,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         if winner == self.my_node_id {
             info!("I am the winner! Received decryption key");
             self.store_decryption_key(&listing_key, decryption_hash)
@@ -294,7 +294,7 @@ where
     }
 
     /// Send a winner decryption request.
-    pub async fn send_decryption_request(&self, listing_key: &RecordKey) -> Result<usize> {
+    pub async fn send_decryption_request(&self, listing_key: &RecordKey) -> MarketResult<usize> {
         let message = AuctionMessage::WinnerDecryptionRequest {
             listing_key: listing_key.clone(),
             winner: self.my_node_id.clone(),
@@ -313,7 +313,7 @@ where
         listing_key: &RecordKey,
         winner: &PublicKey,
         decryption_hash: &str,
-    ) -> Result<usize> {
+    ) -> MarketResult<usize> {
         let message = AuctionMessage::DecryptionHashTransfer {
             listing_key: listing_key.clone(),
             winner: winner.clone(),
@@ -327,7 +327,9 @@ where
         self.transport
             .send(TransportTarget::Node(winner.clone()), data)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send decryption hash to winner: {e}"))?;
+            .map_err(|e| {
+                MarketError::Network(format!("Failed to send decryption hash to winner: {e}"))
+            })?;
 
         info!("Sent decryption hash directly to winner");
         Ok(1)

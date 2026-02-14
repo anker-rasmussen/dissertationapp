@@ -1,6 +1,5 @@
 //! Post-MPC verification: bid commitment checks and winner communication.
 
-use anyhow::Result;
 use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 use veilid_core::{PublicKey, RecordKey, Target};
@@ -10,6 +9,7 @@ use super::bid_ops::BidOperations;
 use super::mpc_execution::{parse_bidder_mpc_output, parse_seller_mpc_output};
 use super::mpc_orchestrator::MpcOrchestrator;
 use crate::config::subkeys;
+use crate::error::{MarketError, MarketResult};
 
 /// Verify a bid commitment against the revealed bid value and nonce.
 ///
@@ -252,7 +252,7 @@ impl MpcOrchestrator {
         listing_key: &RecordKey,
         winner: &PublicKey,
         decryption_hash: &str,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Sending decryption hash to winner {} for listing {}",
             winner, listing_key
@@ -273,7 +273,9 @@ impl MpcOrchestrator {
                 managers
                     .get(listing_key)
                     .ok_or_else(|| {
-                        anyhow::anyhow!("Route manager not found for listing {listing_key}")
+                        MarketError::InvalidState(format!(
+                            "Route manager not found for listing {listing_key}"
+                        ))
                     })?
                     .clone()
             };
@@ -283,9 +285,9 @@ impl MpcOrchestrator {
             };
             let routes = received_routes.lock().await;
             routes.get(winner).cloned().ok_or_else(|| {
-                anyhow::anyhow!(
+                MarketError::NotFound(format!(
                     "Winner's MPC route not found in route manager for listing {listing_key}"
-                )
+                ))
             })?
         };
 
@@ -306,7 +308,9 @@ impl MpcOrchestrator {
             }
             Err(e) => {
                 error!("Failed to send to winner's MPC route: {}", e);
-                Err(anyhow::anyhow!("Failed to send decryption hash: {e}"))
+                Err(MarketError::Network(format!(
+                    "Failed to send decryption hash: {e}"
+                )))
             }
         }
     }

@@ -6,6 +6,7 @@ mod app;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use market::error::{MarketError, MarketResult};
 use market::{config, DevNetConfig, VeilidNode};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -41,7 +42,7 @@ fn get_data_dir() -> PathBuf {
 ///
 /// Verifies that the MP-SPDZ directory, binary, SSL certs, and compiler exist.
 /// If anything is missing, attempts to run `setup-mpspdz.sh` automatically.
-fn ensure_mpspdz_ready() -> anyhow::Result<()> {
+fn ensure_mpspdz_ready() -> MarketResult<()> {
     let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
         .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
     let dir = Path::new(&mp_spdz_dir);
@@ -97,40 +98,33 @@ fn ensure_mpspdz_ready() -> anyhow::Result<()> {
                     info!("MP-SPDZ setup completed successfully");
                     Ok(())
                 }
-                Ok(s) => {
-                    anyhow::bail!(
-                        "MP-SPDZ setup script failed (exit code: {:?}).\n\
-                         Run manually: {} --mp-spdz-dir {}",
-                        s.code(),
-                        script_path.display(),
-                        mp_spdz_dir
-                    );
-                }
-                Err(e) => {
-                    anyhow::bail!(
-                        "Failed to execute MP-SPDZ setup script: {}\n\
-                         Run manually: {} --mp-spdz-dir {}",
-                        e,
-                        script_path.display(),
-                        mp_spdz_dir
-                    );
-                }
+                Ok(s) => Err(MarketError::Process(format!(
+                    "MP-SPDZ setup script failed (exit code: {:?}).\n\
+                     Run manually: {} --mp-spdz-dir {}",
+                    s.code(),
+                    script_path.display(),
+                    mp_spdz_dir
+                ))),
+                Err(e) => Err(MarketError::Process(format!(
+                    "Failed to execute MP-SPDZ setup script: {}\n\
+                     Run manually: {} --mp-spdz-dir {}",
+                    e,
+                    script_path.display(),
+                    mp_spdz_dir
+                ))),
             }
         }
-        None => {
-            anyhow::bail!(
-                "MP-SPDZ is not ready and setup-mpspdz.sh was not found.\n\
-                 Please run the setup script manually:\n\
-                   ./setup-mpspdz.sh --mp-spdz-dir {}\n\
-                 Or ensure shamir-party.x, SSL certs, and compile.py exist in {}",
-                mp_spdz_dir,
-                mp_spdz_dir
-            );
-        }
+        None => Err(MarketError::Config(format!(
+            "MP-SPDZ is not ready and setup-mpspdz.sh was not found.\n\
+             Please run the setup script manually:\n\
+               ./setup-mpspdz.sh --mp-spdz-dir {}\n\
+             Or ensure shamir-party.x, SSL certs, and compile.py exist in {}",
+            mp_spdz_dir, mp_spdz_dir
+        ))),
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> MarketResult<()> {
     init_logging();
     info!("Starting SMPC Auction Marketplace");
 
