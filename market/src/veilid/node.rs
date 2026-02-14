@@ -253,10 +253,7 @@ impl VeilidNode {
                     info!("Attachment state: {:?}", attachment.state);
                 }
                 VeilidUpdate::AppMessage(msg) => {
-                    info!(
-                        "Received app message: {}",
-                        String::from_utf8_lossy(msg.message())
-                    );
+                    debug!("Received app message: {} bytes", msg.message().len());
                 }
                 VeilidUpdate::RouteChange(change) => {
                     warn!("Route change: {:?}", change);

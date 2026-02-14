@@ -639,15 +639,13 @@ impl RegistryOperations {
 
         let decoded = hex::decode(&entry.signing_pubkey).map_err(|e| {
             MarketError::Serialization(format!(
-                "Invalid seller signing key hex for '{}': {}",
-                seller_pubkey, e
+                "Invalid seller signing key hex for '{seller_pubkey}': {e}"
             ))
         })?;
+        let decoded_len = decoded.len();
         let key: [u8; 32] = decoded.try_into().map_err(|_| {
             MarketError::Serialization(format!(
-                "Invalid seller signing key length for '{}': expected 32 bytes, got {}",
-                seller_pubkey,
-                decoded.len()
+                "Invalid seller signing key length for '{seller_pubkey}': expected 32 bytes, got {decoded_len}"
             ))
         })?;
 
