@@ -49,8 +49,8 @@ pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -
     }
 }
 
-/// Spawn `shamir-party.x`, write the bid value to its stdin, and collect output.
-pub(crate) async fn spawn_shamir_party(
+/// Spawn `mascot-party.x`, write the bid value to its stdin, and collect output.
+pub(crate) async fn spawn_mascot_party(
     mp_spdz_dir: &str,
     party_id: usize,
     num_parties: usize,
@@ -58,12 +58,12 @@ pub(crate) async fn spawn_shamir_party(
     bid_value: u64,
 ) -> MarketResult<std::process::Output> {
     info!(
-        "Executing MP-SPDZ auction_n-{} program (Shamir, interactive)...",
+        "Executing MP-SPDZ auction_n-{} program (MASCOT, interactive)...",
         num_parties
     );
 
     let program_name = format!("auction_n-{num_parties}");
-    let spawn_result = Command::new(format!("{mp_spdz_dir}/shamir-party.x"))
+    let spawn_result = Command::new(format!("{mp_spdz_dir}/mascot-party.x"))
         .current_dir(mp_spdz_dir)
         .arg("-p")
         .arg(party_id.to_string())
@@ -84,7 +84,7 @@ pub(crate) async fn spawn_shamir_party(
         Ok(child) => child,
         Err(e) => {
             return Err(MarketError::Process(format!(
-                "Failed to spawn shamir-party.x: {e}"
+                "Failed to spawn mascot-party.x: {e}"
             )));
         }
     };
@@ -93,7 +93,7 @@ pub(crate) async fn spawn_shamir_party(
     {
         use tokio::io::AsyncWriteExt;
         let mut stdin = child.stdin.take().ok_or_else(|| {
-            MarketError::Process("Failed to open stdin pipe to shamir-party.x".into())
+            MarketError::Process("Failed to open stdin pipe to mascot-party.x".into())
         })?;
         stdin
             .write_all(format!("{bid_value}\n").as_bytes())
@@ -134,7 +134,7 @@ pub(crate) async fn spawn_shamir_party(
             })
         }
         Ok(Err(e)) => Err(MarketError::Process(format!(
-            "Failed to execute shamir-party.x: {e}"
+            "Failed to execute mascot-party.x: {e}"
         ))),
         Err(_) => {
             let _ = child.kill().await;

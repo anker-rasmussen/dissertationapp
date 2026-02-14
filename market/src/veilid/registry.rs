@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 use veilid_core::{
     BareKeyPair, BareOpaqueRecordKey, BarePublicKey, BareRecordKey, BareSecretKey, DHTSchema,
-    KeyPair, RecordKey, CRYPTO_KIND_VLD0,
+    KeyPair, RecordKey, ValueSeqNum, CRYPTO_KIND_VLD0,
 };
 
 use super::dht::{DHTOperations, OwnedDHTRecord};
@@ -374,29 +374,21 @@ impl RegistryOperations {
 
         let max_retries: u32 = 10;
         let mut retry_delay = std::time::Duration::from_millis(50);
+        let mut conflict_value: Option<Vec<u8>> = None;
 
         for attempt in 0..max_retries {
-            let value_data = routing_context
-                .get_dht_value(registry_key.clone(), 0, false)
-                .await
-                .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?;
-
-            let (mut registry, old_seq) = match value_data {
-                Some(v) if !v.data().is_empty() => {
-                    let seq = v.seq();
-                    match MarketRegistry::from_cbor(v.data()) {
-                        Ok(reg) => (reg, Some(seq)),
-                        Err(e) => {
-                            warn!("Registry data corrupted (seq {}), overwriting: {}", seq, e);
-                            (MarketRegistry::default(), Some(seq))
-                        }
+            let (mut registry, old_seq) = if let Some(cv) = conflict_value.take() {
+                match MarketRegistry::from_cbor(&cv) {
+                    Ok(reg) => (reg, None),
+                    Err(e) => {
+                        warn!("Conflict value corrupted ({}), re-fetching", e);
+                        self.read_registry_from_dht(&routing_context, &registry_key)
+                            .await?
                     }
                 }
-                Some(_) => {
-                    debug!("Registry subkey 0 has no data yet (fresh record)");
-                    (MarketRegistry::default(), None)
-                }
-                None => (MarketRegistry::default(), None),
+            } else {
+                self.read_registry_from_dht(&routing_context, &registry_key)
+                    .await?
             };
 
             // Dedup check
@@ -428,10 +420,11 @@ impl RegistryOperations {
                         if let Some(expected) = old_seq {
                             if returned.seq() != expected && attempt < max_retries - 1 {
                                 warn!(
-                                    "Concurrent write (seq {} -> {}), retrying",
+                                    "Seller registration: concurrent write (seq {} -> {}), retrying",
                                     expected,
                                     returned.seq()
                                 );
+                                conflict_value = Some(returned.data().to_vec());
                                 tokio::time::sleep(retry_delay).await;
                                 retry_delay *= 2;
                                 continue;
@@ -465,6 +458,39 @@ impl RegistryOperations {
         )))
     }
 
+    /// Force-refresh read of the registry from the DHT network.
+    ///
+    /// Returns `(registry, Some(seq))` when data exists, or
+    /// `(default, None)` for an empty/missing record.
+    async fn read_registry_from_dht(
+        &self,
+        routing_context: &veilid_core::RoutingContext,
+        registry_key: &RecordKey,
+    ) -> MarketResult<(MarketRegistry, Option<ValueSeqNum>)> {
+        let value_data = routing_context
+            .get_dht_value(registry_key.clone(), 0, true)
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?;
+
+        Ok(match value_data {
+            Some(v) if !v.data().is_empty() => {
+                let seq = v.seq();
+                match MarketRegistry::from_cbor(v.data()) {
+                    Ok(reg) => (reg, Some(seq)),
+                    Err(e) => {
+                        warn!("Registry data corrupted (seq {}), overwriting: {}", seq, e);
+                        (MarketRegistry::default(), Some(seq))
+                    }
+                }
+            }
+            Some(_) => {
+                debug!("Registry subkey 0 has no data yet (fresh record)");
+                (MarketRegistry::default(), None)
+            }
+            None => (MarketRegistry::default(), None),
+        })
+    }
+
     /// Register (or update) this node's broadcast route in the master registry.
     /// Retries on concurrent-write conflicts (same pattern as `register_seller`).
     pub async fn register_route(&mut self, node_id: &str, route_blob: Vec<u8>) -> MarketResult<()> {
@@ -483,30 +509,32 @@ impl RegistryOperations {
         let max_retries: u32 = 10;
         let mut retry_delay = std::time::Duration::from_millis(50);
 
-        for attempt in 0..max_retries {
-            // Force refresh on retries to get the latest version after a conflict
-            let force_refresh = attempt > 0;
-            let value_data = routing_context
-                .get_dht_value(registry_key.clone(), 0, force_refresh)
-                .await
-                .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?;
+        // When a write conflict occurs, set_dht_value returns the current network
+        // value.  We store it here and use it directly as the base for the next
+        // attempt, which avoids a force-refresh read that may still return stale
+        // cached data (the root cause of routes being overwritten on retry).
+        let mut conflict_value: Option<Vec<u8>> = None;
 
-            let (mut registry, old_seq) = match value_data {
-                Some(v) if !v.data().is_empty() => {
-                    let seq = v.seq();
-                    match MarketRegistry::from_cbor(v.data()) {
-                        Ok(reg) => (reg, Some(seq)),
-                        Err(e) => {
-                            warn!("Registry data corrupted (seq {}), overwriting: {}", seq, e);
-                            (MarketRegistry::default(), Some(seq))
-                        }
+        for attempt in 0..max_retries {
+            let (mut registry, old_seq) = if let Some(cv) = conflict_value.take() {
+                match MarketRegistry::from_cbor(&cv) {
+                    Ok(reg) => {
+                        debug!(
+                            "Using conflict value as base ({} routes, {} sellers)",
+                            reg.routes.len(),
+                            reg.sellers.len()
+                        );
+                        (reg, None)
+                    }
+                    Err(e) => {
+                        warn!("Conflict value corrupted ({}), re-fetching", e);
+                        self.read_registry_from_dht(&routing_context, &registry_key)
+                            .await?
                     }
                 }
-                Some(_) => {
-                    debug!("Registry subkey 0 has no data yet (fresh record)");
-                    (MarketRegistry::default(), None)
-                }
-                None => (MarketRegistry::default(), None),
+            } else {
+                self.read_registry_from_dht(&routing_context, &registry_key)
+                    .await?
             };
 
             registry.add_route(RouteEntry {
@@ -532,6 +560,7 @@ impl RegistryOperations {
                                     expected,
                                     returned.seq()
                                 );
+                                conflict_value = Some(returned.data().to_vec());
                                 tokio::time::sleep(retry_delay).await;
                                 retry_delay *= 2;
                                 continue;
@@ -567,13 +596,14 @@ impl RegistryOperations {
 
     /// Fetch all route blobs from the master registry, excluding the given node_id.
     ///
-    /// Uses cached DHT data (no network round-trip) since this is called on
-    /// every broadcast tick and slightly stale routes are acceptable.
+    /// Uses `force_refresh=true` to always get the latest registry from the
+    /// network.  Without this, an early reader (e.g. the first node to start)
+    /// caches an empty route list and never discovers peers that register later.
     pub async fn fetch_route_blobs(
         &self,
         exclude_node_id: &str,
     ) -> MarketResult<Vec<(String, Vec<u8>)>> {
-        let registry = self.fetch_registry(false).await?;
+        let registry = self.fetch_registry(true).await?;
         Ok(registry
             .routes
             .into_iter()

@@ -108,6 +108,8 @@ pub struct AuctionCoordinator {
     mpc: Arc<MpcOrchestrator>,
     /// Buffered SellerRegistrations received before the registry key was known.
     pending_seller_registrations: Arc<Mutex<Vec<(PublicKey, RecordKey)>>>,
+    /// Bid announcements that failed to broadcast (no routes yet) and need retry.
+    pending_bid_announcements: Mutex<Vec<(RecordKey, RecordKey)>>,
     /// Our own broadcast private route blob (published to the registry).
     my_route_blob: Mutex<Option<Vec<u8>>>,
     /// Token used to signal graceful shutdown of background tasks.
@@ -155,6 +157,7 @@ impl AuctionCoordinator {
             owned_listings: Arc::new(Mutex::new(HashMap::new())),
             mpc,
             pending_seller_registrations: Arc::new(Mutex::new(Vec::new())),
+            pending_bid_announcements: Mutex::new(Vec::new()),
             my_route_blob: Mutex::new(None),
             shutdown,
         }
@@ -727,12 +730,65 @@ impl AuctionCoordinator {
         let sent = self.broadcast_message(&data).await?;
 
         if sent == 0 {
-            warn!("No peers found to send bid announcement");
+            warn!("No peers found to send bid announcement, queuing for retry");
+            self.pending_bid_announcements
+                .lock()
+                .await
+                .push((listing_key.clone(), bid_record_key.clone()));
         } else {
             info!("Broadcast completed: sent to {} peers", sent);
         }
 
         Ok(())
+    }
+
+    /// Retry bid announcements that failed to broadcast (e.g. routes weren't ready).
+    async fn retry_pending_bid_announcements(&self) {
+        let pending = {
+            let mut queue = self.pending_bid_announcements.lock().await;
+            if queue.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *queue)
+        };
+
+        info!("Retrying {} pending bid announcement(s)", pending.len());
+
+        for (listing_key, bid_record_key) in pending {
+            let announcement = AuctionMessage::bid_announcement(
+                listing_key.clone(),
+                self.my_node_id.clone(),
+                bid_record_key.clone(),
+            );
+
+            match announcement.to_bytes() {
+                Ok(data) => match self.broadcast_message(&data).await {
+                    Ok(sent) if sent > 0 => {
+                        info!(
+                            "Retry succeeded: bid announcement for {} sent to {} peers",
+                            listing_key, sent
+                        );
+                    }
+                    Ok(_) => {
+                        warn!("Retry failed: still no peers, re-queuing bid announcement");
+                        self.pending_bid_announcements
+                            .lock()
+                            .await
+                            .push((listing_key, bid_record_key));
+                    }
+                    Err(e) => {
+                        warn!("Retry error for bid announcement: {}", e);
+                        self.pending_bid_announcements
+                            .lock()
+                            .await
+                            .push((listing_key, bid_record_key));
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to serialize bid announcement for retry: {}", e);
+                }
+            }
+        }
     }
 
     /// Broadcast a message to all known peers via private routes stored in the
@@ -927,6 +983,11 @@ impl AuctionCoordinator {
                     if let Err(e) = self.broadcast_registry_announcement().await {
                         debug!("Periodic registry broadcast failed: {}", e);
                     }
+                }
+
+                // Retry any bid announcements that failed due to missing routes
+                if broadcast_route_ready {
+                    self.retry_pending_bid_announcements().await;
                 }
 
                 let expired = self.logic.get_expired_listings().await;

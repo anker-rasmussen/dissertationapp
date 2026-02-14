@@ -41,7 +41,7 @@ fn get_data_dir() -> PathBuf {
 
 /// Preflight check: ensure MP-SPDZ is ready before starting the node.
 ///
-/// Verifies that the MP-SPDZ directory, binary, SSL certs, and compiler exist.
+/// Verifies that the MP-SPDZ directory, binary, and compiler exist.
 /// If anything is missing, attempts to run `setup-mpspdz.sh` automatically.
 fn ensure_mpspdz_ready() -> MarketResult<()> {
     let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
@@ -52,8 +52,7 @@ fn ensure_mpspdz_ready() -> MarketResult<()> {
 
     let checks = [
         (dir.to_path_buf(), "MP-SPDZ directory"),
-        (dir.join("shamir-party.x"), "shamir-party.x binary"),
-        (dir.join("Player-Data/P0.pem"), "SSL certificate P0.pem"),
+        (dir.join("mascot-party.x"), "mascot-party.x binary"),
         (dir.join("compile.py"), "compile.py"),
     ];
 
@@ -119,7 +118,7 @@ fn ensure_mpspdz_ready() -> MarketResult<()> {
             "MP-SPDZ is not ready and setup-mpspdz.sh was not found.\n\
              Please run the setup script manually:\n\
                ./setup-mpspdz.sh --mp-spdz-dir {}\n\
-             Or ensure shamir-party.x, SSL certs, and compile.py exist in {}",
+             Or ensure mascot-party.x and compile.py exist in {}",
             mp_spdz_dir, mp_spdz_dir
         ))),
     }

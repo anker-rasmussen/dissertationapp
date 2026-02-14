@@ -11,7 +11,7 @@ use super::bid_ops::BidOperations;
 use super::bid_storage::BidStorage;
 use super::dht::DHTOperations;
 use super::mpc::MpcTunnelProxy;
-use super::mpc_execution::{compile_mpc_program, spawn_shamir_party, MpcCleanupGuard};
+use super::mpc_execution::{compile_mpc_program, spawn_mascot_party, MpcCleanupGuard};
 use super::mpc_routes::MpcRouteManager;
 pub use super::mpc_verification::VerificationState;
 use crate::config;
@@ -22,11 +22,11 @@ use crate::marketplace::BidIndex;
 pub(crate) type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
 pub(crate) type VerificationMap = Arc<Mutex<HashMap<RecordKey, VerificationState>>>;
 
-/// Validate that the number of parties is sufficient for Shamir secret sharing.
-/// Requires at least 3 parties (seller + 2 bidders).
+/// Validate that the number of parties is sufficient for MASCOT MPC.
+/// Requires at least 2 parties (seller + 1 bidder).
 pub const fn validate_auction_parties(num_parties: usize) -> Result<(), &'static str> {
-    if num_parties < 3 {
-        Err("Shamir secret sharing requires at least 3 parties")
+    if num_parties < 2 {
+        Err("MASCOT MPC requires at least 2 parties")
     } else {
         Ok(())
     }
@@ -131,10 +131,10 @@ impl MpcOrchestrator {
         // Sort bidders by timestamp (seller's auto-bid has earliest timestamp = party 0)
         let sorted_bidders = bid_index.sorted_bidders();
 
-        // Shamir secret sharing requires at least 3 parties
+        // MASCOT MPC requires at least 2 parties
         if validate_auction_parties(sorted_bidders.len()).is_err() {
             warn!(
-                "Auction for '{}' has only {} parties, but Shamir requires at least 3. Aborting MPC.",
+                "Auction for '{}' has only {} parties, but MASCOT requires at least 2. Aborting MPC.",
                 listing_title, sorted_bidders.len()
             );
             self.cleanup_route_manager(listing_key).await;
@@ -277,7 +277,7 @@ impl MpcOrchestrator {
         }
     }
 
-    /// Execute the MPC auction computation using Shamir secret sharing
+    /// Execute the MPC auction computation using MASCOT protocol
     async fn execute_mpc_auction(
         &self,
         party_id: usize,
@@ -287,7 +287,7 @@ impl MpcOrchestrator {
         all_parties: &[PublicKey],
     ) -> MarketResult<()> {
         info!(
-            "Executing {}-party MPC auction as Party {} (Shamir)",
+            "Executing {}-party MPC auction as Party {} (MASCOT)",
             num_parties, party_id
         );
 
@@ -344,8 +344,8 @@ impl MpcOrchestrator {
         // Compile MPC program for the specific number of parties
         compile_mpc_program(&mp_spdz_dir, num_parties).await?;
 
-        // Spawn shamir-party.x and feed bid value via stdin
-        let result = spawn_shamir_party(
+        // Spawn mascot-party.x and feed bid value via stdin
+        let result = spawn_mascot_party(
             &mp_spdz_dir,
             party_id,
             num_parties,
@@ -503,14 +503,13 @@ mod tests {
 
     #[test]
     fn test_validate_auction_parties_minimum() {
-        assert!(validate_auction_parties(3).is_ok());
+        assert!(validate_auction_parties(2).is_ok());
     }
 
     #[test]
     fn test_validate_auction_parties_too_few() {
         assert!(validate_auction_parties(0).is_err());
         assert!(validate_auction_parties(1).is_err());
-        assert!(validate_auction_parties(2).is_err());
     }
 
     #[test]

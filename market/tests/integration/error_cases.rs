@@ -165,13 +165,13 @@ async fn test_dht_failure_on_listing_read() {
 }
 
 #[test]
-fn test_n2_mpc_rejection() {
-    // Shamir secret sharing requires N >= 3
-    assert!(validate_auction_parties(2).is_err());
+fn test_n2_mpc_validation() {
+    // MASCOT MPC requires N >= 2
     assert!(validate_auction_parties(1).is_err());
     assert!(validate_auction_parties(0).is_err());
 
-    // N = 3 and above should be accepted
+    // N = 2 and above should be accepted
+    assert!(validate_auction_parties(2).is_ok());
     assert!(validate_auction_parties(3).is_ok());
     assert!(validate_auction_parties(4).is_ok());
     assert!(validate_auction_parties(10).is_ok());
