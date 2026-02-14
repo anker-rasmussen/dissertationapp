@@ -77,24 +77,31 @@ pub fn CreateListingForm(
     let mut listing_reserve_price = use_signal(|| String::from("10"));
     let mut listing_duration = use_signal(|| String::from("100"));
     let mut listing_result = use_signal(String::new);
+    let mut is_creating = use_signal(|| false);
 
-    let create_listing = move |_| {
+    let mut create_listing = move |_| {
+        if *is_creating.read() {
+            return;
+        }
         let title = listing_title.read().clone();
         let content = listing_content.read().clone();
         let reserve_price = listing_reserve_price.read().clone();
         let duration = listing_duration.read().clone();
         let state = app_state.clone();
 
+        is_creating.set(true);
         spawn(async move {
             listing_result.set("Creating listing...".to_string());
 
             if title.is_empty() {
                 listing_result.set("Error: Title is required".to_string());
+                is_creating.set(false);
                 return;
             }
 
             if content.is_empty() {
                 listing_result.set("Error: Content is required".to_string());
+                is_creating.set(false);
                 return;
             }
 
@@ -123,6 +130,7 @@ pub fn CreateListingForm(
             } else {
                 listing_result.set("Node not started yet".to_string());
             }
+            is_creating.set(false);
         });
     };
 
@@ -188,8 +196,8 @@ pub fn CreateListingForm(
                 button {
                     class: "submit-btn",
                     r#type: "submit",
-                    disabled: !is_attached,
-                    "Create & Publish Listing"
+                    disabled: !is_attached || *is_creating.read(),
+                    if *is_creating.read() { "Creating..." } else { "Create & Publish Listing" }
                 }
 
                 if !listing_result.read().is_empty() {
@@ -285,12 +293,10 @@ pub fn ListingBrowser(
             let state = state.clone();
 
             spawn(async move {
-                if listing.is_none() {
+                let Some(listing) = listing else {
                     bid_result.set("Error: No listing selected".to_string());
                     return;
-                }
-
-                let listing = listing.unwrap();
+                };
                 let amount: u64 = match amount_str.parse() {
                     Ok(a) => a,
                     Err(_) => {
@@ -330,12 +336,10 @@ pub fn ListingBrowser(
             spawn(async move {
                 browse_result.set("Decrypting content...".to_string());
 
-                if listing_info.is_none() {
+                let Some(listing_info) = listing_info else {
                     browse_result.set("Error: No listing selected".to_string());
                     return;
-                }
-
-                let listing_info = listing_info.unwrap();
+                };
 
                 let listing_key = match RecordKey::try_from(listing_info.key.as_str()) {
                     Ok(key) => key,

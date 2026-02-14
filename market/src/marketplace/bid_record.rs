@@ -6,7 +6,7 @@ use crate::error::MarketError;
 use crate::traits::TimeProvider;
 
 /// A bid record published to the DHT for auction participation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BidRecord {
     /// The listing this bid is for
     pub listing_key: RecordKey,

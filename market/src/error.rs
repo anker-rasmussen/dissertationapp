@@ -37,6 +37,9 @@ pub enum MarketError {
     #[error("Transport error: {0}")]
     Transport(String),
 
+    #[error("IO error: {0}")]
+    Io(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -55,7 +58,7 @@ impl From<veilid_core::VeilidAPIError> for MarketError {
 
 impl From<std::io::Error> for MarketError {
     fn from(e: std::io::Error) -> Self {
-        Self::Network(format!("IO error: {e}"))
+        Self::Io(format!("{e}"))
     }
 }
 

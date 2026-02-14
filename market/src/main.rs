@@ -1,4 +1,5 @@
 //! SMPC Auction Marketplace - Main entry point.
+// Dioxus rsx! macro generates deeply nested types requiring higher recursion limit
 #![recursion_limit = "512"]
 
 mod app;
@@ -33,7 +34,7 @@ fn get_data_dir() -> PathBuf {
     let node_offset = std::env::var("MARKET_NODE_OFFSET")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(5);
+        .unwrap_or(9);
 
     base_dir.join(format!("smpc-auction-node-{}", node_offset))
 }
@@ -135,6 +136,10 @@ fn main() -> MarketResult<()> {
     let app_state = SharedAppState::new(market::BidStorage::new());
     SHARED_STATE.set(app_state.clone()).ok();
 
+    // Shutdown token: cancelled when the UI window closes
+    let shutdown = CancellationToken::new();
+    let shutdown_bg = shutdown.clone();
+
     // Start Veilid node in background thread
     let node_holder = app_state.node_holder.clone();
     let coordinator_holder = app_state.coordinator.clone();
@@ -173,60 +178,76 @@ fn main() -> MarketResult<()> {
             }
 
             // Wait for network to stabilize
+            // Devnet regular nodes can take ~2 minutes to bootstrap, so allow
+            // up to 180s for attachment.
             info!("Waiting for network to stabilize...");
             let mut retries = 0;
+            let max_wait_secs = 180;
             loop {
                 let state = node.state();
                 if state.is_attached {
-                    info!("Node attached and ready");
+                    info!("Node attached and ready (after {}s)", retries);
                     break;
                 }
                 retries += 1;
-                if retries > 30 {
-                    error!("Timeout waiting for network attachment after 30s, giving up");
+                if retries > max_wait_secs {
+                    error!(
+                        "Timeout waiting for network attachment after {max_wait_secs}s, giving up"
+                    );
                     let _ = node.shutdown().await;
                     return;
+                }
+                if retries % 30 == 0 {
+                    warn!("Still waiting for attachment ({retries}s / {max_wait_secs}s)...");
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
 
             // Initialize auction coordinator
-            if let Some(dht) = node.dht_operations() {
-                let state = node.state();
-                if let Some(node_id_str) = state.node_ids.first() {
-                    if let Ok(my_node_id) = veilid_core::PublicKey::try_from(node_id_str.as_str()) {
-                        let bid_storage = app_state.bid_storage.clone();
-
-                        let node_offset = std::env::var("MARKET_NODE_OFFSET")
-                            .ok()
-                            .and_then(|s| s.parse::<u16>().ok())
-                            .unwrap_or(5);
-
-                        let api = match node.api() {
-                            Some(api) => api.clone(),
-                            None => {
-                                error!("Veilid API not available after successful start");
-                                return;
-                            }
-                        };
-                        let network_key = market::config::network_key();
-                        let shutdown = CancellationToken::new();
-                        let coordinator = Arc::new(market::AuctionCoordinator::new(
-                            api,
-                            dht,
-                            my_node_id,
-                            bid_storage,
-                            node_offset,
-                            &network_key,
-                            shutdown,
-                        ));
-
-                        coordinator.clone().start_monitoring();
-                        *coordinator_holder.write() = Some(coordinator.clone());
-                        info!("Auction coordinator started");
-                    }
+            let Some(dht) = node.dht_operations() else {
+                error!("DHT operations not available after node start");
+                return;
+            };
+            let state = node.state();
+            let Some(node_id_str) = state.node_ids.first() else {
+                error!("No node IDs available after network attachment");
+                return;
+            };
+            let my_node_id = match veilid_core::PublicKey::try_from(node_id_str.as_str()) {
+                Ok(id) => id,
+                Err(e) => {
+                    error!("Failed to parse node ID '{}': {}", node_id_str, e);
+                    return;
                 }
-            }
+            };
+            let bid_storage = app_state.bid_storage.clone();
+
+            let node_offset = std::env::var("MARKET_NODE_OFFSET")
+                .ok()
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(5);
+
+            let api = match node.api() {
+                Some(api) => api.clone(),
+                None => {
+                    error!("Veilid API not available after successful start");
+                    return;
+                }
+            };
+            let network_key = market::config::network_key();
+            let coordinator = Arc::new(market::AuctionCoordinator::new(
+                api,
+                dht,
+                my_node_id,
+                bid_storage,
+                node_offset,
+                &network_key,
+                shutdown_bg,
+            ));
+
+            coordinator.clone().start_monitoring();
+            *coordinator_holder.write() = Some(coordinator.clone());
+            info!("Auction coordinator started");
 
             // Take update receiver for AppMessages
             let update_rx = node.take_update_receiver();
@@ -264,8 +285,12 @@ fn main() -> MarketResult<()> {
         });
     });
 
-    // Launch Dioxus UI
+    // Launch Dioxus UI (blocks until window is closed)
     dioxus::launch(app::app);
+
+    // Signal background tasks to shut down
+    info!("UI closed, shutting down...");
+    shutdown.cancel();
 
     Ok(())
 }
