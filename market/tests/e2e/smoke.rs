@@ -204,9 +204,9 @@ impl DevnetManager {
     }
 
     /// Wait for all devnet containers to be healthy.
-    /// The devnet has 5 nodes: 1 bootstrap (port 5160) + 4 regular nodes (ports 5161-5164)
+    /// The devnet has 9 nodes: 1 bootstrap (port 5160) + 8 regular nodes (ports 5161-5168)
     fn wait_for_health(&self, timeout_secs: u64) -> MarketResult<()> {
-        eprintln!("[E2E] Waiting for all 5 devnet nodes to be healthy...");
+        eprintln!("[E2E] Waiting for all 9 devnet nodes to be healthy...");
 
         let start = std::time::Instant::now();
         loop {
@@ -231,10 +231,10 @@ impl DevnetManager {
                     .filter(|line| line.contains("healthy"))
                     .count();
 
-                eprintln!("[E2E] Health check: {}/5 nodes healthy", healthy_count);
+                eprintln!("[E2E] Health check: {}/9 nodes healthy", healthy_count);
 
-                // All 5 nodes must be healthy
-                if healthy_count >= 5 {
+                // All 9 nodes must be healthy
+                if healthy_count >= 9 {
                     // Verify all ports are reachable
                     if self.check_all_nodes_reachable() {
                         eprintln!("[E2E] All devnet nodes are healthy and reachable!");
@@ -259,9 +259,9 @@ impl DevnetManager {
     }
 
     /// Check if all devnet node ports are reachable.
-    /// Bootstrap: 5160, Nodes 1-4: 5161-5164
+    /// Bootstrap: 5160, Nodes 1-8: 5161-5168
     fn check_all_nodes_reachable(&self) -> bool {
-        let ports = [5160, 5161, 5162, 5163, 5164];
+        let ports = [5160, 5161, 5162, 5163, 5164, 5165, 5166, 5167, 5168];
         for port in ports {
             let addr = format!("127.0.0.1:{}", port);
             if std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_secs(1))
@@ -324,8 +324,8 @@ impl Drop for DevnetManager {
 }
 
 /// Test node configuration for E2E tests.
-/// Uses offsets 6-39 to stay within libipspoof's MAX_PORT_OFFSET range (40).
-/// Devnet uses offsets 0-4 (ports 5160-5164), so tests use 6+ to avoid conflicts.
+/// Uses offsets 10-39 to stay within libipspoof's MAX_PORT_OFFSET range (40).
+/// Devnet uses offsets 0-8 (9 nodes, ports 5160-5168), so tests use 10+ to avoid conflicts.
 struct TestNode {
     node: VeilidNode,
     offset: u16,
@@ -495,8 +495,8 @@ async fn test_e2e_node_attachment() {
 
     let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
-    // Use offsets 6-39 to stay within libipspoof's MAX_PORT_OFFSET range (40)
-    // Devnet uses offsets 0-4 (ports 5160-5164)
+    // Use offsets 10-39 to stay within libipspoof's MAX_PORT_OFFSET range (40)
+    // Devnet uses offsets 0-8 (9 nodes, ports 5160-5168)
     let mut node = TestNode::new(10);
 
     // Start node with timeout
@@ -1288,8 +1288,9 @@ async fn test_e2e_real_devnet_10_party_auction() {
 
     let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
 
-    // 10 test nodes (1 seller + 9 bidders) using offsets 5-14
-    let mut nodes: Vec<TestNode> = (5..=14).map(|offset| TestNode::new(offset)).collect();
+    // 10 test nodes (1 seller + 9 bidders) using offsets 10-19
+    // Devnet uses offsets 0-8, so we start at 10 to avoid port conflicts
+    let mut nodes: Vec<TestNode> = (10..=19).map(|offset| TestNode::new(offset)).collect();
 
     let result = timeout(Duration::from_secs(600), async {
         // Start all 10 nodes
@@ -1720,6 +1721,12 @@ impl E2EParticipant {
             }
         });
 
+        // Start background monitoring immediately (matching production main.rs).
+        // This initialises the master registry and registers broadcast routes,
+        // giving the monitoring loop time to converge while the test sets up
+        // listings and bids.
+        coordinator.clone().start_monitoring();
+
         Ok(Self {
             node,
             coordinator,
@@ -1888,6 +1895,8 @@ async fn test_e2e_appmessage_bid_announcements() {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         // Each bidder broadcasts bid announcement via real AppMessage
+        // (monitoring was started in E2EParticipant::new, so routes are
+        // already registered by now)
         bidder1
             .coordinator
             .broadcast_bid_announcement(&listing_record.key, &bid1_record_dht.key)
@@ -2350,12 +2359,9 @@ async fn test_e2e_full_mpc_execution() {
         bidder1.coordinator.watch_listing(listing.to_public()).await;
         bidder2.coordinator.watch_listing(listing.to_public()).await;
 
-        // Start monitoring on all 3 — this spawns background tasks that check deadlines
-        seller.coordinator.clone().start_monitoring();
-        bidder1.coordinator.clone().start_monitoring();
-        bidder2.coordinator.clone().start_monitoring();
+        // Monitoring was started in E2EParticipant::new() (matching production).
 
-        eprintln!("[E2E] Monitoring started. Polling for MPC completion (max 180s)...");
+        eprintln!("[E2E] Polling for MPC completion (max 180s)...");
 
         // Poll every 10s until MPC + post-MPC flow completes or we hit the max wait.
         // MPC involves: route exchange (7s) + settle (5s) + compile + execute (~60s)
@@ -2600,11 +2606,9 @@ async fn test_e2e_winner_verification_and_decryption() {
         bidder1.coordinator.watch_listing(listing.to_public()).await;
         bidder2.coordinator.watch_listing(listing.to_public()).await;
 
-        seller.coordinator.clone().start_monitoring();
-        bidder1.coordinator.clone().start_monitoring();
-        bidder2.coordinator.clone().start_monitoring();
+        // Monitoring was started in E2EParticipant::new() (matching production).
 
-        eprintln!("[E2E] Monitoring started. Polling for MPC + post-MPC flow (max 180s)...");
+        eprintln!("[E2E] Polling for MPC + post-MPC flow (max 180s)...");
 
         // Poll every 10s until winner receives decryption key or we hit the max wait.
         let mpc_start = tokio::time::Instant::now();

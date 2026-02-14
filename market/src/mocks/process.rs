@@ -95,6 +95,34 @@ impl SharedBidRegistry {
         winner.map(|(party_id, _, _)| party_id)
     }
 
+    /// Calculate the winner and return both party ID and winning bid.
+    pub async fn calculate_winner_with_bid(&self) -> Option<(usize, u64)> {
+        let bids = self.bids.read().await;
+        if bids.is_empty() {
+            return None;
+        }
+
+        let mut winner: Option<(usize, u64, u64)> = None;
+
+        for (&party_id, &(bid, timestamp)) in bids.iter() {
+            match winner {
+                None => winner = Some((party_id, bid, timestamp)),
+                Some((_, best_bid, best_ts)) => {
+                    if bid > best_bid || (bid == best_bid && timestamp < best_ts) {
+                        winner = Some((party_id, bid, timestamp));
+                    }
+                }
+            }
+        }
+
+        winner.map(|(party_id, bid, _)| (party_id, bid))
+    }
+
+    /// Get the winning bid value (highest bid).
+    pub async fn get_winning_bid(&self) -> Option<u64> {
+        self.calculate_winner_with_bid().await.map(|(_, bid)| bid)
+    }
+
     /// Get all registered bids.
     pub async fn get_bids(&self) -> HashMap<usize, (u64, u64)> {
         self.bids.read().await.clone()
@@ -253,20 +281,38 @@ impl MpcRunner for MockMpcRunner {
 
         // Determine winner based on strategy
         let strategy = self.winner_strategy.read().await.clone();
-        let is_winner = match strategy {
-            WinnerStrategy::Fixed(winner_id) => party_id == winner_id,
-            WinnerStrategy::CalculateFromBids => match self.bid_registry.calculate_winner().await {
-                Some(winner_id) => party_id == winner_id,
-                None => false,
-            },
+        let (is_winner, winner_party_id_val, winner_bid_val) = match strategy {
+            WinnerStrategy::Fixed(winner_id) => {
+                let bid = if party_id == 0 {
+                    // Seller gets to see the winning bid
+                    self.bid_registry.get_winning_bid().await
+                } else {
+                    None
+                };
+                (party_id == winner_id, Some(winner_id), bid)
+            }
+            WinnerStrategy::CalculateFromBids => {
+                match self.bid_registry.calculate_winner_with_bid().await {
+                    Some((winner_id, bid)) => {
+                        let bid = if party_id == 0 { Some(bid) } else { None };
+                        (party_id == winner_id, Some(winner_id), bid)
+                    }
+                    None => (false, None, None),
+                }
+            }
         };
 
+        // Party 0 (seller) sees winner_bid and winner_party_id; others don't
         Ok(MpcResult {
             is_winner,
             party_id,
             num_parties,
-            winner_bid: None,
-            winner_party_id: None,
+            winner_bid: if party_id == 0 { winner_bid_val } else { None },
+            winner_party_id: if party_id == 0 {
+                winner_party_id_val
+            } else {
+                None
+            },
         })
     }
 
