@@ -146,9 +146,9 @@ impl MultiPartyHarness {
         let cbor = listing.to_cbor().unwrap();
         self.parties[0].dht.set_value(&record, cbor).await.unwrap();
 
-        // All parties watch the listing
+        // All parties watch the listing (PublicListing — no decryption key in watched state)
         for party in &self.parties {
-            party.auction_logic.watch_listing(listing.clone()).await;
+            party.auction_logic.watch_listing(listing.to_public()).await;
         }
 
         listing

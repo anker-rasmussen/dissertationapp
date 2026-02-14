@@ -1,8 +1,8 @@
 #!/bin/bash
 # Helper script to run a market app instance for demo
 # Usage: ./run-demo-instance.sh <node_offset|cluster>
-# Example: ./run-demo-instance.sh 5       (runs on port 5165, IP 1.2.3.6)
-# Example: ./run-demo-instance.sh cluster (runs all 3 nodes: 5, 6, 7)
+# Example: ./run-demo-instance.sh 9       (runs on port 5169, IP 1.2.3.10)
+# Example: ./run-demo-instance.sh cluster (runs all 3 nodes: 9, 10, 11)
 
 set -e
 
@@ -35,9 +35,9 @@ run_cluster() {
     echo "========================================="
     echo "Starting 3-Node Demo Cluster"
     echo "========================================="
-    echo "  Node 5 -> port 5165, IP 1.2.3.6 (Bidder 1)"
-    echo "  Node 6 -> port 5166, IP 1.2.3.7 (Bidder 2)"
-    echo "  Node 7 -> port 5167, IP 1.2.3.8 (Auctioneer)"
+    echo "  Node 9  -> port 5169, IP 1.2.3.10 (Bidder 1)"
+    echo "  Node 10 -> port 5170, IP 1.2.3.11 (Bidder 2)"
+    echo "  Node 11 -> port 5171, IP 1.2.3.12 (Auctioneer)"
     echo "========================================="
     echo ""
 
@@ -64,7 +64,7 @@ run_cluster() {
     trap cleanup EXIT INT TERM
 
     # Start each node in its own terminal or background
-    for NODE_OFFSET in 5 6 7; do
+    for NODE_OFFSET in 9 10 11; do
         local PORT=$((5160 + NODE_OFFSET))
         local IP_SUFFIX=$((NODE_OFFSET + 1))
 
@@ -94,10 +94,10 @@ run_cluster() {
 
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <node_offset|cluster>"
-    echo "  node_offset 5 -> port 5165, IP 1.2.3.6 (Bidder 1)"
-    echo "  node_offset 6 -> port 5166, IP 1.2.3.7 (Bidder 2)"
-    echo "  node_offset 7 -> port 5167, IP 1.2.3.8 (Auctioneer)"
-    echo "  cluster      -> start all 3 nodes at once"
+    echo "  node_offset 9  -> port 5169, IP 1.2.3.10 (Bidder 1)"
+    echo "  node_offset 10 -> port 5170, IP 1.2.3.11 (Bidder 2)"
+    echo "  node_offset 11 -> port 5171, IP 1.2.3.12 (Auctioneer)"
+    echo "  cluster        -> start all 3 nodes at once"
     exit 1
 fi
 

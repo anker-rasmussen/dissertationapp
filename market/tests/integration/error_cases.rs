@@ -6,6 +6,7 @@ use market::mocks::{
 };
 use market::veilid::auction_logic::AuctionLogic;
 use market::veilid::bid_storage::BidStorage;
+use market::veilid::mpc_orchestrator::validate_auction_parties;
 use market::DhtStore;
 
 use crate::common::MultiPartyHarness;
@@ -84,7 +85,7 @@ async fn test_duplicate_listing_watch() {
     harness
         .party(0)
         .auction_logic
-        .watch_listing(listing.clone())
+        .watch_listing(listing.to_public())
         .await;
 
     // Should not duplicate — get_expired_listings returns at most one entry per key
@@ -161,4 +162,17 @@ async fn test_dht_failure_on_listing_read() {
     // Should succeed now (empty result)
     let result = logic.discover_bids(&listing_key).await;
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_n2_mpc_rejection() {
+    // Shamir secret sharing requires N >= 3
+    assert!(validate_auction_parties(2).is_err());
+    assert!(validate_auction_parties(1).is_err());
+    assert!(validate_auction_parties(0).is_err());
+
+    // N = 3 and above should be accepted
+    assert!(validate_auction_parties(3).is_ok());
+    assert!(validate_auction_parties(4).is_ok());
+    assert!(validate_auction_parties(10).is_ok());
 }

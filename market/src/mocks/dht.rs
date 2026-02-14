@@ -276,6 +276,19 @@ impl DhtStore for MockDht {
             return Err(MarketError::Dht("MockDht: simulated write failure".into()));
         }
 
+        // Verify ownership: only the creator can write to a record
+        {
+            let owners = self.inner.record_owners.read().await;
+            if let Some(owner) = owners.get(&key_str) {
+                if owner != &self.node_id {
+                    return Err(MarketError::Dht(format!(
+                        "MockDht: node {} does not own record {} (owned by {})",
+                        self.node_id, key_str, owner
+                    )));
+                }
+            }
+        }
+
         // Reject writes to nonexistent records
         let mut storage = self.inner.storage.write().await;
         let record_storage = storage.get_mut(&key_str).ok_or_else(|| {

@@ -221,8 +221,19 @@ async fn test_3_party_loser_sees_no_winner_info() {
             if i == 1 {
                 // Winner sees is_winner = true
                 assert!(result.is_winner, "Party 1 (highest bid) should win");
+            } else if i == 0 {
+                // Party 0 (seller) loses but sees winner info (MPC protocol)
+                assert!(!result.is_winner, "Party 0 (seller) should lose");
+                assert!(
+                    result.winner_bid.is_some(),
+                    "Seller (party 0) should see winner bid"
+                );
+                assert!(
+                    result.winner_party_id.is_some(),
+                    "Seller (party 0) should see winner party ID"
+                );
             } else {
-                // Losers only see is_winner = false — no winner ID or winning bid
+                // Other losers see is_winner = false — no winner ID or winning bid
                 assert!(!result.is_winner, "Party {} should lose", i);
                 assert!(
                     result.winner_bid.is_none(),
