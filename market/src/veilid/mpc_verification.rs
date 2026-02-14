@@ -91,8 +91,10 @@ impl MpcOrchestrator {
 
         if i_won {
             info!("I won — waiting for seller's challenge (WinnerDecryptionRequest)");
+            self.mark_expected_winner(listing_key).await;
         } else {
             info!("I lost — cleaning up route manager");
+            self.clear_expected_winner(listing_key).await;
             self.cleanup_route_manager(listing_key).await;
         }
     }
@@ -193,7 +195,7 @@ impl MpcOrchestrator {
     /// Send WinnerDecryptionRequest challenge to winner via their MPC route
     pub async fn send_winner_challenge(&self, listing_key: &RecordKey, winner: &PublicKey) {
         let message =
-            AuctionMessage::winner_decryption_request(listing_key.clone(), self.my_node_id.clone());
+            AuctionMessage::winner_decryption_request(listing_key.clone(), winner.clone());
 
         let data = match message.to_signed_bytes(&self.signing_key) {
             Ok(d) => d,
@@ -203,46 +205,84 @@ impl MpcOrchestrator {
             }
         };
 
-        // Look up the winner's route while holding locks, then release before async work
-        let winner_route = {
-            let route_manager = {
-                let managers = self.route_managers.lock().await;
-                if let Some(rm) = managers.get(listing_key) {
-                    rm.clone()
+        let start = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_secs(20);
+
+        loop {
+            // Look up the winner's route while holding locks, then release before async work
+            let winner_route = {
+                let route_manager = {
+                    let managers = self.route_managers.lock().await;
+                    managers.get(listing_key).cloned()
+                };
+                let Some(route_manager) = route_manager else {
+                    if start.elapsed() >= max_wait {
+                        error!(
+                            "Route manager not found for listing {} after {:?}",
+                            listing_key, max_wait
+                        );
+                        return;
+                    }
+                    warn!(
+                        "Route manager not found for listing {}, retrying",
+                        listing_key
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue;
+                };
+
+                let received_routes = {
+                    let mgr = route_manager.lock().await;
+                    mgr.received_routes.clone()
+                };
+                let routes = received_routes.lock().await;
+                if let Some(route) = routes.get(winner).cloned() {
+                    route
                 } else {
-                    warn!("Route manager not found for listing {}", listing_key);
+                    if start.elapsed() >= max_wait {
+                        error!(
+                            "Winner route not found in route manager after {:?} (listing {})",
+                            max_wait, listing_key
+                        );
+                        return;
+                    }
+                    warn!(
+                        "Winner route not found yet for listing {}, retrying challenge",
+                        listing_key
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            let routing_context = match self.safe_routing_context() {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    error!("Failed to create routing context: {}", e);
                     return;
                 }
             };
-            let received_routes = {
-                let mgr = route_manager.lock().await;
-                mgr.received_routes.clone()
-            };
-            let routes = received_routes.lock().await;
-            if let Some(route) = routes.get(winner).cloned() {
-                route
-            } else {
-                warn!("Winner's MPC route not found in route manager");
-                return;
-            }
-        };
 
-        let routing_context = match self.safe_routing_context() {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                error!("Failed to create routing context: {}", e);
-                return;
+            match routing_context
+                .app_message(Target::RouteId(winner_route), data.clone())
+                .await
+            {
+                Ok(()) => {
+                    info!("Sent WinnerDecryptionRequest challenge to winner via MPC route");
+                    return;
+                }
+                Err(e) => {
+                    if start.elapsed() >= max_wait {
+                        error!(
+                            "Failed to send challenge to winner within {:?}: {}",
+                            max_wait, e
+                        );
+                        return;
+                    }
+                    warn!("Failed to send challenge to winner, retrying: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
             }
-        };
-
-        match routing_context
-            .app_message(Target::RouteId(winner_route), data)
-            .await
-        {
-            Ok(()) => {
-                info!("Sent WinnerDecryptionRequest challenge to winner via MPC route");
-            }
-            Err(e) => error!("Failed to send challenge to winner: {}", e),
         }
     }
 

@@ -1,6 +1,6 @@
 use ed25519_dalek::SigningKey;
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -63,6 +63,8 @@ pub struct MpcOrchestrator {
     pub(crate) pending_verifications: VerificationMap,
     /// Listings where this node is the expected winner (set from bidder MPC output).
     pub(crate) expected_winner_listings: Arc<Mutex<HashSet<RecordKey>>>,
+    /// Listings currently in MPC route-exchange / execution flow.
+    pub(crate) active_auctions: Arc<Mutex<HashSet<RecordKey>>>,
 }
 
 impl MpcOrchestrator {
@@ -85,6 +87,7 @@ impl MpcOrchestrator {
             route_managers: Arc::new(Mutex::new(HashMap::new())),
             pending_verifications: Arc::new(Mutex::new(HashMap::new())),
             expected_winner_listings: Arc::new(Mutex::new(HashSet::new())),
+            active_auctions: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -113,12 +116,23 @@ impl MpcOrchestrator {
 
     /// Clear expected-winner state for a listing.
     pub async fn clear_expected_winner(&self, listing_key: &RecordKey) {
-        self.expected_winner_listings.lock().await.remove(listing_key);
+        self.expected_winner_listings
+            .lock()
+            .await
+            .remove(listing_key);
     }
 
     /// Returns whether this node is the expected winner for the listing.
     pub async fn is_expected_winner(&self, listing_key: &RecordKey) -> bool {
-        self.expected_winner_listings.lock().await.contains(listing_key)
+        self.expected_winner_listings
+            .lock()
+            .await
+            .contains(listing_key)
+    }
+
+    /// Returns true when at least one auction is actively running MPC flow.
+    pub async fn has_active_auctions(&self) -> bool {
+        !self.active_auctions.lock().await.is_empty()
     }
 
     /// Pre-create a route manager for an auction so we can receive route announcements
@@ -152,8 +166,16 @@ impl MpcOrchestrator {
         info!("Handling auction end for listing '{}'", listing_title);
 
         if bid_index.bids.is_empty() {
-            warn!("No bids discovered for listing '{}'", listing_title);
-            return Ok(());
+            // We only reach here when we know we bid on this listing
+            // (checked by handle_auction_end_wrapper), so an empty index
+            // means the DHT hasn't propagated yet — retry.
+            warn!(
+                "No bids discovered for listing '{}' — DHT may not have propagated",
+                listing_title
+            );
+            return Err(MarketError::NotFound(
+                "No bids discovered yet, DHT may not have propagated".into(),
+            ));
         }
 
         info!("Discovered {} bids for auction", bid_index.bids.len());
@@ -161,14 +183,18 @@ impl MpcOrchestrator {
         // Sort bidders by timestamp (seller's auto-bid has earliest timestamp = party 0)
         let sorted_bidders = bid_index.sorted_bidders();
 
-        // MASCOT MPC requires at least 2 parties
+        // MASCOT MPC requires at least 2 parties.
+        // Return Err so the monitoring loop retries — DHT propagation may
+        // not have completed yet, and more bids may appear on the next tick.
         if validate_auction_parties(sorted_bidders.len()).is_err() {
             warn!(
-                "Auction for '{}' has only {} parties, but MASCOT requires at least 2. Aborting MPC.",
+                "Auction for '{}' has only {} parties, but MASCOT requires at least 2 — will retry.",
                 listing_title, sorted_bidders.len()
             );
-            self.cleanup_route_manager(listing_key).await;
-            return Ok(());
+            return Err(MarketError::NotFound(format!(
+                "Only {} parties discovered (need ≥ 2), DHT may not have propagated yet",
+                sorted_bidders.len()
+            )));
         }
 
         // Check if we're a bidder
@@ -176,30 +202,44 @@ impl MpcOrchestrator {
 
         match my_party_id {
             Some(party_id) => {
+                let active_key = listing_key.clone();
+                self.active_auctions.lock().await.insert(active_key.clone());
+
                 info!(
                     "I am Party {} in this {}-party auction",
                     party_id,
                     sorted_bidders.len()
                 );
 
-                // Exchange routes with other parties
-                let routes = self
-                    .exchange_mpc_routes(listing_key, party_id, &sorted_bidders, peer_route_blobs)
-                    .await?;
+                let result = async {
+                    // Exchange routes with other parties
+                    let routes = self
+                        .exchange_mpc_routes(
+                            listing_key,
+                            party_id,
+                            &sorted_bidders,
+                            peer_route_blobs,
+                        )
+                        .await?;
 
-                // Wait for all parties to be ready
-                info!("Waiting 2s for route propagation...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    // Wait for all parties to be ready
+                    info!("Waiting 2s for route propagation...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-                // Trigger MPC execution
-                self.execute_mpc_auction(
-                    party_id,
-                    sorted_bidders.len(),
-                    &bid_index,
-                    routes,
-                    &sorted_bidders,
-                )
-                .await?;
+                    // Trigger MPC execution
+                    self.execute_mpc_auction(
+                        party_id,
+                        sorted_bidders.len(),
+                        &bid_index,
+                        routes,
+                        &sorted_bidders,
+                    )
+                    .await
+                }
+                .await;
+
+                self.active_auctions.lock().await.remove(&active_key);
+                result?;
             }
             None => {
                 debug!("Not a bidder in this auction, skipping MPC participation");
@@ -284,6 +324,7 @@ impl MpcOrchestrator {
 
         let start = std::time::Instant::now();
         let max_wait = std::time::Duration::from_secs(30);
+        let mut rebroadcast_counter: u8 = 0;
 
         loop {
             let routes = {
@@ -306,6 +347,25 @@ impl MpcOrchestrator {
                     )));
                 }
                 return Ok(routes);
+            }
+
+            // Periodically re-broadcast our route using the peer routes we
+            // already have, so late-joining parties can receive our MPC
+            // announcement.  Uses pre-fetched peer_route_blobs (no DHT
+            // overhead).
+            rebroadcast_counter = rebroadcast_counter.wrapping_add(1);
+            if rebroadcast_counter % 5 == 0 && !peer_route_blobs.is_empty() {
+                let my_pubkey = &bidders[my_party_id];
+                route_manager
+                    .lock()
+                    .await
+                    .broadcast_route_announcement(
+                        listing_key,
+                        my_pubkey,
+                        peer_route_blobs,
+                        &self.signing_key,
+                    )
+                    .await?;
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
