@@ -1623,11 +1623,11 @@ fn make_real_commitment(bid_value: u64, nonce: &[u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Check if MP-SPDZ shamir-party.x binary is available at the default path.
+/// Check if MP-SPDZ mascot-party.x binary is available at the default path.
 fn check_mp_spdz_available() -> bool {
     let mp_spdz_dir = std::env::var(market::config::MP_SPDZ_DIR_ENV)
         .unwrap_or_else(|_| market::config::DEFAULT_MP_SPDZ_DIR.to_string());
-    let binary = std::path::Path::new(&mp_spdz_dir).join("shamir-party.x");
+    let binary = std::path::Path::new(&mp_spdz_dir).join("mascot-party.x");
     binary.exists()
 }
 
@@ -2187,10 +2187,10 @@ async fn test_e2e_real_bid_flow_with_commitments() {
     }
 }
 
-/// Test full MPC execution with real shamir-party.x.
+/// Test full MPC execution with real mascot-party.x.
 /// Skips gracefully if MP-SPDZ is not available (CI-safe).
 ///
-/// Validates: Real shamir-party.x execution, TCP tunnel proxy, route exchange,
+/// Validates: Real mascot-party.x execution, TCP tunnel proxy, route exchange,
 /// MPC output parsing, hosts file generation.
 #[tokio::test]
 #[ignore]
@@ -2200,7 +2200,7 @@ async fn test_e2e_full_mpc_execution() {
 
     if !check_mp_spdz_available() {
         eprintln!(
-            "[E2E] SKIPPING test_e2e_full_mpc_execution: shamir-party.x not found at {}",
+            "[E2E] SKIPPING test_e2e_full_mpc_execution: mascot-party.x not found at {}",
             market::config::DEFAULT_MP_SPDZ_DIR
         );
         return;
@@ -2453,7 +2453,7 @@ async fn test_e2e_winner_verification_and_decryption() {
 
     if !check_mp_spdz_available() {
         eprintln!(
-            "[E2E] SKIPPING test_e2e_winner_verification_and_decryption: shamir-party.x not found"
+            "[E2E] SKIPPING test_e2e_winner_verification_and_decryption: mascot-party.x not found"
         );
         return;
     }
