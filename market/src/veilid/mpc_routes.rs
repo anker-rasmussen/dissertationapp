@@ -3,18 +3,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use veilid_core::{
-    PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, Sequencing, Stability, Target,
-    VeilidAPI, CRYPTO_KIND_VLD0,
+    PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, SafetySpec, Sequencing, Stability,
+    Target, VeilidAPI, CRYPTO_KIND_VLD0,
 };
 
 use super::bid_announcement::AuctionMessage;
-use super::dht::DHTOperations;
 use crate::error::{MarketError, MarketResult};
 
 /// Manages Veilid route exchange for MPC parties
 pub struct MpcRouteManager {
     api: VeilidAPI,
-    _dht: DHTOperations,
     party_id: usize,
     my_route_id: Option<RouteId>,
     my_route_blob: Option<RouteBlob>, // Route blob for sharing with other parties
@@ -22,10 +20,9 @@ pub struct MpcRouteManager {
 }
 
 impl MpcRouteManager {
-    pub fn new(api: VeilidAPI, dht: DHTOperations, party_id: usize) -> Self {
+    pub fn new(api: VeilidAPI, party_id: usize) -> Self {
         Self {
             api,
-            _dht: dht,
             party_id,
             my_route_id: None,
             my_route_blob: None,
@@ -63,11 +60,14 @@ impl MpcRouteManager {
         Ok(route_id)
     }
 
-    /// Broadcast this party's route announcement to all peers
+    /// Broadcast this party's route announcement to peers using their
+    /// private route blobs (since `Target::NodeId` is blocked without Veilid's
+    /// footgun feature).
     pub async fn broadcast_route_announcement(
         &self,
         listing_key: &RecordKey,
         my_pubkey: &PublicKey,
+        peer_route_blobs: &[(String, Vec<u8>)],
     ) -> MarketResult<()> {
         let route_blob = self
             .my_route_blob
@@ -94,23 +94,31 @@ impl MpcRouteManager {
         let routing_context = self
             .api
             .routing_context()?
-            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))?;
-
-        let state = self.api.get_state().await?;
+            .with_safety(SafetySelection::Safe(SafetySpec {
+                preferred_route: None,
+                hop_count: 1,
+                stability: Stability::Reliable,
+                sequencing: Sequencing::PreferOrdered,
+            }))?;
 
         let mut sent_count = 0;
-        for peer in &state.network.peers {
-            for node_id in &peer.node_ids {
-                match routing_context
-                    .app_message(Target::NodeId(node_id.clone()), data.clone())
-                    .await
-                {
-                    Ok(()) => {
-                        debug!("Sent route announcement to peer {}", node_id);
-                        sent_count += 1;
-                        break;
+        for (node_id, blob) in peer_route_blobs {
+            match self.api.import_remote_private_route(blob.clone()) {
+                Ok(imported_route) => {
+                    match routing_context
+                        .app_message(Target::RouteId(imported_route.clone()), data.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            debug!("Sent route announcement to peer {}", node_id);
+                            sent_count += 1;
+                        }
+                        Err(e) => warn!("Failed to send route announcement to {}: {}", node_id, e),
                     }
-                    Err(e) => debug!("Failed to send to {}: {}", node_id, e),
+                    let _ = self.api.release_private_route(imported_route);
+                }
+                Err(e) => {
+                    debug!("Failed to import route for {}: {}", node_id, e);
                 }
             }
         }

@@ -100,7 +100,6 @@ impl MpcOrchestrator {
         if !managers.contains_key(&key) {
             let route_manager = Arc::new(Mutex::new(MpcRouteManager::new(
                 self.api.clone(),
-                self.dht.clone(),
                 0, // Placeholder party ID, will be determined when auction ends
             )));
             managers.insert(key.clone(), route_manager);
@@ -118,6 +117,7 @@ impl MpcOrchestrator {
         listing_key: &RecordKey,
         bid_index: BidIndex,
         listing_title: &str,
+        peer_route_blobs: &[(String, Vec<u8>)],
     ) -> MarketResult<()> {
         info!("Handling auction end for listing '{}'", listing_title);
 
@@ -154,7 +154,7 @@ impl MpcOrchestrator {
 
                 // Exchange routes with other parties
                 let routes = self
-                    .exchange_mpc_routes(listing_key, party_id, &sorted_bidders)
+                    .exchange_mpc_routes(listing_key, party_id, &sorted_bidders, peer_route_blobs)
                     .await?;
 
                 // Wait for all parties to be ready
@@ -185,6 +185,7 @@ impl MpcOrchestrator {
         listing_key: &RecordKey,
         my_party_id: usize,
         bidders: &[PublicKey],
+        peer_route_blobs: &[(String, Vec<u8>)],
     ) -> MarketResult<HashMap<usize, RouteId>> {
         info!(
             "Exchanging MPC routes with {} parties for listing {}",
@@ -200,7 +201,6 @@ impl MpcOrchestrator {
                 info!("Creating new route manager for listing {} (should have been created earlier)", listing_key);
                 Arc::new(Mutex::new(MpcRouteManager::new(
                     self.api.clone(),
-                    self.dht.clone(),
                     my_party_id,
                 )))
             }).clone()
@@ -217,13 +217,13 @@ impl MpcOrchestrator {
             my_party_id, my_route_id
         );
 
-        // Broadcast our route
+        // Broadcast our route via peer private routes
         {
             let my_pubkey = &bidders[my_party_id];
             route_manager
                 .lock()
                 .await
-                .broadcast_route_announcement(listing_key, my_pubkey)
+                .broadcast_route_announcement(listing_key, my_pubkey, peer_route_blobs)
                 .await?;
         }
 
@@ -243,11 +243,12 @@ impl MpcOrchestrator {
                 .await?;
         }
 
-        // Wait for routes (2s initial + check every 1s up to 5s total)
+        // Wait for routes: the seller (party 0) may take extra time to fetch
+        // bid records from DHT before creating its MPC route, so allow up to 30s.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(5);
+        let max_wait = std::time::Duration::from_secs(30);
 
         loop {
             let routes = {
@@ -319,12 +320,14 @@ impl MpcOrchestrator {
 
         // Write hosts file with all parties as localhost (Veilid handles actual routing)
         let hosts_content = generate_hosts_content(num_parties);
-        std::fs::write(&hosts_file_path, &hosts_content).map_err(|e| {
-            MarketError::Process(format!(
-                "Failed to write hosts file {}: {e}",
-                hosts_file_path.display()
-            ))
-        })?;
+        tokio::fs::write(&hosts_file_path, &hosts_content)
+            .await
+            .map_err(|e| {
+                MarketError::Process(format!(
+                    "Failed to write hosts file {}: {e}",
+                    hosts_file_path.display()
+                ))
+            })?;
 
         info!(
             "Wrote hosts file to {:?} for {} parties",
@@ -368,7 +371,7 @@ impl MpcOrchestrator {
             process_output.status.code()
         );
         if !stdout.is_empty() {
-            info!("STDOUT:\n{}", stdout);
+            debug!("STDOUT:\n{}", stdout);
         }
         if !stderr.is_empty() {
             warn!("STDERR:\n{}", stderr);
@@ -394,7 +397,7 @@ impl MpcOrchestrator {
             .routing_context()?
             .with_safety(SafetySelection::Safe(SafetySpec {
                 preferred_route: None,
-                hop_count: 2,
+                hop_count: 1,
                 stability: Stability::Reliable,
                 sequencing: Sequencing::PreferOrdered,
             }))?)

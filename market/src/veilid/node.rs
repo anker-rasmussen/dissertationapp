@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use veilid_core::{
     api_startup, VeilidAPI, VeilidConfig, VeilidConfigCapabilities, VeilidConfigNetwork,
     VeilidConfigProtectedStore, VeilidConfigProtocol, VeilidConfigRoutingTable, VeilidConfigTCP,
-    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate, VEILID_CAPABILITY_RELAY,
+    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate,
     VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
@@ -30,14 +30,14 @@ pub struct DevNetConfig {
 impl Default for DevNetConfig {
     fn default() -> Self {
         // Port offset can be overridden via MARKET_NODE_OFFSET env var
-        // This allows running multiple market instances for your demo:
-        // - MARKET_NODE_OFFSET=5 (default) -> port 5165, IP 1.2.3.6, data: ~/.local/share/smpc-auction-node-5
-        // - MARKET_NODE_OFFSET=6 -> port 5166, IP 1.2.3.7, data: ~/.local/share/smpc-auction-node-6
-        // - MARKET_NODE_OFFSET=7 -> port 5167, IP 1.2.3.8, data: ~/.local/share/smpc-auction-node-7
+        // The devnet uses offsets 0-8 (9 nodes), so market instances start at 9+:
+        // - MARKET_NODE_OFFSET=9 (default)  -> port 5169, IP 1.2.3.10, data: ~/.local/share/smpc-auction-node-9
+        // - MARKET_NODE_OFFSET=10 -> port 5170, IP 1.2.3.11, data: ~/.local/share/smpc-auction-node-10
+        // - MARKET_NODE_OFFSET=11 -> port 5171, IP 1.2.3.12, data: ~/.local/share/smpc-auction-node-11
         let port_offset = std::env::var("MARKET_NODE_OFFSET")
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(5);
+            .unwrap_or(9);
 
         Self {
             network_key: "development-network-2025".to_string(),
@@ -125,14 +125,18 @@ impl VeilidNode {
 
         // Build network config based on whether we're connecting to devnet
         let network_config = if let Some(devnet) = &self.devnet_config {
-            // Calculate our port - bind to 127.0.0.1 directly for LocalNetwork routing domain
-            // No public_address means we use LocalNetwork for peer discovery
+            // Calculate our port and public address for the ip_spoof layer.
+            // Both market nodes and Docker infrastructure nodes use libipspoof,
+            // so advertising 1.2.3.X as our public address lets all nodes
+            // reach us.  This gives market nodes valid dial info, enabling
+            // safe route allocation for broadcasts.
             let port = 5160 + devnet.port_offset;
             let listen_addr = format!("127.0.0.1:{port}");
+            let public_addr = format!("1.2.3.{}:{port}", devnet.port_offset + 1);
 
             info!(
-                "Configuring for devnet: key={}, bootstrap={:?}, listen_addr={}",
-                devnet.network_key, devnet.bootstrap_nodes, listen_addr
+                "Configuring for devnet: key={}, bootstrap={:?}, listen={}, public={}",
+                devnet.network_key, devnet.bootstrap_nodes, listen_addr, public_addr
             );
 
             VeilidConfigNetwork {
@@ -154,14 +158,14 @@ impl VeilidNode {
                         enabled: true,
                         socket_pool_size: 0,
                         listen_address: listen_addr.clone(),
-                        public_address: None,
+                        public_address: Some(public_addr.clone()),
                     },
                     tcp: VeilidConfigTCP {
                         connect: true,
                         listen: true,
                         max_connections: 32,
                         listen_address: listen_addr.clone(),
-                        public_address: None,
+                        public_address: Some(public_addr),
                     },
                     ws: VeilidConfigWS {
                         connect: true,
@@ -179,16 +183,14 @@ impl VeilidNode {
             VeilidConfigNetwork::default()
         };
 
-        // For devnet, disable capabilities that are disabled on devnet nodes
-        // Match the bootstrap config: TUNL, SGNL, RLAY, DIAL disabled
+        // For devnet, disable capabilities not needed by market nodes.
+        // RELAY is left enabled so safe routing works (devnet nodes 1-4 are
+        // relay-capable, and market nodes need to construct safe routes).
         let capabilities = if self.devnet_config.is_some() {
             VeilidConfigCapabilities {
                 disable: vec![
                     VEILID_CAPABILITY_SIGNAL,
-                    VEILID_CAPABILITY_RELAY,
                     VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
-                    // Note: VEILID_CAPABILITY_TUNNEL is behind feature flag "unstable-tunnels"
-                    // and not available by default, so we don't include it
                 ],
             }
         } else {
@@ -322,15 +324,12 @@ impl VeilidNode {
         self.update_rx.take()
     }
 
-    /// Create a DHT operations handle for this node
-    /// Returns None if the node hasn't been started yet
+    /// Create a DHT operations handle for this node.
+    /// Returns None if the node hasn't been started yet.
     pub fn dht_operations(&self) -> Option<crate::veilid::dht::DHTOperations> {
-        self.api.as_ref().map(|api| {
-            // Use unsafe routing for devnet (no private routes)
-            // Use safe routing for public network
-            let use_unsafe_routing = self.devnet_config.is_some();
-            crate::veilid::dht::DHTOperations::new(api.clone(), use_unsafe_routing)
-        })
+        self.api
+            .as_ref()
+            .map(|api| crate::veilid::dht::DHTOperations::new(api.clone()))
     }
 }
 

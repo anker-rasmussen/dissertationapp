@@ -1,20 +1,20 @@
 use async_trait::async_trait;
 use tracing::{debug, info};
 use veilid_core::{
-    DHTRecordDescriptor, DHTSchema, KeyPair, RecordKey, SafetySelection, Sequencing,
-    ValueSubkeyRangeSet, VeilidAPI, CRYPTO_KIND_VLD0,
+    DHTRecordDescriptor, DHTSchema, KeyPair, RecordKey, ValueSubkeyRangeSet, VeilidAPI,
+    CRYPTO_KIND_VLD0,
 };
 
 use crate::config::DHT_SUBKEY_COUNT;
 use crate::error::{MarketError, MarketResult};
 use crate::traits::DhtStore;
 
-/// DHT operations wrapper for Veilid
+/// DHT operations wrapper for Veilid.
+///
+/// Always uses Veilid's default safe routing — both in devnet and production.
 #[derive(Clone)]
 pub struct DHTOperations {
     api: VeilidAPI,
-    /// Whether to use unsafe (direct) routing for devnet
-    use_unsafe_routing: bool,
 }
 
 /// A DHT record with its owner keypair for write access
@@ -25,32 +25,15 @@ pub struct OwnedDHTRecord {
 }
 
 impl DHTOperations {
-    /// Create a new DHT operations instance
-    /// For devnet, use unsafe_routing=true to disable private routes
-    pub const fn new(api: VeilidAPI, use_unsafe_routing: bool) -> Self {
-        Self {
-            api,
-            use_unsafe_routing,
-        }
+    pub const fn new(api: VeilidAPI) -> Self {
+        Self { api }
     }
 
-    /// Get a routing context with the appropriate safety selection
+    /// Get a routing context using Veilid's default safe routing.
     pub fn routing_context(&self) -> MarketResult<veilid_core::RoutingContext> {
-        let mut routing_context = self
-            .api
+        self.api
             .routing_context()
-            .map_err(|e| MarketError::Dht(format!("Failed to get routing context: {e}")))?;
-
-        if self.use_unsafe_routing {
-            // Use unsafe (direct) routing for devnet - no private routes
-            // PreferOrdered ensures messages arrive in order when possible
-            routing_context = routing_context
-                .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-                .map_err(|e| MarketError::Dht(format!("Failed to set unsafe routing: {e}")))?;
-            debug!("Using unsafe (direct) routing for DHT operations");
-        }
-
-        Ok(routing_context)
+            .map_err(|e| MarketError::Dht(format!("Failed to get routing context: {e}")))
     }
 
     /// Create a new DHT record with the default crypto system (VLD0)
