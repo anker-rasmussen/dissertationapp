@@ -28,7 +28,6 @@ pub use error::{MarketError, MarketResult};
 #[cfg(any(test, feature = "test"))]
 pub mod mocks;
 
-pub use config::*;
 pub use crypto::{decrypt_content, encrypt_content, generate_key, ContentKey, ContentNonce};
 pub use marketplace::{
     Bid, BidCollection, BidIndex, BidRecord, Listing, ListingStatus, PublicListing, SealedBid,

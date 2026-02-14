@@ -61,8 +61,7 @@ pub async fn create_and_publish_listing(
         .encrypted_content(ciphertext, nonce, key_hex)
         .reserve_price(reserve_price)
         .auction_duration(duration)
-        .build()
-        .map_err(|e| MarketError::InvalidState(format!("Failed to build listing: {}", e)))?;
+        .build()?;
 
     // Publish to DHT
     let listing_ops = ListingOperations::new(dht.clone());

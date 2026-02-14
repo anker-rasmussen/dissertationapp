@@ -3,6 +3,7 @@ use veilid_core::{PublicKey, RecordKey};
 
 use crate::config::now_unix;
 use crate::crypto::ContentNonce;
+use crate::error::{MarketError, MarketResult};
 use crate::traits::{SystemTimeProvider, TimeProvider};
 
 /// Status of a listing in the auction marketplace
@@ -18,8 +19,19 @@ pub enum ListingStatus {
     Cancelled,
 }
 
+impl std::fmt::Display for ListingStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "Active"),
+            Self::Closed => write!(f, "Closed"),
+            Self::Completed => write!(f, "Completed"),
+            Self::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
 /// A marketplace listing for a sealed-bid auction
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listing {
     /// DHT record key where this listing is stored
     pub key: RecordKey,
@@ -55,7 +67,7 @@ pub struct Listing {
 }
 
 /// A listing with the decryption key stripped out, safe for DHT publication.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicListing {
     pub key: RecordKey,
     pub seller: PublicKey,
@@ -309,23 +321,27 @@ impl<T: TimeProvider> ListingBuilder<T> {
     }
 
     /// Build the listing (returns error if required fields are missing)
-    pub fn build(self) -> Result<Listing, String> {
+    pub fn build(self) -> MarketResult<Listing> {
         let created_at = self.time.now_unix();
 
+        let missing = |field: &str| MarketError::Validation(format!("{field} is required"));
+
         Ok(Listing {
-            key: self.key.ok_or("key is required")?,
-            seller: self.seller.ok_or("seller is required")?,
-            title: self.title.ok_or("title is required")?,
+            key: self.key.ok_or_else(|| missing("key"))?,
+            seller: self.seller.ok_or_else(|| missing("seller"))?,
+            title: self.title.ok_or_else(|| missing("title"))?,
             encrypted_content: self
                 .encrypted_content
-                .ok_or("encrypted_content is required")?,
-            content_nonce: self.content_nonce.ok_or("content_nonce is required")?,
-            decryption_key: self.decryption_key.ok_or("decryption_key is required")?,
-            reserve_price: self.reserve_price.ok_or("reserve_price is required")?,
+                .ok_or_else(|| missing("encrypted_content"))?,
+            content_nonce: self.content_nonce.ok_or_else(|| missing("content_nonce"))?,
+            decryption_key: self
+                .decryption_key
+                .ok_or_else(|| missing("decryption_key"))?,
+            reserve_price: self.reserve_price.ok_or_else(|| missing("reserve_price"))?,
             auction_end: created_at
                 + self
                     .auction_duration_secs
-                    .ok_or("auction_duration is required")?,
+                    .ok_or_else(|| missing("auction_duration"))?,
             created_at,
             status: ListingStatus::Active,
         })
@@ -381,7 +397,7 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("key is required"));
+        assert!(result.unwrap_err().to_string().contains("key is required"));
     }
 
     #[test]
@@ -396,7 +412,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("seller is required"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("seller is required"));
     }
 
     #[test]
@@ -411,7 +430,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("title is required"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("title is required"));
     }
 
     #[test]
@@ -426,7 +448,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("auction_duration is required"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("auction_duration is required"));
     }
 
     #[test]
