@@ -37,13 +37,25 @@ pub enum MarketError {
     #[error("Transport error: {0}")]
     Transport(String),
 
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
 impl From<bincode::Error> for MarketError {
     fn from(e: bincode::Error) -> Self {
         Self::Serialization(format!("Bincode error: {e}"))
+    }
+}
+
+impl From<veilid_core::VeilidAPIError> for MarketError {
+    fn from(e: veilid_core::VeilidAPIError) -> Self {
+        Self::Network(format!("{e}"))
+    }
+}
+
+impl From<std::io::Error> for MarketError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Network(format!("IO error: {e}"))
     }
 }
 

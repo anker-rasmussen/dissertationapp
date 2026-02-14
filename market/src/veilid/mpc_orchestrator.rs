@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -17,6 +16,7 @@ use super::mpc_routes::MpcRouteManager;
 pub use super::mpc_verification::VerificationState;
 use crate::config;
 use crate::config::subkeys;
+use crate::error::{MarketError, MarketResult};
 use crate::marketplace::BidIndex;
 
 pub(crate) type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
@@ -118,7 +118,7 @@ impl MpcOrchestrator {
         listing_key: &RecordKey,
         bid_index: BidIndex,
         listing_title: &str,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!("Handling auction end for listing '{}'", listing_title);
 
         if bid_index.bids.is_empty() {
@@ -185,7 +185,7 @@ impl MpcOrchestrator {
         listing_key: &RecordKey,
         my_party_id: usize,
         bidders: &[PublicKey],
-    ) -> Result<HashMap<usize, RouteId>> {
+    ) -> MarketResult<HashMap<usize, RouteId>> {
         info!(
             "Exchanging MPC routes with {} parties for listing {}",
             bidders.len(),
@@ -233,7 +233,7 @@ impl MpcOrchestrator {
             let my_pubkey = bidders[my_party_id].clone();
             let my_route_blob = mgr
                 .get_my_route_blob()
-                .ok_or_else(|| anyhow::anyhow!("Route blob not found"))?
+                .ok_or_else(|| MarketError::InvalidState("Route blob not found".into()))?
                 .clone();
             drop(mgr);
             route_manager
@@ -265,9 +265,9 @@ impl MpcOrchestrator {
             }
             if start.elapsed() >= max_wait {
                 if received < expected {
-                    return Err(anyhow::anyhow!(
+                    return Err(MarketError::Network(format!(
                         "Incomplete route exchange: got {received}/{expected} routes after {max_wait:?}"
-                    ));
+                    )));
                 }
                 return Ok(routes);
             }
@@ -284,7 +284,7 @@ impl MpcOrchestrator {
         bid_index: &BidIndex,
         routes: HashMap<usize, RouteId>,
         all_parties: &[PublicKey],
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Executing {}-party MPC auction as Party {} (Shamir)",
             num_parties, party_id
@@ -296,7 +296,7 @@ impl MpcOrchestrator {
             .bid_storage
             .get_bid(listing_key)
             .await
-            .ok_or_else(|| anyhow::anyhow!("Bid value not found in storage"))?;
+            .ok_or_else(|| MarketError::NotFound("Bid value not found in storage".into()))?;
 
         debug!("Bid value retrieved from local storage");
 
@@ -320,10 +320,10 @@ impl MpcOrchestrator {
         // Write hosts file with all parties as localhost (Veilid handles actual routing)
         let hosts_content = generate_hosts_content(num_parties);
         std::fs::write(&hosts_file_path, &hosts_content).map_err(|e| {
-            anyhow::anyhow!(
+            MarketError::Process(format!(
                 "Failed to write hosts file {}: {e}",
                 hosts_file_path.display()
-            )
+            ))
         })?;
 
         info!(
@@ -388,17 +388,16 @@ impl MpcOrchestrator {
     }
 
     /// Create a routing context suitable for sending to private routes.
-    pub fn safe_routing_context(&self) -> Result<veilid_core::RoutingContext> {
-        self.api
-            .routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
+    pub fn safe_routing_context(&self) -> MarketResult<veilid_core::RoutingContext> {
+        Ok(self
+            .api
+            .routing_context()?
             .with_safety(SafetySelection::Safe(SafetySpec {
                 preferred_route: None,
                 hop_count: 2,
                 stability: Stability::Reliable,
                 sequencing: Sequencing::PreferOrdered,
-            }))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))
+            }))?)
     }
 
     /// Cleanup route manager for a listing
@@ -415,7 +414,7 @@ impl MpcOrchestrator {
         &self,
         listing_key: &RecordKey,
         local_announcements: Option<&Vec<(PublicKey, RecordKey)>>,
-    ) -> Result<BidIndex> {
+    ) -> MarketResult<BidIndex> {
         info!("Discovering bids from DHT bid registry");
 
         let mut bid_index = BidIndex::new(listing_key.clone());

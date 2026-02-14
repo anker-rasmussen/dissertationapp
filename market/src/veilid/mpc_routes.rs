@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -10,6 +9,7 @@ use veilid_core::{
 
 use super::bid_announcement::AuctionMessage;
 use super::dht::DHTOperations;
+use crate::error::{MarketError, MarketResult};
 
 /// Manages Veilid route exchange for MPC parties
 pub struct MpcRouteManager {
@@ -34,7 +34,7 @@ impl MpcRouteManager {
     }
 
     /// Create a private route for this party
-    pub async fn create_route(&mut self) -> Result<RouteId> {
+    pub async fn create_route(&mut self) -> MarketResult<RouteId> {
         if let Some(route) = &self.my_route_id {
             return Ok(route.clone());
         }
@@ -49,7 +49,7 @@ impl MpcRouteManager {
                 Sequencing::PreferOrdered,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create route: {e}"))?;
+            .map_err(|e| MarketError::Network(format!("Failed to create route: {e}")))?;
 
         let route_id = route_blob.route_id.clone();
 
@@ -68,16 +68,16 @@ impl MpcRouteManager {
         &self,
         listing_key: &RecordKey,
         my_pubkey: &PublicKey,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         let route_blob = self
             .my_route_blob
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Route not created yet"))?;
+            .ok_or_else(|| MarketError::InvalidState("Route not created yet".into()))?;
 
         let route_id = self
             .my_route_id
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Route ID not set (internal error)"))?;
+            .ok_or_else(|| MarketError::InvalidState("Route ID not set (internal error)".into()))?;
         info!(
             "Broadcasting MPC route {} for party {}",
             route_id, my_pubkey
@@ -93,16 +93,10 @@ impl MpcRouteManager {
 
         let routing_context = self
             .api
-            .routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
-            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))?;
+            .routing_context()?
+            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))?;
 
-        let state = self
-            .api
-            .get_state()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get state: {e}"))?;
+        let state = self.api.get_state().await?;
 
         let mut sent_count = 0;
         for peer in &state.network.peers {
@@ -130,7 +124,7 @@ impl MpcRouteManager {
         &self,
         party_pubkey: PublicKey,
         route_blob: RouteBlob,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         let mut routes = self.received_routes.lock().await;
 
         if routes.contains_key(&party_pubkey) {
@@ -145,7 +139,7 @@ impl MpcRouteManager {
         let _ = self
             .api
             .import_remote_private_route(route_blob.blob.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to import remote route: {e}"))?;
+            .map_err(|e| MarketError::Network(format!("Failed to import remote route: {e}")))?;
 
         let route_id = route_blob.route_id.clone();
 
@@ -163,7 +157,7 @@ impl MpcRouteManager {
     pub async fn assemble_party_routes(
         &self,
         sorted_bidders: &[PublicKey],
-    ) -> Result<HashMap<usize, RouteId>> {
+    ) -> MarketResult<HashMap<usize, RouteId>> {
         let routes_by_pubkey = self.received_routes.lock().await;
         let mut routes_by_party_id = HashMap::new();
 

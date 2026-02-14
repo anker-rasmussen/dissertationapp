@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use market::error::{MarketError, MarketResult};
 use market::marketplace::bid_record::BidRecord;
 use market::veilid::auction_coordinator::AuctionCoordinator;
 use market::veilid::bid_ops::BidOperations;
@@ -97,7 +98,7 @@ impl DevnetManager {
     }
 
     /// Stop any existing devnet before starting fresh.
-    fn ensure_stopped(&self) -> anyhow::Result<()> {
+    fn ensure_stopped(&self) -> MarketResult<()> {
         eprintln!("[E2E] Ensuring devnet is stopped before starting...");
 
         let output = Command::new("docker")
@@ -124,23 +125,24 @@ impl DevnetManager {
 
     /// Start the devnet using docker-compose.
     /// In fast mode, assumes devnet is already running.
-    fn start(&mut self) -> anyhow::Result<()> {
+    fn start(&mut self) -> MarketResult<()> {
         if !self.infrastructure_available() {
-            anyhow::bail!(
+            return Err(MarketError::Config(format!(
                 "Devnet infrastructure not found. Expected:\n  - {}\n  - {}",
                 self.compose_path.display(),
                 libipspoof_path().display()
-            );
+            )));
         }
 
         if self.fast_mode {
             // In fast mode, verify devnet is running but don't start/stop it
             eprintln!("[E2E] Fast mode: checking devnet is running...");
             if !self.is_devnet_running() {
-                anyhow::bail!(
+                return Err(MarketError::Config(
                     "Fast mode requires a running devnet!\n\
                      Start it with: cargo devnet-start"
-                );
+                        .into(),
+                ));
             }
             eprintln!("[E2E] Fast mode: devnet already running");
             return Ok(());
@@ -165,7 +167,10 @@ impl DevnetManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to start devnet: {}", stderr);
+            return Err(MarketError::Process(format!(
+                "Failed to start devnet: {}",
+                stderr
+            )));
         }
 
         self.started = true;
@@ -200,7 +205,7 @@ impl DevnetManager {
 
     /// Wait for all devnet containers to be healthy.
     /// The devnet has 5 nodes: 1 bootstrap (port 5160) + 4 regular nodes (ports 5161-5164)
-    fn wait_for_health(&self, timeout_secs: u64) -> anyhow::Result<()> {
+    fn wait_for_health(&self, timeout_secs: u64) -> MarketResult<()> {
         eprintln!("[E2E] Waiting for all 5 devnet nodes to be healthy...");
 
         let start = std::time::Instant::now();
@@ -243,10 +248,10 @@ impl DevnetManager {
                 let _ = Command::new("docker")
                     .args(["compose", "-f", self.compose_path.to_str().unwrap(), "ps"])
                     .status();
-                anyhow::bail!(
+                return Err(MarketError::Timeout(format!(
                     "Devnet failed to become healthy within {} seconds",
                     timeout_secs
-                );
+                )));
             }
 
             std::thread::sleep(Duration::from_secs(5));
@@ -271,7 +276,7 @@ impl DevnetManager {
 
     /// Stop the devnet and clean up.
     /// In fast mode, keeps devnet running for subsequent tests.
-    fn stop(&mut self) -> anyhow::Result<()> {
+    fn stop(&mut self) -> MarketResult<()> {
         if self.fast_mode {
             eprintln!("[E2E] Fast mode: keeping devnet running");
             return Ok(());
@@ -352,17 +357,19 @@ impl TestNode {
         }
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(&mut self) -> MarketResult<()> {
         self.node.start().await.map_err(|e| {
-            anyhow::anyhow!(
+            MarketError::Network(format!(
                 "Failed to start Veilid node (offset {}): {}. \
                  Ensure LD_PRELOAD is set and devnet is running.",
-                self.offset,
-                e
-            )
+                self.offset, e
+            ))
         })?;
         self.node.attach().await.map_err(|e| {
-            anyhow::anyhow!("Failed to attach node (offset {}): {}", self.offset, e)
+            MarketError::Network(format!(
+                "Failed to attach node (offset {}): {}",
+                self.offset, e
+            ))
         })?;
         Ok(())
     }
@@ -372,7 +379,7 @@ impl TestNode {
     /// The node receives VeilidUpdate::Attachment (sets is_attached=true) and
     /// VeilidUpdate::Network (populates node_ids) as separate events. This method
     /// waits for both conditions to be satisfied.
-    async fn wait_for_ready(&self, timeout_secs: u64) -> anyhow::Result<()> {
+    async fn wait_for_ready(&self, timeout_secs: u64) -> MarketResult<()> {
         let start = std::time::Instant::now();
         loop {
             let state = self.node.state();
@@ -380,13 +387,13 @@ impl TestNode {
                 return Ok(());
             }
             if start.elapsed().as_secs() > timeout_secs {
-                anyhow::bail!(
+                return Err(MarketError::Timeout(format!(
                     "Node {} not ready within {}s: attached={}, node_ids={}",
                     self.offset,
                     timeout_secs,
                     state.is_attached,
                     state.node_ids.len()
-                );
+                )));
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -400,7 +407,7 @@ impl TestNode {
             .and_then(|s| PublicKey::try_from(s.as_str()).ok())
     }
 
-    async fn shutdown(&mut self) -> anyhow::Result<()> {
+    async fn shutdown(&mut self) -> MarketResult<()> {
         self.node.shutdown().await?;
         // Clean up test data
         let _ = std::fs::remove_dir_all(&self.data_dir);
@@ -433,37 +440,37 @@ fn create_test_listing(
 }
 
 /// Setup helper - starts devnet if needed and sets LD_PRELOAD.
-fn setup_e2e_environment() -> anyhow::Result<DevnetManager> {
+fn setup_e2e_environment() -> MarketResult<DevnetManager> {
     // Check if LD_PRELOAD is already set correctly
     let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
     let expected_preload = libipspoof_path();
 
     if !expected_preload.exists() {
-        anyhow::bail!(
+        return Err(MarketError::Config(format!(
             "libipspoof.so not found at {}.\n\
              Please build it with: cd {} && make libipspoof.so",
             expected_preload.display(),
             expected_preload.parent().unwrap().display()
-        );
+        )));
     }
 
     if !preload.contains(expected_preload.to_str().unwrap()) {
-        anyhow::bail!(
+        return Err(MarketError::Config(format!(
             "LD_PRELOAD not set. E2E tests require IP spoofing.\n\
              Run with: LD_PRELOAD={} cargo nextest run --profile e2e --ignored",
             expected_preload.display()
-        );
+        )));
     }
 
     let mut devnet = DevnetManager::new();
 
     if !devnet.infrastructure_available() {
-        anyhow::bail!(
+        return Err(MarketError::Config(format!(
             "Devnet infrastructure not found at {}. \
              Please ensure the veilid repository is available \
              or set VEILID_REPO_PATH.",
             veilid_repo_path().display()
-        );
+        )));
     }
 
     // Start devnet
@@ -496,7 +503,7 @@ async fn test_e2e_node_attachment() {
     let result = timeout(Duration::from_secs(180), async {
         node.start().await?;
         node.wait_for_ready(90).await?;
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -538,7 +545,7 @@ async fn test_e2e_multi_node_connectivity() {
             node.wait_for_ready(90).await?;
         }
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -568,50 +575,51 @@ async fn test_e2e_dht_operations() {
     let mut node1 = TestNode::new(14);
     let mut node2 = TestNode::new(15);
 
-    let result = timeout(Duration::from_secs(240), async {
-        // Start and wait for both nodes to be ready
-        node1.start().await?;
-        node2.start().await?;
-        node1.wait_for_ready(90).await?;
-        node2.wait_for_ready(90).await?;
+    let result =
+        timeout(Duration::from_secs(240), async {
+            // Start and wait for both nodes to be ready
+            node1.start().await?;
+            node2.start().await?;
+            node1.wait_for_ready(90).await?;
+            node2.wait_for_ready(90).await?;
 
-        // Get DHT operations from node1
-        let dht1 = node1
-            .node
-            .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get DHT operations from node1"))?;
+            // Get DHT operations from node1
+            let dht1 = node1.node.dht_operations().ok_or_else(|| {
+                MarketError::Dht("Failed to get DHT operations from node1".into())
+            })?;
 
-        let dht2 = node2
-            .node
-            .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get DHT operations from node2"))?;
+            let dht2 = node2.node.dht_operations().ok_or_else(|| {
+                MarketError::Dht("Failed to get DHT operations from node2".into())
+            })?;
 
-        // Create a record on node1
-        let record = dht1.create_dht_record().await?;
-        let key = record.key.clone();
+            // Create a record on node1
+            let record = dht1.create_dht_record().await?;
+            let key = record.key.clone();
 
-        // Write data from node1
-        let test_data = b"Hello from E2E test!".to_vec();
-        dht1.set_dht_value(&record, test_data.clone()).await?;
+            // Write data from node1
+            let test_data = b"Hello from E2E test!".to_vec();
+            dht1.set_dht_value(&record, test_data.clone()).await?;
 
-        // Delay for propagation
-        tokio::time::sleep(Duration::from_secs(5)).await;
+            // Delay for propagation
+            tokio::time::sleep(Duration::from_secs(5)).await;
 
-        // Read data from node2
-        let read_data = dht2.get_dht_value(&key).await?;
+            // Read data from node2
+            let read_data = dht2.get_dht_value(&key).await?;
 
-        match read_data {
-            Some(data) => {
-                assert_eq!(data, test_data, "DHT data mismatch");
+            match read_data {
+                Some(data) => {
+                    assert_eq!(data, test_data, "DHT data mismatch");
+                }
+                None => {
+                    return Err(MarketError::Dht(
+                        "Failed to read DHT data from node2".into(),
+                    ));
+                }
             }
-            None => {
-                anyhow::bail!("Failed to read DHT data from node2");
-            }
-        }
 
-        Ok::<_, anyhow::Error>(())
-    })
-    .await;
+            Ok::<_, MarketError>(())
+        })
+        .await;
 
     // Cleanup
     let _ = node1.shutdown().await;
@@ -654,25 +662,25 @@ async fn test_e2e_real_devnet_3_party_auction() {
         // Get node IDs
         let seller_id = seller_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Seller has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Seller has no node ID".into()))?;
         let _bidder1_id = bidder1_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Bidder1 has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Bidder1 has no node ID".into()))?;
         let _bidder2_id = bidder2_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Bidder2 has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Bidder2 has no node ID".into()))?;
 
         // Get DHT operations
         let seller_dht = seller_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get seller DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get seller DHT".into()))?;
 
         // Create AuctionCoordinator for seller
         let seller_api = seller_node
             .node
             .api()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get seller API"))?
+            .ok_or_else(|| MarketError::InvalidState("Failed to get seller API".into()))?
             .clone();
         let network_key = market::config::DEFAULT_NETWORK_KEY;
         let seller_coordinator = Arc::new(AuctionCoordinator::new(
@@ -723,7 +731,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
         let bidder1_dht = bidder1_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get bidder1 DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get bidder1 DHT".into()))?;
 
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -775,10 +783,10 @@ async fn test_e2e_real_devnet_3_party_auction() {
 
         let bidder1_id = bidder1_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Bidder1 has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Bidder1 has no node ID".into()))?;
         let bidder2_id = bidder2_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Bidder2 has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Bidder2 has no node ID".into()))?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -827,7 +835,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
         let bidder2_dht = bidder2_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get bidder2 DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get bidder2 DHT".into()))?;
         let bid2_record = bidder2_dht.create_dht_record().await?;
         let mut commitment2 = [0u8; 32];
         commitment2[0] = 2;
@@ -862,7 +870,9 @@ async fn test_e2e_real_devnet_3_party_auction() {
         let verified_listing = bidder1_listing_ops_verify
             .get_listing(&listing_record.key)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
+            .ok_or_else(|| {
+                MarketError::NotFound("Failed to read back listing for verification".into())
+            })?;
         eprintln!(
             "[E2E] Verified listing from bidder1: title={}",
             verified_listing.title
@@ -876,7 +886,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
         tokio::time::sleep(Duration::from_secs(3)).await;
         eprintln!("[E2E] Done - market nodes can now fetch the listing with 3 bids");
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -914,17 +924,17 @@ async fn test_e2e_coordinator_messaging() {
 
         let node1_id = node1
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Node1 has no ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Node1 has no ID".into()))?;
 
         let dht1 = node1
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get DHT1"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get DHT1".into()))?;
 
         let api1 = node1
             .node
             .api()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get API1"))?
+            .ok_or_else(|| MarketError::InvalidState("Failed to get API1".into()))?
             .clone();
 
         let coordinator1 = Arc::new(AuctionCoordinator::new(
@@ -956,7 +966,7 @@ async fn test_e2e_coordinator_messaging() {
 
         eprintln!("[E2E] Bid registration successful");
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -1007,31 +1017,31 @@ async fn test_e2e_real_devnet_5_party_auction() {
         // Get node IDs
         let seller_id = seller_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Seller has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Seller has no node ID".into()))?;
         let bidder1_id = bidder1_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Bidder1 has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Bidder1 has no node ID".into()))?;
         let bidder2_id = bidder2_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Bidder2 has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Bidder2 has no node ID".into()))?;
         let bidder3_id = bidder3_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Bidder3 has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Bidder3 has no node ID".into()))?;
         let bidder4_id = bidder4_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Bidder4 has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Bidder4 has no node ID".into()))?;
 
         // Get DHT operations
         let seller_dht = seller_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get seller DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get seller DHT".into()))?;
 
         // Create AuctionCoordinator for seller
         let seller_api = seller_node
             .node
             .api()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get seller API"))?
+            .ok_or_else(|| MarketError::InvalidState("Failed to get seller API".into()))?
             .clone();
         let network_key = market::config::DEFAULT_NETWORK_KEY;
         let _seller_coordinator = Arc::new(AuctionCoordinator::new(
@@ -1079,7 +1089,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
         let bidder1_dht = bidder1_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get bidder1 DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get bidder1 DHT".into()))?;
 
         // Wait for DHT propagation
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1155,7 +1165,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
         let bidder2_dht = bidder2_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get bidder2 DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get bidder2 DHT".into()))?;
         let bid2_record = bidder2_dht.create_dht_record().await?;
         let mut commitment2 = [0u8; 32];
         commitment2[0] = 2;
@@ -1176,7 +1186,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
         let bidder3_dht = bidder3_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get bidder3 DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get bidder3 DHT".into()))?;
         let bid3_record = bidder3_dht.create_dht_record().await?;
         let mut commitment3 = [0u8; 32];
         commitment3[0] = 3;
@@ -1197,7 +1207,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
         let bidder4_dht = bidder4_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get bidder4 DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get bidder4 DHT".into()))?;
         let bid4_record = bidder4_dht.create_dht_record().await?;
         let mut commitment4 = [0u8; 32];
         commitment4[0] = 4;
@@ -1232,7 +1242,9 @@ async fn test_e2e_real_devnet_5_party_auction() {
         let verified_listing = bidder1_listing_ops_verify
             .get_listing(&listing_record.key)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
+            .ok_or_else(|| {
+                MarketError::NotFound("Failed to read back listing for verification".into())
+            })?;
         eprintln!(
             "[E2E] Verified listing from bidder1: title={}",
             verified_listing.title
@@ -1246,7 +1258,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
         tokio::time::sleep(Duration::from_secs(3)).await;
         eprintln!("[E2E] Done - market nodes can now fetch the listing with 5 bids");
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -1294,14 +1306,14 @@ async fn test_e2e_real_devnet_10_party_auction() {
         let seller_node = &nodes[0];
         let seller_id = seller_node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Seller has no node ID"))?;
+            .ok_or_else(|| MarketError::InvalidState("Seller has no node ID".into()))?;
 
         // Get all bidder IDs
         let mut bidder_ids = Vec::new();
         for (i, node) in nodes.iter().enumerate().skip(1) {
             let bidder_id = node
                 .node_id()
-                .ok_or_else(|| anyhow::anyhow!("Bidder{} has no node ID", i))?;
+                .ok_or_else(|| MarketError::InvalidState(format!("Bidder{} has no node ID", i)))?;
             bidder_ids.push(bidder_id);
         }
 
@@ -1309,13 +1321,13 @@ async fn test_e2e_real_devnet_10_party_auction() {
         let seller_dht = seller_node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get seller DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get seller DHT".into()))?;
 
         // Create AuctionCoordinator for seller
         let seller_api = seller_node
             .node
             .api()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get seller API"))?
+            .ok_or_else(|| MarketError::InvalidState("Failed to get seller API".into()))?
             .clone();
         let network_key = market::config::DEFAULT_NETWORK_KEY;
         let _seller_coordinator = Arc::new(AuctionCoordinator::new(
@@ -1366,7 +1378,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
         let bidder1_dht = nodes[1]
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get bidder1 DHT"))?;
+            .ok_or_else(|| MarketError::Dht("Failed to get bidder1 DHT".into()))?;
         let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone(), network_key);
         bidder1_registry.set_master_registry_key(registry_key);
         let all_listings = bidder1_registry.fetch_all_listings().await?;
@@ -1414,7 +1426,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
             let bidder_dht = node
                 .node
                 .dht_operations()
-                .ok_or_else(|| anyhow::anyhow!("Failed to get bidder{} DHT", i))?;
+                .ok_or_else(|| MarketError::Dht(format!("Failed to get bidder{} DHT", i)))?;
 
             let bid_record = bidder_dht.create_dht_record().await?;
             let mut commitment = [0u8; 32];
@@ -1451,7 +1463,9 @@ async fn test_e2e_real_devnet_10_party_auction() {
         let verified_listing = bidder1_listing_ops_verify
             .get_listing(&listing_record.key)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Failed to read back listing for verification"))?;
+            .ok_or_else(|| {
+                MarketError::NotFound("Failed to read back listing for verification".into())
+            })?;
         eprintln!(
             "[E2E] Verified listing from bidder1: title={}",
             verified_listing.title
@@ -1465,7 +1479,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
         tokio::time::sleep(Duration::from_secs(5)).await;
         eprintln!("[E2E] Done - market nodes can now fetch the listing with 10 bids");
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -1590,11 +1604,8 @@ async fn test_e2e_single_node_diagnostic() {
 }
 
 /// Helper to print the full error chain for debugging.
-fn print_error_chain(e: &anyhow::Error) {
+fn print_error_chain(e: &MarketError) {
     eprintln!("   Error: {}", e);
-    for (i, cause) in e.chain().skip(1).enumerate() {
-        eprintln!("   Cause {}: {}", i + 1, cause);
-    }
     eprintln!("   Debug: {:?}", e);
 }
 
@@ -1657,24 +1668,26 @@ struct E2EParticipant {
 
 impl E2EParticipant {
     /// Create a new participant at the given port offset.
-    async fn new(offset: u16) -> anyhow::Result<Self> {
+    async fn new(offset: u16) -> MarketResult<Self> {
         let mut node = TestNode::new(offset);
         node.start().await?;
         node.wait_for_ready(90).await?;
 
         let node_id = node
             .node_id()
-            .ok_or_else(|| anyhow::anyhow!("Node {} has no ID", offset))?;
+            .ok_or_else(|| MarketError::InvalidState(format!("Node {} has no ID", offset)))?;
 
         let dht = node
             .node
             .dht_operations()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get DHT for node {}", offset))?;
+            .ok_or_else(|| MarketError::Dht(format!("Failed to get DHT for node {}", offset)))?;
 
         let api = node
             .node
             .api()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get API for node {}", offset))?
+            .ok_or_else(|| {
+                MarketError::InvalidState(format!("Failed to get API for node {}", offset))
+            })?
             .clone();
 
         let bid_storage = BidStorage::new();
@@ -1723,7 +1736,7 @@ impl E2EParticipant {
         self.node.node.dht_operations()
     }
 
-    async fn shutdown(&mut self) -> anyhow::Result<()> {
+    async fn shutdown(&mut self) -> MarketResult<()> {
         self.node.shutdown().await
     }
 }
@@ -1917,7 +1930,7 @@ async fn test_e2e_appmessage_bid_announcements() {
         let _ = bidder1.shutdown().await;
         let _ = bidder2.shutdown().await;
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -2154,7 +2167,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
         let _ = bidder1.shutdown().await;
         let _ = bidder2.shutdown().await;
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -2409,7 +2422,7 @@ async fn test_e2e_full_mpc_execution() {
         let _ = bidder1.shutdown().await;
         let _ = bidder2.shutdown().await;
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 
@@ -2683,7 +2696,7 @@ async fn test_e2e_winner_verification_and_decryption() {
         let _ = bidder1.shutdown().await;
         let _ = bidder2.shutdown().await;
 
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, MarketError>(())
     })
     .await;
 

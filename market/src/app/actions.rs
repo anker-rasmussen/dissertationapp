@@ -1,5 +1,6 @@
 //! Business logic for auction operations.
 
+use market::error::{MarketError, MarketResult};
 use market::{
     encrypt_content, generate_key, Bid, BidOperations, BidRecord, CatalogEntry, DHTOperations,
     DhtStore, Listing, ListingOperations, PublicListing,
@@ -24,14 +25,17 @@ pub async fn create_and_publish_listing(
     content: &str,
     reserve_price_str: &str,
     duration_str: &str,
-) -> anyhow::Result<CreateListingResult> {
+) -> MarketResult<CreateListingResult> {
     // Parse inputs
-    let reserve_price: u64 = reserve_price_str
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid reserve price '{}': {}", reserve_price_str, e))?;
-    let duration: u64 = duration_str
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid duration '{}': {}", duration_str, e))?;
+    let reserve_price: u64 = reserve_price_str.parse().map_err(|e| {
+        MarketError::Validation(format!(
+            "Invalid reserve price '{}': {}",
+            reserve_price_str, e
+        ))
+    })?;
+    let duration: u64 = duration_str.parse().map_err(|e| {
+        MarketError::Validation(format!("Invalid duration '{}': {}", duration_str, e))
+    })?;
 
     // Generate encryption key and encrypt content
     let key = generate_key();
@@ -46,7 +50,7 @@ pub async fn create_and_publish_listing(
     let seller_str = node_state
         .node_ids
         .first()
-        .ok_or_else(|| anyhow::anyhow!("No node ID available"))?;
+        .ok_or_else(|| MarketError::InvalidState("No node ID available".into()))?;
     let seller = veilid_core::PublicKey::try_from(seller_str.as_str())?;
 
     // Build listing
@@ -58,7 +62,7 @@ pub async fn create_and_publish_listing(
         .reserve_price(reserve_price)
         .auction_duration(duration)
         .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build listing: {}", e))?;
+        .map_err(|e| MarketError::InvalidState(format!("Failed to build listing: {}", e)))?;
 
     // Publish to DHT
     let listing_ops = ListingOperations::new(dht.clone());
@@ -76,14 +80,14 @@ pub async fn create_and_publish_listing(
         let _registry_key = coordinator
             .ensure_master_registry()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to ensure master registry: {e}"))?;
+            .map_err(|e| MarketError::Dht(format!("Failed to ensure master registry: {e}")))?;
 
         // Ensure seller has a catalog DHT record
         let catalog_key = {
             let mut ops = coordinator.registry_ops().lock().await;
             ops.get_or_create_seller_catalog(&seller.to_string())
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to create seller catalog: {}", e))?
+                .map_err(|e| MarketError::Dht(format!("Failed to create seller catalog: {}", e)))?
         };
 
         // Add listing to seller's own catalog
@@ -96,7 +100,7 @@ pub async fn create_and_publish_listing(
                 auction_end: listing.auction_end,
             })
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to add listing to catalog: {}", e))?;
+            .map_err(|e| MarketError::Dht(format!("Failed to add listing to catalog: {}", e)))?;
         }
 
         // Register seller directly in the master registry (shared keypair)
@@ -140,7 +144,7 @@ pub async fn create_and_publish_listing(
     );
     submit_bid(state, dht, &listing_key_str, reserve_price)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to place seller's reserve bid: {}", e))?;
+        .map_err(|e| MarketError::Dht(format!("Failed to place seller's reserve bid: {}", e)))?;
     info!("Seller's reserve bid placed successfully");
 
     Ok(CreateListingResult {
@@ -150,13 +154,13 @@ pub async fn create_and_publish_listing(
 }
 
 /// Fetch a listing from DHT by key string.
-pub async fn fetch_listing(dht: &DHTOperations, key_str: &str) -> anyhow::Result<PublicListing> {
+pub async fn fetch_listing(dht: &DHTOperations, key_str: &str) -> MarketResult<PublicListing> {
     let key = RecordKey::try_from(key_str)?;
     let listing_ops = ListingOperations::new(dht.clone());
 
     match listing_ops.get_listing(&key).await? {
         Some(listing) => Ok(listing),
-        None => anyhow::bail!("Listing not found"),
+        None => Err(MarketError::NotFound("Listing not found".into())),
     }
 }
 
@@ -166,13 +170,13 @@ pub async fn submit_bid(
     dht: &DHTOperations,
     listing_key: &str,
     amount: u64,
-) -> anyhow::Result<String> {
+) -> MarketResult<String> {
     // Get bidder's public key
     let node_state = state.get_node_state();
     let bidder_str = node_state
         .node_ids
         .first()
-        .ok_or_else(|| anyhow::anyhow!("No node ID available"))?;
+        .ok_or_else(|| MarketError::InvalidState("No node ID available".into()))?;
     let bidder = veilid_core::PublicKey::try_from(bidder_str.as_str())?;
 
     let listing_record_key = RecordKey::try_from(listing_key)?;
@@ -272,7 +276,7 @@ pub async fn submit_bid(
 /// has not been received yet (no `RegistryAnnouncement` from a peer).
 pub async fn fetch_registry_listings(
     state: &SharedAppState,
-) -> anyhow::Result<Vec<(String, String)>> {
+) -> MarketResult<Vec<(String, String)>> {
     let coordinator = match state.coordinator() {
         Some(c) => c,
         None => return Ok(Vec::new()),

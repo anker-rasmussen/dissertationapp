@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use crate::error::{MarketError, MarketResult};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -102,7 +102,7 @@ impl VeilidNode {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub async fn start(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> MarketResult<()> {
         info!("Starting Veilid node...");
 
         if self.insecure_storage {
@@ -116,10 +116,12 @@ impl VeilidNode {
         let table_store_dir = self.data_dir.join("table_store");
 
         // Create directories if they don't exist
-        std::fs::create_dir_all(&protected_store_dir)
-            .context("Failed to create protected_store directory")?;
-        std::fs::create_dir_all(&table_store_dir)
-            .context("Failed to create table_store directory")?;
+        std::fs::create_dir_all(&protected_store_dir).map_err(|e| {
+            MarketError::Config(format!("Failed to create protected_store directory: {e}"))
+        })?;
+        std::fs::create_dir_all(&table_store_dir).map_err(|e| {
+            MarketError::Config(format!("Failed to create table_store directory: {e}"))
+        })?;
 
         // Build network config based on whether we're connecting to devnet
         let network_config = if let Some(devnet) = &self.devnet_config {
@@ -266,13 +268,10 @@ impl VeilidNode {
             }
         });
 
-        let api = api_startup(update_callback, config)
-            .await
-            .map_err(|e| {
-                error!("Veilid API startup failed: {:?}", e);
-                e
-            })
-            .context("Failed to start Veilid API")?;
+        let api = api_startup(update_callback, config).await.map_err(|e| {
+            error!("Veilid API startup failed: {:?}", e);
+            MarketError::Network(format!("Failed to start Veilid API: {e}"))
+        })?;
 
         self.api = Some(api);
         info!("Veilid node started successfully");
@@ -280,25 +279,29 @@ impl VeilidNode {
         Ok(())
     }
 
-    pub async fn attach(&self) -> Result<()> {
-        let api = self.api.as_ref().context("Veilid node not started")?;
+    pub async fn attach(&self) -> MarketResult<()> {
+        let api = self
+            .api
+            .as_ref()
+            .ok_or_else(|| MarketError::InvalidState("Veilid node not started".into()))?;
         info!("Attaching to Veilid network...");
-        api.attach().await.context("Failed to attach to network")?;
+        api.attach().await?;
         info!("Attached to network");
         Ok(())
     }
 
-    pub async fn detach(&self) -> Result<()> {
-        let api = self.api.as_ref().context("Veilid node not started")?;
+    pub async fn detach(&self) -> MarketResult<()> {
+        let api = self
+            .api
+            .as_ref()
+            .ok_or_else(|| MarketError::InvalidState("Veilid node not started".into()))?;
         info!("Detaching from Veilid network...");
-        api.detach()
-            .await
-            .context("Failed to detach from network")?;
+        api.detach().await?;
         info!("Detached from network");
         Ok(())
     }
 
-    pub async fn shutdown(&mut self) -> Result<()> {
+    pub async fn shutdown(&mut self) -> MarketResult<()> {
         if let Some(api) = self.api.take() {
             info!("Shutting down Veilid node...");
             api.shutdown().await;

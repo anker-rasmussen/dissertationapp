@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -15,6 +14,7 @@ use super::listing_ops::ListingOperations;
 use super::mpc_orchestrator::MpcOrchestrator;
 use super::registry::{RegistryEntry, RegistryOperations};
 use crate::config::subkeys;
+use crate::error::{MarketError, MarketResult};
 use crate::marketplace::PublicListing;
 use crate::traits::DhtStore;
 
@@ -81,7 +81,7 @@ impl AuctionCoordinator {
     }
 
     /// Process an incoming AppMessage
-    pub async fn process_app_message(&self, message: Vec<u8>) -> anyhow::Result<()> {
+    pub async fn process_app_message(&self, message: Vec<u8>) -> MarketResult<()> {
         // Try to parse as AuctionMessage first
         if let Ok(auction_msg) = AuctionMessage::from_bytes(&message) {
             self.handle_auction_message(auction_msg).await?;
@@ -96,7 +96,7 @@ impl AuctionCoordinator {
     }
 
     /// Handle auction coordination messages
-    async fn handle_auction_message(&self, message: AuctionMessage) -> Result<()> {
+    async fn handle_auction_message(&self, message: AuctionMessage) -> MarketResult<()> {
         match message {
             AuctionMessage::BidAnnouncement {
                 listing_key,
@@ -164,7 +164,7 @@ impl AuctionCoordinator {
         bidder: PublicKey,
         bid_record_key: RecordKey,
         timestamp: u64,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Received bid announcement for listing {} from bidder {}",
             listing_key, bidder
@@ -222,7 +222,7 @@ impl AuctionCoordinator {
         &self,
         listing_key: RecordKey,
         _sender: PublicKey,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Received WinnerDecryptionRequest (challenge) for listing {}",
             listing_key
@@ -303,7 +303,7 @@ impl AuctionCoordinator {
         listing_key: RecordKey,
         winner: PublicKey,
         decryption_hash: String,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Received decryption hash transfer for listing {} (winner: {})",
             listing_key, winner
@@ -332,7 +332,7 @@ impl AuctionCoordinator {
         listing_key: RecordKey,
         party_pubkey: PublicKey,
         route_blob: RouteBlob,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Received MPC route announcement for listing {} from party {}",
             listing_key, party_pubkey
@@ -361,7 +361,7 @@ impl AuctionCoordinator {
         winner: PublicKey,
         bid_value: u64,
         nonce: [u8; 32],
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Received WinnerBidReveal for listing {} from winner {}",
             listing_key, winner
@@ -423,7 +423,7 @@ impl AuctionCoordinator {
         &self,
         seller_pubkey: PublicKey,
         catalog_key: RecordKey,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Received SellerRegistration from {} with catalog {}",
             seller_pubkey, catalog_key
@@ -447,7 +447,7 @@ impl AuctionCoordinator {
         Ok(())
     }
 
-    async fn handle_registry_announcement(&self, registry_key: RecordKey) -> Result<()> {
+    async fn handle_registry_announcement(&self, registry_key: RecordKey) -> MarketResult<()> {
         let mut ops = self.registry_ops.lock().await;
         let existing = ops.master_registry_key();
         if existing.is_none() {
@@ -502,7 +502,7 @@ impl AuctionCoordinator {
     }
 
     /// Register an owned listing (for sellers who created it)
-    pub async fn register_owned_listing(&self, record: OwnedDHTRecord) -> Result<()> {
+    pub async fn register_owned_listing(&self, record: OwnedDHTRecord) -> MarketResult<()> {
         let key = record.key.clone();
 
         // Initialize empty bid registry
@@ -534,7 +534,7 @@ impl AuctionCoordinator {
         bidder: PublicKey,
         bid_record_key: RecordKey,
         timestamp: u64,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         let record = {
             let owned = self.owned_listings.lock().await;
             owned.get(listing_key).cloned()
@@ -623,26 +623,28 @@ impl AuctionCoordinator {
     }
 
     /// Fetch a listing and decrypt its content if we have the decryption key
-    pub async fn fetch_and_decrypt_listing(&self, listing_key: &RecordKey) -> Result<String> {
+    pub async fn fetch_and_decrypt_listing(&self, listing_key: &RecordKey) -> MarketResult<String> {
         let listing_data = self
             .dht
             .get_value(listing_key)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch listing: {e}"))?
-            .ok_or_else(|| anyhow::anyhow!("Listing not found"))?;
+            .map_err(|e| MarketError::Dht(format!("Failed to fetch listing: {e}")))?
+            .ok_or_else(|| MarketError::NotFound("Listing not found".into()))?;
 
-        let listing = PublicListing::from_cbor(&listing_data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize listing: {e}"))?;
+        let listing = PublicListing::from_cbor(&listing_data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to deserialize listing: {e}"))
+        })?;
 
         let decryption_key = self.get_decryption_key(listing_key).await.ok_or_else(|| {
-            anyhow::anyhow!(
+            MarketError::NotFound(
                 "No decryption key available for this listing. You must win the auction first."
+                    .into(),
             )
         })?;
 
         listing
             .decrypt_content_with_key(&decryption_key)
-            .map_err(|e| anyhow::anyhow!("Failed to decrypt listing content: {e}"))
+            .map_err(|e| MarketError::Crypto(format!("Failed to decrypt listing content: {e}")))
     }
 
     /// Broadcast our bid announcement to all known peers via AppMessage
@@ -650,7 +652,7 @@ impl AuctionCoordinator {
         &self,
         listing_key: &RecordKey,
         bid_record_key: &RecordKey,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         info!(
             "Broadcasting bid announcement for listing {} to all peers",
             listing_key
@@ -675,19 +677,13 @@ impl AuctionCoordinator {
     }
 
     /// Broadcast a message to all known peers.
-    async fn broadcast_message(&self, data: &[u8]) -> Result<usize> {
+    async fn broadcast_message(&self, data: &[u8]) -> MarketResult<usize> {
         let routing_context = self
             .api
-            .routing_context()
-            .map_err(|e| anyhow::anyhow!("Failed to create routing context: {e}"))?
-            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))
-            .map_err(|e| anyhow::anyhow!("Failed to set safety: {e}"))?;
+            .routing_context()?
+            .with_safety(SafetySelection::Unsafe(Sequencing::PreferOrdered))?;
 
-        let state = self
-            .api
-            .get_state()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get state: {e}"))?;
+        let state = self.api.get_state().await?;
 
         let mut sent_count = 0;
         for peer in &state.network.peers {
@@ -710,13 +706,13 @@ impl AuctionCoordinator {
     }
 
     /// Ensure the master registry is available (create or use already-known key).
-    pub async fn ensure_master_registry(&self) -> Result<RecordKey> {
+    pub async fn ensure_master_registry(&self) -> MarketResult<RecordKey> {
         let mut ops = self.registry_ops.lock().await;
-        Ok(ops.ensure_master_registry().await?)
+        ops.ensure_master_registry().await
     }
 
     /// Broadcast a `SellerRegistration` to all peers.
-    pub async fn broadcast_seller_registration(&self, catalog_key: &RecordKey) -> Result<()> {
+    pub async fn broadcast_seller_registration(&self, catalog_key: &RecordKey) -> MarketResult<()> {
         info!(
             "Broadcasting SellerRegistration with catalog {}",
             catalog_key
@@ -731,7 +727,7 @@ impl AuctionCoordinator {
     /// Broadcast the master registry DHT key to all peers.
     ///
     /// If the registry key is not yet known, this is a no-op.
-    pub async fn broadcast_registry_announcement(&self) -> Result<()> {
+    pub async fn broadcast_registry_announcement(&self) -> MarketResult<()> {
         let key = {
             let ops = self.registry_ops.lock().await;
             ops.master_registry_key()
@@ -757,9 +753,9 @@ impl AuctionCoordinator {
     }
 
     /// Fetch all listings via two-hop discovery. Delegates to `registry_ops`.
-    pub async fn fetch_all_listings(&self) -> Result<Vec<RegistryEntry>> {
+    pub async fn fetch_all_listings(&self) -> MarketResult<Vec<RegistryEntry>> {
         let ops = self.registry_ops.lock().await;
-        Ok(ops.fetch_all_listings().await?)
+        ops.fetch_all_listings().await
     }
 
     /// Return a clone of the shutdown token.
@@ -818,7 +814,7 @@ impl AuctionCoordinator {
         &self,
         listing_key: &RecordKey,
         listing: &PublicListing,
-    ) -> Result<()> {
+    ) -> MarketResult<()> {
         // Check if we have a bid for this listing
         if !self.mpc.bid_storage().has_bid(listing_key).await {
             info!("We didn't bid on this listing, skipping MPC");
@@ -830,7 +826,7 @@ impl AuctionCoordinator {
             .bid_storage()
             .get_bid_key(listing_key)
             .await
-            .ok_or_else(|| anyhow::anyhow!("Bid key not found in storage"))?;
+            .ok_or_else(|| MarketError::NotFound("Bid key not found in storage".into()))?;
 
         info!("We bid on this listing, our bid record: {}", our_bid_key);
 
