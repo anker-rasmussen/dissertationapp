@@ -1,8 +1,8 @@
 [alias]
-# E2E tests - nextest setup script handles LD_PRELOAD automatically
-integration = "nextest run --profile e2e --run-ignored ignored-only"
-# Fast E2E tests - reuses persistent devnet (start with: cargo devnet-start)
-integration-fast = "nextest run --profile e2e-fast --run-ignored ignored-only"
+# Full E2E tests (MPC + winner verification) - setup script handles LD_PRELOAD automatically
+integration = "nextest run --profile e2e --run-ignored ignored-only -E test(test_e2e_full_)"
+# Fast smoke E2E tests - reuses persistent devnet (start with: cargo devnet-start)
+integration-fast = "nextest run --profile e2e-fast --run-ignored ignored-only -E test(test_e2e_smoke_)"
 # Devnet management
 devnet-start = "run --package market --bin devnet-ctl -- start"
 devnet-stop = "run --package market --bin devnet-ctl -- stop"

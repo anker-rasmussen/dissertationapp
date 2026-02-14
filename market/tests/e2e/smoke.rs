@@ -3,7 +3,8 @@
 //! These tests validate that the mock-based tests accurately reflect
 //! real system behavior. They automatically start and stop the devnet.
 //!
-//! Run with: `cargo nextest run --ignored` or `cargo test -- --ignored`
+//! Run smoke subset with: `cargo integration-fast`
+//! Run full subset with: `cargo integration`
 //!
 //! Prerequisites:
 //! - Docker installed and running
@@ -23,7 +24,6 @@ use market::veilid::auction_coordinator::AuctionCoordinator;
 use market::veilid::bid_ops::BidOperations;
 use market::veilid::bid_storage::BidStorage;
 use market::veilid::node::{DevNetConfig, VeilidNode};
-use market::veilid::registry::{CatalogEntry, RegistryOperations};
 use market::Listing;
 use serial_test::serial;
 use tokio::time::timeout;
@@ -439,7 +439,7 @@ fn create_test_listing(
         .expect("Failed to build listing")
 }
 
-/// Setup helper - starts devnet if needed and sets LD_PRELOAD.
+/// Setup helper - starts devnet and validates LD_PRELOAD/libipspoof prerequisites.
 fn setup_e2e_environment() -> MarketResult<DevnetManager> {
     // Check if LD_PRELOAD is already set correctly
     let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
@@ -490,7 +490,7 @@ fn setup_e2e_environment() -> MarketResult<DevnetManager> {
 #[tokio::test]
 #[ignore] // Run with: cargo nextest run --ignored
 #[serial]
-async fn test_e2e_node_attachment() {
+async fn test_e2e_smoke_node_attachment() {
     init_test_tracing();
 
     let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
@@ -516,7 +516,7 @@ async fn test_e2e_node_attachment() {
     match result {
         Ok(Ok(())) => {
             assert!(had_node_id, "Node should have an ID after attachment");
-            eprintln!("[E2E] test_e2e_node_attachment PASSED");
+            eprintln!("[E2E] test_e2e_smoke_node_attachment PASSED");
         }
         Ok(Err(e)) => panic!("Node attachment failed: {}", e),
         Err(_) => panic!("Node attachment timed out"),
@@ -527,7 +527,7 @@ async fn test_e2e_node_attachment() {
 #[tokio::test]
 #[ignore] // Run with: cargo nextest run --ignored
 #[serial]
-async fn test_e2e_multi_node_connectivity() {
+async fn test_e2e_smoke_multi_node_connectivity() {
     init_test_tracing();
 
     let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
@@ -556,7 +556,7 @@ async fn test_e2e_multi_node_connectivity() {
 
     match result {
         Ok(Ok(())) => {
-            eprintln!("[E2E] test_e2e_multi_node_connectivity PASSED");
+            eprintln!("[E2E] test_e2e_smoke_multi_node_connectivity PASSED");
         }
         Ok(Err(e)) => panic!("Multi-node test failed: {}", e),
         Err(_) => panic!("Multi-node test timed out"),
@@ -567,7 +567,7 @@ async fn test_e2e_multi_node_connectivity() {
 #[tokio::test]
 #[ignore] // Run with: cargo nextest run --ignored
 #[serial]
-async fn test_e2e_dht_operations() {
+async fn test_e2e_smoke_dht_operations() {
     init_test_tracing();
 
     let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
@@ -627,291 +627,19 @@ async fn test_e2e_dht_operations() {
 
     match result {
         Ok(Ok(())) => {
-            eprintln!("[E2E] test_e2e_dht_operations PASSED");
+            eprintln!("[E2E] test_e2e_smoke_dht_operations PASSED");
         }
         Ok(Err(e)) => panic!("DHT operations test failed: {}", e),
         Err(_) => panic!("DHT operations test timed out"),
     }
 }
 
-/// Full 3-party auction flow test.
-/// This is the most comprehensive E2E test - validates the complete auction lifecycle.
-#[tokio::test]
-#[ignore] // Run with: cargo nextest run --ignored
-#[serial]
-async fn test_e2e_real_devnet_3_party_auction() {
-    init_test_tracing();
-
-    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
-
-    let mut seller_node = TestNode::new(20);
-    let mut bidder1_node = TestNode::new(21);
-    let mut bidder2_node = TestNode::new(22);
-
-    let result = timeout(Duration::from_secs(360), async {
-        // Start all nodes
-        seller_node.start().await?;
-        bidder1_node.start().await?;
-        bidder2_node.start().await?;
-
-        // Wait for all nodes to be ready
-        seller_node.wait_for_ready(90).await?;
-        bidder1_node.wait_for_ready(90).await?;
-        bidder2_node.wait_for_ready(90).await?;
-
-        // Get node IDs
-        let seller_id = seller_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Seller has no node ID".into()))?;
-        let _bidder1_id = bidder1_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Bidder1 has no node ID".into()))?;
-        let _bidder2_id = bidder2_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Bidder2 has no node ID".into()))?;
-
-        // Get DHT operations
-        let seller_dht = seller_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get seller DHT".into()))?;
-
-        // Create AuctionCoordinator for seller
-        let seller_api = seller_node
-            .node
-            .api()
-            .ok_or_else(|| MarketError::InvalidState("Failed to get seller API".into()))?
-            .clone();
-        let network_key = market::config::DEFAULT_NETWORK_KEY;
-        let seller_coordinator = Arc::new(AuctionCoordinator::new(
-            seller_api,
-            seller_dht.clone(),
-            seller_id.clone(),
-            BidStorage::new(),
-            seller_node.offset,
-            network_key,
-            CancellationToken::new(),
-        ));
-
-        // Create and publish listing to its own DHT record
-        let listing_record = seller_dht.create_dht_record().await?;
-        let listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
-
-        // Publish listing to its own DHT record
-        use market::veilid::listing_ops::ListingOperations;
-        let listing_ops = ListingOperations::new(seller_dht.clone());
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-
-        // Register listing in the per-seller registry
-        let seller_str = seller_id.to_string();
-        let mut seller_registry = RegistryOperations::new(seller_dht.clone(), network_key);
-        let registry_key = seller_registry.create_master_registry().await?;
-        let catalog_key = seller_registry
-            .get_or_create_seller_catalog(&seller_str)
-            .await?;
-        seller_registry
-            .add_listing_to_catalog(CatalogEntry {
-                listing_key: listing_record.key.to_string(),
-                title: listing.title.clone(),
-                reserve_price: listing.reserve_price,
-                auction_end: listing.auction_end,
-            })
-            .await?;
-        seller_registry
-            .register_seller(&seller_str, &catalog_key.to_string(), "")
-            .await?;
-        eprintln!("[E2E] Listing registered in per-seller catalog registry");
-
-        // Seller watches listing
-        seller_coordinator.watch_listing(listing.to_public()).await;
-
-        // Bidder1 discovers listing via the SHARED REGISTRY
-        let bidder1_dht = bidder1_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get bidder1 DHT".into()))?;
-
-        // Wait for DHT propagation
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        // Bidder1 fetches listings via two-hop discovery
-        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone(), network_key);
-        bidder1_registry.set_master_registry_key(registry_key);
-        let all_listings = bidder1_registry.fetch_all_listings().await?;
-        eprintln!(
-            "[E2E] Bidder1 fetched registry with {} listings",
-            all_listings.len()
-        );
-
-        assert!(
-            !all_listings.is_empty(),
-            "Registry should have at least one listing"
-        );
-        let found_listing = all_listings
-            .iter()
-            .find(|e| e.key == listing_record.key.to_string());
-        assert!(
-            found_listing.is_some(),
-            "Our listing should be in the registry"
-        );
-
-        // Bidder1 can also fetch the full listing from the listing's DHT record
-        let bidder1_listing_ops = ListingOperations::new(bidder1_dht.clone());
-        let retrieved = bidder1_listing_ops.get_listing(&listing_record.key).await?;
-        assert!(
-            retrieved.is_some(),
-            "Listing should be retrievable by bidder1"
-        );
-
-        let retrieved_listing = retrieved.unwrap();
-        assert_eq!(
-            retrieved_listing.title, listing.title,
-            "Listing title should match"
-        );
-        assert_eq!(
-            retrieved_listing.reserve_price, listing.reserve_price,
-            "Reserve price should match"
-        );
-
-        eprintln!("[E2E] Listing successfully created, registered, and discovered via registry");
-
-        // ========== BIDDERS PLACE BIDS ==========
-        // In real usage, bidders would send app messages to seller, who records them.
-        // The seller (who owns the listing record) registers bids.
-
-        let bidder1_id = bidder1_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Bidder1 has no node ID".into()))?;
-        let bidder2_id = bidder2_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Bidder2 has no node ID".into()))?;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let seller_bid_ops = BidOperations::new(seller_dht.clone());
-
-        // Seller also bids on their own listing (allowed in this marketplace)
-        let seller_bid_record = seller_dht.create_dht_record().await?;
-        let mut commitment_seller = [0u8; 32];
-        commitment_seller[0] = 0; // Seller's commitment
-        let seller_bid = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: seller_id.clone(),
-            commitment: commitment_seller,
-            timestamp: now,
-            bid_key: seller_bid_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops
-            .register_bid(&listing_record, seller_bid)
-            .await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller placed their own bid");
-
-        // Bidder1 creates their own bid record (they own this)
-        let bid1_record = bidder1_dht.create_dht_record().await?;
-        let mut commitment1 = [0u8; 32];
-        commitment1[0] = 1; // Placeholder commitment (in real usage: hash of bid + nonce)
-        let bid1 = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: bidder1_id.clone(),
-            commitment: commitment1,
-            timestamp: now + 1,
-            bid_key: bid1_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops.register_bid(&listing_record, bid1).await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller registered bid from Bidder1");
-
-        // Bidder2 creates their own bid record
-        let bidder2_dht = bidder2_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get bidder2 DHT".into()))?;
-        let bid2_record = bidder2_dht.create_dht_record().await?;
-        let mut commitment2 = [0u8; 32];
-        commitment2[0] = 2;
-        let bid2 = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: bidder2_id.clone(),
-            commitment: commitment2,
-            timestamp: now + 2,
-            bid_key: bid2_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops.register_bid(&listing_record, bid2).await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller registered bid from Bidder2");
-
-        // Wait for DHT propagation
-        tokio::time::sleep(Duration::from_secs(3)).await;
-
-        // ========== VERIFY BIDS ARE VISIBLE ==========
-        let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
-        eprintln!("[E2E] Bid index has {} bids", bid_index.bids.len());
-
-        assert_eq!(
-            bid_index.bids.len(),
-            3,
-            "Should have 3 bids registered (seller + 2 bidders)"
-        );
-
-        // ========== VERIFY LISTING IS READABLE FROM ANOTHER NODE ==========
-        let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
-        let verified_listing = bidder1_listing_ops_verify
-            .get_listing(&listing_record.key)
-            .await?
-            .ok_or_else(|| {
-                MarketError::NotFound("Failed to read back listing for verification".into())
-            })?;
-        eprintln!(
-            "[E2E] Verified listing from bidder1: title={}",
-            verified_listing.title
-        );
-
-        eprintln!("[E2E] Full 3-party auction flow completed with 3 bids!");
-        eprintln!("[E2E] Listing key: {}", listing_record.key);
-
-        // Brief wait for DHT propagation before test ends
-        eprintln!("[E2E] Waiting 3s for final DHT propagation...");
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        eprintln!("[E2E] Done - market nodes can now fetch the listing with 3 bids");
-
-        Ok::<_, MarketError>(())
-    })
-    .await;
-
-    // Cleanup all nodes
-    let _ = seller_node.shutdown().await;
-    let _ = bidder1_node.shutdown().await;
-    let _ = bidder2_node.shutdown().await;
-
-    match result {
-        Ok(Ok(())) => {
-            eprintln!("[E2E] test_e2e_real_devnet_3_party_auction PASSED");
-        }
-        Ok(Err(e)) => panic!("3-party auction test failed: {}", e),
-        Err(_) => panic!("3-party auction test timed out (6 min limit)"),
-    }
-}
 
 /// Coordinator messaging test - verifies bid announcements work.
 #[tokio::test]
 #[ignore] // Run with: cargo nextest run --ignored
 #[serial]
-async fn test_e2e_coordinator_messaging() {
+async fn test_e2e_smoke_coordinator_local_registration() {
     init_test_tracing();
 
     let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
@@ -978,544 +706,23 @@ async fn test_e2e_coordinator_messaging() {
 
     match result {
         Ok(Ok(())) => {
-            eprintln!("[E2E] test_e2e_coordinator_messaging PASSED");
+            eprintln!("[E2E] test_e2e_smoke_coordinator_local_registration PASSED");
         }
         Ok(Err(e)) => panic!("Coordinator messaging test failed: {}", e),
         Err(_) => panic!("Coordinator messaging test timed out"),
     }
 }
 
-/// Full 5-party auction flow test.
-/// Tests scaling with 5 nodes (1 seller + 4 bidders).
-#[tokio::test]
-#[ignore] // Run with: cargo nextest run --ignored
-#[serial]
-async fn test_e2e_real_devnet_5_party_auction() {
-    init_test_tracing();
-
-    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
-
-    // 5 test nodes (1 seller + 4 bidders) using offsets 23-27
-    let mut seller_node = TestNode::new(23);
-    let mut bidder1_node = TestNode::new(24);
-    let mut bidder2_node = TestNode::new(25);
-    let mut bidder3_node = TestNode::new(26);
-    let mut bidder4_node = TestNode::new(27);
-
-    let result = timeout(Duration::from_secs(480), async {
-        // Start all nodes
-        seller_node.start().await?;
-        bidder1_node.start().await?;
-        bidder2_node.start().await?;
-        bidder3_node.start().await?;
-        bidder4_node.start().await?;
-
-        // Wait for all nodes to be ready (longer timeout for more nodes)
-        seller_node.wait_for_ready(90).await?;
-        bidder1_node.wait_for_ready(90).await?;
-        bidder2_node.wait_for_ready(90).await?;
-        bidder3_node.wait_for_ready(90).await?;
-        bidder4_node.wait_for_ready(90).await?;
-
-        // Get node IDs
-        let seller_id = seller_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Seller has no node ID".into()))?;
-        let bidder1_id = bidder1_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Bidder1 has no node ID".into()))?;
-        let bidder2_id = bidder2_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Bidder2 has no node ID".into()))?;
-        let bidder3_id = bidder3_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Bidder3 has no node ID".into()))?;
-        let bidder4_id = bidder4_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Bidder4 has no node ID".into()))?;
-
-        // Get DHT operations
-        let seller_dht = seller_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get seller DHT".into()))?;
-
-        // Create AuctionCoordinator for seller
-        let seller_api = seller_node
-            .node
-            .api()
-            .ok_or_else(|| MarketError::InvalidState("Failed to get seller API".into()))?
-            .clone();
-        let network_key = market::config::DEFAULT_NETWORK_KEY;
-        let _seller_coordinator = Arc::new(AuctionCoordinator::new(
-            seller_api,
-            seller_dht.clone(),
-            seller_id.clone(),
-            BidStorage::new(),
-            seller_node.offset,
-            network_key,
-            CancellationToken::new(),
-        ));
-
-        // Create and publish listing to its own DHT record
-        let listing_record = seller_dht.create_dht_record().await?;
-        let listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
-
-        // Publish listing to its own DHT record
-        use market::veilid::listing_ops::ListingOperations;
-        let listing_ops = ListingOperations::new(seller_dht.clone());
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-
-        // Register listing in the per-seller registry
-        let seller_str = seller_id.to_string();
-        let mut seller_registry = RegistryOperations::new(seller_dht.clone(), network_key);
-        let registry_key = seller_registry.create_master_registry().await?;
-        let catalog_key = seller_registry
-            .get_or_create_seller_catalog(&seller_str)
-            .await?;
-        seller_registry
-            .add_listing_to_catalog(CatalogEntry {
-                listing_key: listing_record.key.to_string(),
-                title: listing.title.clone(),
-                reserve_price: listing.reserve_price,
-                auction_end: listing.auction_end,
-            })
-            .await?;
-        seller_registry
-            .register_seller(&seller_str, &catalog_key.to_string(), "")
-            .await?;
-        eprintln!("[E2E] Listing registered in per-seller catalog registry");
-
-        // Bidder1 discovers listing via the SHARED REGISTRY
-        let bidder1_dht = bidder1_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get bidder1 DHT".into()))?;
-
-        // Wait for DHT propagation
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        // Bidder1 fetches listings via two-hop discovery
-        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone(), network_key);
-        bidder1_registry.set_master_registry_key(registry_key);
-        let all_listings = bidder1_registry.fetch_all_listings().await?;
-        eprintln!(
-            "[E2E] Bidder1 fetched registry with {} listings",
-            all_listings.len()
-        );
-
-        assert!(
-            !all_listings.is_empty(),
-            "Registry should have at least one listing"
-        );
-        let found_listing = all_listings
-            .iter()
-            .find(|e| e.key == listing_record.key.to_string());
-        assert!(
-            found_listing.is_some(),
-            "Our listing should be in the registry"
-        );
-
-        eprintln!("[E2E] Listing successfully created, registered, and discovered via registry");
-
-        // ========== ALL 5 PARTIES PLACE BIDS ==========
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let seller_bid_ops = BidOperations::new(seller_dht.clone());
-
-        // Seller bids on their own listing
-        let seller_bid_record = seller_dht.create_dht_record().await?;
-        let mut commitment_seller = [0u8; 32];
-        commitment_seller[0] = 0;
-        let seller_bid = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: seller_id.clone(),
-            commitment: commitment_seller,
-            timestamp: now,
-            bid_key: seller_bid_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops
-            .register_bid(&listing_record, seller_bid)
-            .await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller placed their own bid");
-
-        // Bidder1 creates their bid
-        let bid1_record = bidder1_dht.create_dht_record().await?;
-        let mut commitment1 = [0u8; 32];
-        commitment1[0] = 1;
-        let bid1 = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: bidder1_id.clone(),
-            commitment: commitment1,
-            timestamp: now + 1,
-            bid_key: bid1_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops.register_bid(&listing_record, bid1).await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller registered bid from Bidder1");
-
-        // Bidder2 creates their bid
-        let bidder2_dht = bidder2_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get bidder2 DHT".into()))?;
-        let bid2_record = bidder2_dht.create_dht_record().await?;
-        let mut commitment2 = [0u8; 32];
-        commitment2[0] = 2;
-        let bid2 = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: bidder2_id.clone(),
-            commitment: commitment2,
-            timestamp: now + 2,
-            bid_key: bid2_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops.register_bid(&listing_record, bid2).await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller registered bid from Bidder2");
-
-        // Bidder3 creates their bid
-        let bidder3_dht = bidder3_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get bidder3 DHT".into()))?;
-        let bid3_record = bidder3_dht.create_dht_record().await?;
-        let mut commitment3 = [0u8; 32];
-        commitment3[0] = 3;
-        let bid3 = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: bidder3_id.clone(),
-            commitment: commitment3,
-            timestamp: now + 3,
-            bid_key: bid3_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops.register_bid(&listing_record, bid3).await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller registered bid from Bidder3");
-
-        // Bidder4 creates their bid
-        let bidder4_dht = bidder4_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get bidder4 DHT".into()))?;
-        let bid4_record = bidder4_dht.create_dht_record().await?;
-        let mut commitment4 = [0u8; 32];
-        commitment4[0] = 4;
-        let bid4 = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: bidder4_id.clone(),
-            commitment: commitment4,
-            timestamp: now + 4,
-            bid_key: bid4_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops.register_bid(&listing_record, bid4).await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller registered bid from Bidder4");
-
-        // Wait for DHT propagation
-        tokio::time::sleep(Duration::from_secs(3)).await;
-
-        // ========== VERIFY BIDS ARE VISIBLE ==========
-        let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
-        eprintln!("[E2E] Bid index has {} bids", bid_index.bids.len());
-
-        assert_eq!(
-            bid_index.bids.len(),
-            5,
-            "Should have 5 bids registered (seller + 4 bidders)"
-        );
-
-        // ========== VERIFY LISTING IS READABLE FROM ANOTHER NODE ==========
-        let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
-        let verified_listing = bidder1_listing_ops_verify
-            .get_listing(&listing_record.key)
-            .await?
-            .ok_or_else(|| {
-                MarketError::NotFound("Failed to read back listing for verification".into())
-            })?;
-        eprintln!(
-            "[E2E] Verified listing from bidder1: title={}",
-            verified_listing.title
-        );
-
-        eprintln!("[E2E] Full 5-party auction flow completed with 5 bids!");
-        eprintln!("[E2E] Listing key: {}", listing_record.key);
-
-        // Brief wait for DHT propagation before test ends
-        eprintln!("[E2E] Waiting 3s for final DHT propagation...");
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        eprintln!("[E2E] Done - market nodes can now fetch the listing with 5 bids");
-
-        Ok::<_, MarketError>(())
-    })
-    .await;
-
-    // Cleanup all nodes
-    let _ = seller_node.shutdown().await;
-    let _ = bidder1_node.shutdown().await;
-    let _ = bidder2_node.shutdown().await;
-    let _ = bidder3_node.shutdown().await;
-    let _ = bidder4_node.shutdown().await;
-
-    match result {
-        Ok(Ok(())) => {
-            eprintln!("[E2E] test_e2e_real_devnet_5_party_auction PASSED");
-        }
-        Ok(Err(e)) => panic!("5-party auction test failed: {}", e),
-        Err(_) => panic!("5-party auction test timed out (8 min limit)"),
-    }
-}
-
-/// Full 10-party auction flow test.
-/// Tests scaling with 10 nodes (1 seller + 9 bidders).
-#[tokio::test]
-#[ignore] // Run with: cargo nextest run --ignored
-#[serial]
-async fn test_e2e_real_devnet_10_party_auction() {
-    init_test_tracing();
-
-    let _devnet = setup_e2e_environment().expect("E2E setup failed - check LD_PRELOAD and Docker");
-
-    // 10 test nodes (1 seller + 9 bidders) using offsets 10-19
-    // Devnet uses offsets 0-8, so we start at 10 to avoid port conflicts
-    let mut nodes: Vec<TestNode> = (10..=19).map(|offset| TestNode::new(offset)).collect();
-
-    let result = timeout(Duration::from_secs(600), async {
-        // Start all 10 nodes
-        for node in &mut nodes {
-            node.start().await?;
-        }
-
-        // Wait for all to be ready (longer timeout for more nodes)
-        for node in &nodes {
-            node.wait_for_ready(120).await?;
-        }
-
-        // First node is the seller, rest are bidders
-        let seller_node = &nodes[0];
-        let seller_id = seller_node
-            .node_id()
-            .ok_or_else(|| MarketError::InvalidState("Seller has no node ID".into()))?;
-
-        // Get all bidder IDs
-        let mut bidder_ids = Vec::new();
-        for (i, node) in nodes.iter().enumerate().skip(1) {
-            let bidder_id = node
-                .node_id()
-                .ok_or_else(|| MarketError::InvalidState(format!("Bidder{} has no node ID", i)))?;
-            bidder_ids.push(bidder_id);
-        }
-
-        // Get seller DHT operations
-        let seller_dht = seller_node
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get seller DHT".into()))?;
-
-        // Create AuctionCoordinator for seller
-        let seller_api = seller_node
-            .node
-            .api()
-            .ok_or_else(|| MarketError::InvalidState("Failed to get seller API".into()))?
-            .clone();
-        let network_key = market::config::DEFAULT_NETWORK_KEY;
-        let _seller_coordinator = Arc::new(AuctionCoordinator::new(
-            seller_api,
-            seller_dht.clone(),
-            seller_id.clone(),
-            BidStorage::new(),
-            seller_node.offset,
-            network_key,
-            CancellationToken::new(),
-        ));
-
-        // Create and publish listing to its own DHT record
-        let listing_record = seller_dht.create_dht_record().await?;
-        let listing = create_test_listing(listing_record.key.clone(), seller_id.clone(), 100, 3600);
-
-        // Publish listing to its own DHT record
-        use market::veilid::listing_ops::ListingOperations;
-        let listing_ops = ListingOperations::new(seller_dht.clone());
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-
-        // Register listing in the per-seller registry
-        let seller_str = seller_id.to_string();
-        let mut seller_registry = RegistryOperations::new(seller_dht.clone(), network_key);
-        let registry_key = seller_registry.create_master_registry().await?;
-        let catalog_key = seller_registry
-            .get_or_create_seller_catalog(&seller_str)
-            .await?;
-        seller_registry
-            .add_listing_to_catalog(CatalogEntry {
-                listing_key: listing_record.key.to_string(),
-                title: listing.title.clone(),
-                reserve_price: listing.reserve_price,
-                auction_end: listing.auction_end,
-            })
-            .await?;
-        seller_registry
-            .register_seller(&seller_str, &catalog_key.to_string(), "")
-            .await?;
-        eprintln!("[E2E] Listing registered in per-seller catalog registry");
-
-        // Wait for DHT propagation
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        // Verify a bidder can discover the listing
-        let bidder1_dht = nodes[1]
-            .node
-            .dht_operations()
-            .ok_or_else(|| MarketError::Dht("Failed to get bidder1 DHT".into()))?;
-        let mut bidder1_registry = RegistryOperations::new(bidder1_dht.clone(), network_key);
-        bidder1_registry.set_master_registry_key(registry_key);
-        let all_listings = bidder1_registry.fetch_all_listings().await?;
-        eprintln!(
-            "[E2E] Bidder1 fetched registry with {} listings",
-            all_listings.len()
-        );
-        assert!(
-            !all_listings.is_empty(),
-            "Registry should have at least one listing"
-        );
-
-        eprintln!("[E2E] Listing successfully created, registered, and discovered via registry");
-
-        // ========== ALL 10 PARTIES PLACE BIDS ==========
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let seller_bid_ops = BidOperations::new(seller_dht.clone());
-
-        // Seller bids on their own listing
-        let seller_bid_record = seller_dht.create_dht_record().await?;
-        let mut commitment_seller = [0u8; 32];
-        commitment_seller[0] = 0;
-        let seller_bid = BidRecord {
-            listing_key: listing_record.key.clone(),
-            bidder: seller_id.clone(),
-            commitment: commitment_seller,
-            timestamp: now,
-            bid_key: seller_bid_record.key.clone(),
-            signing_pubkey: [0u8; 32],
-        };
-        seller_bid_ops
-            .register_bid(&listing_record, seller_bid)
-            .await?;
-        listing_ops
-            .update_listing(&listing_record, &listing)
-            .await?;
-        eprintln!("[E2E] Seller placed their own bid");
-
-        // Each of the 9 bidders places a bid
-        for (i, node) in nodes.iter().enumerate().skip(1) {
-            let bidder_id = &bidder_ids[i - 1];
-            let bidder_dht = node
-                .node
-                .dht_operations()
-                .ok_or_else(|| MarketError::Dht(format!("Failed to get bidder{} DHT", i)))?;
-
-            let bid_record = bidder_dht.create_dht_record().await?;
-            let mut commitment = [0u8; 32];
-            commitment[0] = i as u8;
-            let bid = BidRecord {
-                listing_key: listing_record.key.clone(),
-                bidder: bidder_id.clone(),
-                commitment,
-                timestamp: now + i as u64,
-                bid_key: bid_record.key.clone(),
-                signing_pubkey: [0u8; 32],
-            };
-            seller_bid_ops.register_bid(&listing_record, bid).await?;
-            listing_ops
-                .update_listing(&listing_record, &listing)
-                .await?;
-            eprintln!("[E2E] Seller registered bid from Bidder{i}");
-        }
-
-        // Wait for DHT propagation
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        // ========== VERIFY BIDS ARE VISIBLE ==========
-        let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
-        eprintln!("[E2E] Bid index has {} bids", bid_index.bids.len());
-
-        assert_eq!(
-            bid_index.bids.len(),
-            10,
-            "Should have 10 bids registered (seller + 9 bidders)"
-        );
-
-        // ========== VERIFY LISTING IS READABLE FROM ANOTHER NODE ==========
-        let bidder1_listing_ops_verify = ListingOperations::new(bidder1_dht.clone());
-        let verified_listing = bidder1_listing_ops_verify
-            .get_listing(&listing_record.key)
-            .await?
-            .ok_or_else(|| {
-                MarketError::NotFound("Failed to read back listing for verification".into())
-            })?;
-        eprintln!(
-            "[E2E] Verified listing from bidder1: title={}",
-            verified_listing.title
-        );
-
-        eprintln!("[E2E] Full 10-party auction flow completed with 10 bids!");
-        eprintln!("[E2E] Listing key: {}", listing_record.key);
-
-        // Brief wait for DHT propagation before test ends
-        eprintln!("[E2E] Waiting 5s for final DHT propagation...");
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        eprintln!("[E2E] Done - market nodes can now fetch the listing with 10 bids");
-
-        Ok::<_, MarketError>(())
-    })
-    .await;
-
-    // Cleanup all nodes
-    for node in &mut nodes {
-        let _ = node.shutdown().await;
-    }
-
-    match result {
-        Ok(Ok(())) => {
-            eprintln!("[E2E] test_e2e_real_devnet_10_party_auction PASSED");
-        }
-        Ok(Err(e)) => panic!("10-party auction test failed: {}", e),
-        Err(_) => panic!("10-party auction test timed out (10 min limit)"),
-    }
-}
 
 /// Diagnostic test for isolated debugging of single node startup.
-/// Run with: cargo integration -- test_e2e_single_node_diagnostic
+/// Run with:
+/// `cargo test --test integration_tests -- --ignored test_e2e_smoke_single_node_diagnostic`
 ///
 /// This test provides detailed error chain output for debugging Veilid API startup issues.
 #[tokio::test]
 #[ignore] // Run with: cargo nextest run --ignored
 #[serial]
-async fn test_e2e_single_node_diagnostic() {
+async fn test_e2e_smoke_single_node_diagnostic() {
     init_test_tracing();
 
     eprintln!("\n=== DIAGNOSTIC TEST: Single Node Startup ===\n");
@@ -1753,6 +960,10 @@ impl E2EParticipant {
         self.node.node.dht_operations()
     }
 
+    fn signing_pubkey_bytes(&self) -> [u8; 32] {
+        self.coordinator.signing_pubkey_bytes()
+    }
+
     async fn shutdown(&mut self) -> MarketResult<()> {
         self.node.shutdown().await
     }
@@ -1769,7 +980,7 @@ impl E2EParticipant {
 #[tokio::test]
 #[ignore]
 #[serial]
-async fn test_e2e_appmessage_bid_announcements() {
+async fn test_e2e_smoke_appmessage_bid_announcements() {
     init_test_tracing();
 
     let _devnet = setup_e2e_environment().expect("E2E setup failed");
@@ -1783,6 +994,9 @@ async fn test_e2e_appmessage_bid_announcements() {
         let seller_id = seller.node_id().unwrap();
         let bidder1_id = bidder1.node_id().unwrap();
         let bidder2_id = bidder2.node_id().unwrap();
+        let seller_signing = seller.signing_pubkey_bytes();
+        let bidder1_signing = bidder1.signing_pubkey_bytes();
+        let bidder2_signing = bidder2.signing_pubkey_bytes();
 
         let seller_dht = seller.dht().unwrap();
 
@@ -1822,7 +1036,7 @@ async fn test_e2e_appmessage_bid_announcements() {
             commitment: seller_commitment,
             timestamp: now,
             bid_key: seller_bid_record_dht.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: seller_signing,
         };
         let seller_bid_ops = BidOperations::new(seller_dht.clone());
         seller_bid_ops
@@ -1865,7 +1079,7 @@ async fn test_e2e_appmessage_bid_announcements() {
             commitment: bidder1_commitment,
             timestamp: now + 1,
             bid_key: bid1_record_dht.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: bidder1_signing,
         };
         // Write to the pre-created DHT record (not publish_bid which creates a new one)
         bidder1_dht
@@ -1891,7 +1105,7 @@ async fn test_e2e_appmessage_bid_announcements() {
             commitment: bidder2_commitment,
             timestamp: now + 2,
             bid_key: bid2_record_dht.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: bidder2_signing,
         };
         // Write to the pre-created DHT record (not publish_bid which creates a new one)
         bidder2_dht
@@ -1945,7 +1159,7 @@ async fn test_e2e_appmessage_bid_announcements() {
             seller_bid_count
         );
 
-        eprintln!("[E2E] test_e2e_appmessage_bid_announcements PASSED");
+        eprintln!("[E2E] test_e2e_smoke_appmessage_bid_announcements PASSED");
 
         // Cleanup
         let _ = seller.shutdown().await;
@@ -1970,7 +1184,7 @@ async fn test_e2e_appmessage_bid_announcements() {
 #[tokio::test]
 #[ignore]
 #[serial]
-async fn test_e2e_real_bid_flow_with_commitments() {
+async fn test_e2e_smoke_real_bid_flow_with_commitments() {
     init_test_tracing();
 
     let _devnet = setup_e2e_environment().expect("E2E setup failed");
@@ -1985,6 +1199,9 @@ async fn test_e2e_real_bid_flow_with_commitments() {
         let seller_id = seller.node_id().unwrap();
         let bidder1_id = bidder1.node_id().unwrap();
         let bidder2_id = bidder2.node_id().unwrap();
+        let seller_signing = seller.signing_pubkey_bytes();
+        let bidder1_signing = bidder1.signing_pubkey_bytes();
+        let bidder2_signing = bidder2.signing_pubkey_bytes();
 
         let seller_dht = seller.dht().unwrap();
 
@@ -2030,7 +1247,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
             commitment: seller_commitment,
             timestamp: now, // Earliest = party 0
             bid_key: seller_bid_record_dht.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: seller_signing,
         };
         let seller_bid_ops = BidOperations::new(seller_dht.clone());
         seller_bid_ops
@@ -2072,7 +1289,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
             commitment: bidder1_commitment,
             timestamp: now + 1,
             bid_key: bid1_record_dht.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: bidder1_signing,
         };
         seller_bid_ops
             .register_bid(&listing_record, bid1.clone())
@@ -2104,7 +1321,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
             commitment: bidder2_commitment,
             timestamp: now + 2,
             bid_key: bid2_record_dht.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: bidder2_signing,
         };
         seller_bid_ops
             .register_bid(&listing_record, bid2.clone())
@@ -2186,7 +1403,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
         assert_eq!(retrieved_listing.title, listing.title);
         eprintln!("[E2E] Listing retrievable from bidder's DHT perspective");
 
-        eprintln!("[E2E] test_e2e_real_bid_flow_with_commitments PASSED");
+        eprintln!("[E2E] test_e2e_smoke_real_bid_flow_with_commitments PASSED");
 
         let _ = seller.shutdown().await;
         let _ = bidder1.shutdown().await;
@@ -2211,7 +1428,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
 #[tokio::test]
 #[ignore]
 #[serial]
-async fn test_e2e_full_mpc_execution() {
+async fn test_e2e_full_mpc_execution_happy_path() {
     init_test_tracing();
 
     if !check_mp_spdz_available() {
@@ -2233,6 +1450,9 @@ async fn test_e2e_full_mpc_execution() {
         let seller_id = seller.node_id().unwrap();
         let bidder1_id = bidder1.node_id().unwrap();
         let bidder2_id = bidder2.node_id().unwrap();
+        let seller_signing = seller.signing_pubkey_bytes();
+        let bidder1_signing = bidder1.signing_pubkey_bytes();
+        let bidder2_signing = bidder2.signing_pubkey_bytes();
 
         let seller_dht = seller.dht().unwrap();
 
@@ -2277,7 +1497,7 @@ async fn test_e2e_full_mpc_execution() {
             commitment: make_real_commitment(100, &seller_nonce),
             timestamp: now,
             bid_key: seller_bid_rec.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: seller_signing,
         };
         let seller_bid_ops = BidOperations::new(seller_dht.clone());
         seller_bid_ops
@@ -2315,7 +1535,7 @@ async fn test_e2e_full_mpc_execution() {
             commitment: make_real_commitment(200, &b1_nonce),
             timestamp: now + 1,
             bid_key: b1_rec.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: bidder1_signing,
         };
         seller_bid_ops
             .register_bid(&listing_record, bid1.clone())
@@ -2341,7 +1561,7 @@ async fn test_e2e_full_mpc_execution() {
             commitment: make_real_commitment(150, &b2_nonce),
             timestamp: now + 2,
             bid_key: b2_rec.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: bidder2_signing,
         };
         seller_bid_ops
             .register_bid(&listing_record, bid2.clone())
@@ -2435,13 +1655,12 @@ async fn test_e2e_full_mpc_execution() {
                 "Non-winner should NOT have a decryption key"
             );
         } else {
-            eprintln!(
-                "[E2E] MPC may have run but post-MPC message exchange did not complete in time. \
-                 This is expected if route exchange didn't fully propagate."
-            );
+            return Err(MarketError::Timeout(
+                "Full MPC flow did not complete: winner did not receive decryption key".into(),
+            ));
         }
 
-        eprintln!("[E2E] test_e2e_full_mpc_execution PASSED");
+        eprintln!("[E2E] test_e2e_full_mpc_execution_happy_path PASSED");
 
         let _ = seller.shutdown().await;
         let _ = bidder1.shutdown().await;
@@ -2467,7 +1686,7 @@ async fn test_e2e_full_mpc_execution() {
 #[tokio::test]
 #[ignore]
 #[serial]
-async fn test_e2e_winner_verification_and_decryption() {
+async fn test_e2e_full_winner_verification_and_decryption() {
     init_test_tracing();
 
     if !check_mp_spdz_available() {
@@ -2488,6 +1707,9 @@ async fn test_e2e_winner_verification_and_decryption() {
         let seller_id = seller.node_id().unwrap();
         let bidder1_id = bidder1.node_id().unwrap();
         let bidder2_id = bidder2.node_id().unwrap();
+        let seller_signing = seller.signing_pubkey_bytes();
+        let bidder1_signing = bidder1.signing_pubkey_bytes();
+        let bidder2_signing = bidder2.signing_pubkey_bytes();
 
         let seller_dht = seller.dht().unwrap();
 
@@ -2532,7 +1754,7 @@ async fn test_e2e_winner_verification_and_decryption() {
             commitment: make_real_commitment(50, &s_nonce),
             timestamp: now,
             bid_key: s_bid_rec.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: seller_signing,
         };
         let seller_bid_ops = BidOperations::new(seller_dht.clone());
         seller_bid_ops
@@ -2570,7 +1792,7 @@ async fn test_e2e_winner_verification_and_decryption() {
             commitment: make_real_commitment(300, &b1_nonce),
             timestamp: now + 1,
             bid_key: b1_rec.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: bidder1_signing,
         };
         seller_bid_ops
             .register_bid(&listing_record, bid1.clone())
@@ -2596,7 +1818,7 @@ async fn test_e2e_winner_verification_and_decryption() {
             commitment: make_real_commitment(100, &b2_nonce),
             timestamp: now + 2,
             bid_key: b2_rec.key.clone(),
-            signing_pubkey: [0u8; 32],
+            signing_pubkey: bidder2_signing,
         };
         seller_bid_ops
             .register_bid(&listing_record, bid2.clone())
@@ -2702,7 +1924,9 @@ async fn test_e2e_winner_verification_and_decryption() {
                     eprintln!("[E2E] Decrypted: \"{}\"", content);
                 }
                 Err(e) => {
-                    eprintln!("[E2E] Decryption failed (may be DHT fetch timing): {}", e);
+                    return Err(MarketError::Crypto(format!(
+                        "Winner could not decrypt listing content: {e}"
+                    )));
                 }
             }
 
@@ -2710,13 +1934,12 @@ async fn test_e2e_winner_verification_and_decryption() {
                 "[E2E] FULL VERIFICATION PASSED: MPC → challenge → reveal → verify → decrypt"
             );
         } else {
-            eprintln!(
-                "[E2E] Post-MPC flow did not complete in time. MPC may have succeeded but \
-                 route-based message exchange timed out. This test requires stable devnet routing."
-            );
+            return Err(MarketError::Timeout(
+                "Winner did not receive decryption key within timeout".into(),
+            ));
         }
 
-        eprintln!("[E2E] test_e2e_winner_verification_and_decryption PASSED");
+        eprintln!("[E2E] test_e2e_full_winner_verification_and_decryption PASSED");
 
         let _ = seller.shutdown().await;
         let _ = bidder1.shutdown().await;

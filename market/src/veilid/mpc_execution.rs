@@ -1,5 +1,7 @@
 //! MP-SPDZ program compilation, process spawning, and output parsing.
 
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{error, info};
@@ -181,19 +183,104 @@ pub(crate) fn parse_seller_mpc_output(stdout: &str) -> Option<(usize, u64)> {
 
 /// Parse bidder (party 1..N) MPC output.
 ///
-/// Returns `true` if the output contains `"You won: 1"`, `false` otherwise.
-pub(crate) fn parse_bidder_mpc_output(stdout: &str) -> bool {
+/// Returns `Some(true|false)` when the result marker is present, otherwise `None`.
+pub(crate) fn parse_bidder_mpc_output(stdout: &str) -> Option<bool> {
     for line in stdout.lines() {
         if line.contains("You won:") {
             if line.contains("You won: 1") {
                 info!("Result: I won the auction!");
-                return true;
+                return Some(true);
             }
             info!("Result: I did not win");
-            return false;
+            return Some(false);
         }
     }
-    false
+    None
+}
+
+/// Structured machine-readable MPC result contract written after process execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct MpcResultContract {
+    pub schema_version: u8,
+    pub role: String,
+    pub winner_party_id: Option<usize>,
+    pub winning_bid: Option<u64>,
+    pub i_won: Option<bool>,
+}
+
+impl MpcResultContract {
+    const SCHEMA_VERSION: u8 = 1;
+
+    pub(crate) fn from_seller_stdout(stdout: &str) -> MarketResult<Self> {
+        let (winner_party_id, winning_bid) = parse_seller_mpc_output(stdout).ok_or_else(|| {
+            MarketError::Process(
+                "Seller MPC result contract parse failed: missing winner or bid fields".into(),
+            )
+        })?;
+
+        Ok(Self {
+            schema_version: Self::SCHEMA_VERSION,
+            role: "seller".to_string(),
+            winner_party_id: Some(winner_party_id),
+            winning_bid: Some(winning_bid),
+            i_won: None,
+        })
+    }
+
+    pub(crate) fn from_bidder_stdout(stdout: &str) -> MarketResult<Self> {
+        let i_won = parse_bidder_mpc_output(stdout).ok_or_else(|| {
+            MarketError::Process(
+                "Bidder MPC result contract parse failed: missing 'You won:' marker".into(),
+            )
+        })?;
+
+        Ok(Self {
+            schema_version: Self::SCHEMA_VERSION,
+            role: "bidder".to_string(),
+            winner_party_id: None,
+            winning_bid: None,
+            i_won: Some(i_won),
+        })
+    }
+}
+
+/// Persist the machine-readable MPC result contract to JSON.
+pub(crate) async fn write_result_contract(
+    path: &Path,
+    result: &MpcResultContract,
+) -> MarketResult<()> {
+    let bytes = serde_json::to_vec_pretty(result).map_err(|e| {
+        MarketError::Serialization(format!("Failed to serialize MPC result contract: {e}"))
+    })?;
+    tokio::fs::write(path, bytes).await.map_err(|e| {
+        MarketError::Process(format!(
+            "Failed to write MPC result contract {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Read and validate the machine-readable MPC result contract from JSON.
+pub(crate) async fn read_result_contract(path: &Path) -> MarketResult<MpcResultContract> {
+    let data = tokio::fs::read(path).await.map_err(|e| {
+        MarketError::Process(format!(
+            "Failed to read MPC result contract {}: {e}",
+            path.display()
+        ))
+    })?;
+    let result: MpcResultContract = serde_json::from_slice(&data).map_err(|e| {
+        MarketError::Serialization(format!(
+            "Failed to deserialize MPC result contract {}: {e}",
+            path.display()
+        ))
+    })?;
+    if result.schema_version != MpcResultContract::SCHEMA_VERSION {
+        return Err(MarketError::Serialization(format!(
+            "Unsupported MPC result contract schema version {}",
+            result.schema_version
+        )));
+    }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +381,7 @@ You won: 1
 MPC execution completed
 "#;
         let result = parse_bidder_mpc_output(output);
-        assert!(result);
+        assert_eq!(result, Some(true));
     }
 
     #[test]
@@ -306,14 +393,14 @@ You won: 0
 MPC execution completed
 "#;
         let result = parse_bidder_mpc_output(output);
-        assert!(!result);
+        assert_eq!(result, Some(false));
     }
 
     #[test]
     fn test_parse_bidder_output_empty() {
         let output = "";
         let result = parse_bidder_mpc_output(output);
-        assert!(!result);
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -324,6 +411,26 @@ Loading program...
 MPC execution completed
 "#;
         let result = parse_bidder_mpc_output(output);
-        assert!(!result);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_contract_from_seller_stdout() {
+        let output = "Winning bid: 77\nWinner: Party 3\n";
+        let contract = MpcResultContract::from_seller_stdout(output).unwrap();
+        assert_eq!(contract.role, "seller");
+        assert_eq!(contract.winner_party_id, Some(3));
+        assert_eq!(contract.winning_bid, Some(77));
+        assert_eq!(contract.i_won, None);
+    }
+
+    #[test]
+    fn test_contract_from_bidder_stdout() {
+        let output = "You won: 1\n";
+        let contract = MpcResultContract::from_bidder_stdout(output).unwrap();
+        assert_eq!(contract.role, "bidder");
+        assert_eq!(contract.i_won, Some(true));
+        assert_eq!(contract.winner_party_id, None);
+        assert_eq!(contract.winning_bid, None);
     }
 }

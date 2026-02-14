@@ -379,8 +379,11 @@ impl AuctionCoordinator {
 
                 if let Some(route_manager) = route_manager {
                     let seller_route = {
-                        let mgr = route_manager.lock().await;
-                        let routes = mgr.received_routes.lock().await;
+                        let received_routes = {
+                            let mgr = route_manager.lock().await;
+                            mgr.received_routes.clone()
+                        };
+                        let routes = received_routes.lock().await;
                         seller_pubkey
                             .as_ref()
                             .and_then(|seller| routes.get(seller).cloned())
