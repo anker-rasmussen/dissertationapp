@@ -1,4 +1,4 @@
-//! End-to-end smoke tests using real Veilid devnets.
+//! End-to-end tests using real Veilid devnets.
 //!
 //! These tests are marked `#[ignore]` by default since they require:
 //! - Docker installed and running
@@ -9,7 +9,12 @@
 //! Run with:
 //! ```bash
 //! LD_PRELOAD=/path/to/veilid/.devcontainer/scripts/libipspoof.so \
-//!   cargo nextest run --profile e2e --ignored
+//!   cargo test --test integration_tests -- --ignored e2e_smoke_
+//! ```
+//! For full MPC/decryption flows (slower):
+//! ```bash
+//! LD_PRELOAD=/path/to/veilid/.devcontainer/scripts/libipspoof.so \
+//!   cargo test --test integration_tests -- --ignored e2e_full_
 //! ```
 //!
 //! The tests will automatically:

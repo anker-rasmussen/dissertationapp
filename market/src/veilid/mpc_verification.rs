@@ -6,7 +6,7 @@ use veilid_core::{PublicKey, RecordKey, Target};
 
 use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use super::bid_ops::BidOperations;
-use super::mpc_execution::{parse_bidder_mpc_output, parse_seller_mpc_output};
+use super::mpc_execution::MpcResultContract;
 use super::mpc_orchestrator::MpcOrchestrator;
 use crate::config::subkeys;
 use crate::error::{MarketError, MarketResult};
@@ -37,12 +37,12 @@ impl MpcOrchestrator {
     /// Handle seller (party 0) MPC result: parse output, store verification, send challenge.
     pub(crate) async fn handle_seller_mpc_result(
         &self,
-        stdout: &str,
+        result: &MpcResultContract,
         listing_key: &RecordKey,
         all_parties: &[PublicKey],
     ) {
-        let Some((winner_pid, bid)) = parse_seller_mpc_output(stdout) else {
-            warn!("Could not parse winner/bid from MPC output");
+        let (Some(winner_pid), Some(bid)) = (result.winner_party_id, result.winning_bid) else {
+            warn!("Invalid seller MPC result contract: missing winner_party_id or winning_bid");
             return;
         };
 
@@ -82,8 +82,12 @@ impl MpcOrchestrator {
     }
 
     /// Handle bidder (party 1..N) MPC result: parse output, cleanup if lost.
-    pub(crate) async fn handle_bidder_mpc_result(&self, stdout: &str, listing_key: &RecordKey) {
-        let i_won = parse_bidder_mpc_output(stdout);
+    pub(crate) async fn handle_bidder_mpc_result(
+        &self,
+        result: &MpcResultContract,
+        listing_key: &RecordKey,
+    ) {
+        let i_won = result.i_won.unwrap_or(false);
 
         if i_won {
             info!("I won — waiting for seller's challenge (WinnerDecryptionRequest)");

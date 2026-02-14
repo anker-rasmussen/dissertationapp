@@ -1,4 +1,5 @@
 use ed25519_dalek::SigningKey;
+use std::collections::HashSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -12,7 +13,10 @@ use super::bid_ops::BidOperations;
 use super::bid_storage::BidStorage;
 use super::dht::DHTOperations;
 use super::mpc::MpcTunnelProxy;
-use super::mpc_execution::{compile_mpc_program, spawn_mascot_party, MpcCleanupGuard};
+use super::mpc_execution::{
+    compile_mpc_program, read_result_contract, spawn_mascot_party, write_result_contract,
+    MpcCleanupGuard, MpcResultContract,
+};
 use super::mpc_routes::MpcRouteManager;
 pub use super::mpc_verification::VerificationState;
 use crate::config;
@@ -57,6 +61,8 @@ pub struct MpcOrchestrator {
     pub(crate) route_managers: RouteManagerMap,
     /// Pending verifications: listing_key -> (winner_pubkey, mpc_winning_bid, verified?)
     pub(crate) pending_verifications: VerificationMap,
+    /// Listings where this node is the expected winner (set from bidder MPC output).
+    pub(crate) expected_winner_listings: Arc<Mutex<HashSet<RecordKey>>>,
 }
 
 impl MpcOrchestrator {
@@ -78,6 +84,7 @@ impl MpcOrchestrator {
             active_tunnel_proxy: Arc::new(Mutex::new(None)),
             route_managers: Arc::new(Mutex::new(HashMap::new())),
             pending_verifications: Arc::new(Mutex::new(HashMap::new())),
+            expected_winner_listings: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -94,6 +101,24 @@ impl MpcOrchestrator {
     /// Access to active tunnel proxy (needed by AuctionCoordinator for message forwarding)
     pub const fn active_tunnel_proxy(&self) -> &Arc<Mutex<Option<MpcTunnelProxy>>> {
         &self.active_tunnel_proxy
+    }
+
+    /// Mark a listing where this node is the expected winner.
+    pub async fn mark_expected_winner(&self, listing_key: &RecordKey) {
+        self.expected_winner_listings
+            .lock()
+            .await
+            .insert(listing_key.clone());
+    }
+
+    /// Clear expected-winner state for a listing.
+    pub async fn clear_expected_winner(&self, listing_key: &RecordKey) {
+        self.expected_winner_listings.lock().await.remove(listing_key);
+    }
+
+    /// Returns whether this node is the expected winner for the listing.
+    pub async fn is_expected_winner(&self, listing_key: &RecordKey) -> bool {
+        self.expected_winner_listings.lock().await.contains(listing_key)
     }
 
     /// Pre-create a route manager for an auction so we can receive route announcements
@@ -288,6 +313,7 @@ impl MpcOrchestrator {
     }
 
     /// Execute the MPC auction computation using MASCOT protocol
+    #[allow(clippy::too_many_lines)]
     async fn execute_mpc_auction(
         &self,
         party_id: usize,
@@ -410,11 +436,23 @@ impl MpcOrchestrator {
             warn!("STDERR:\n{}", stderr);
         }
 
+        // Build and persist a machine-readable MPC result contract.
+        let result_contract = if party_id == 0 {
+            MpcResultContract::from_seller_stdout(&stdout)?
+        } else {
+            MpcResultContract::from_bidder_stdout(&stdout)?
+        };
+        let contract_path = hosts_file_path.with_extension(format!("party-{party_id}.json"));
+        write_result_contract(&contract_path, &result_contract).await?;
+        let result_contract = read_result_contract(&contract_path).await?;
+        let _ = tokio::fs::remove_file(&contract_path).await;
+
         if party_id == 0 {
-            self.handle_seller_mpc_result(&stdout, listing_key, all_parties)
+            self.handle_seller_mpc_result(&result_contract, listing_key, all_parties)
                 .await;
         } else {
-            self.handle_bidder_mpc_result(&stdout, listing_key).await;
+            self.handle_bidder_mpc_result(&result_contract, listing_key)
+                .await;
         }
 
         // Clear active tunnel proxy reference before guard drops

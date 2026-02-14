@@ -617,6 +617,43 @@ impl RegistryOperations {
             .collect())
     }
 
+    /// Resolve a seller's registered Ed25519 signing key from the master registry.
+    ///
+    /// Returns `Ok(None)` when the seller is unknown or has no signing key set.
+    pub async fn get_seller_signing_pubkey(
+        &self,
+        seller_pubkey: &str,
+    ) -> MarketResult<Option<[u8; 32]>> {
+        let registry = self.fetch_registry(true).await?;
+        let Some(entry) = registry
+            .sellers
+            .iter()
+            .find(|s| s.seller_pubkey == seller_pubkey)
+        else {
+            return Ok(None);
+        };
+
+        if entry.signing_pubkey.is_empty() {
+            return Ok(None);
+        }
+
+        let decoded = hex::decode(&entry.signing_pubkey).map_err(|e| {
+            MarketError::Serialization(format!(
+                "Invalid seller signing key hex for '{}': {}",
+                seller_pubkey, e
+            ))
+        })?;
+        let key: [u8; 32] = decoded.try_into().map_err(|_| {
+            MarketError::Serialization(format!(
+                "Invalid seller signing key length for '{}': expected 32 bytes, got {}",
+                seller_pubkey,
+                decoded.len()
+            ))
+        })?;
+
+        Ok(Some(key))
+    }
+
     /// Get the master registry key (if known).
     pub fn master_registry_key(&self) -> Option<RecordKey> {
         self.master_registry_key.clone()
