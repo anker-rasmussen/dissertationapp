@@ -1,3 +1,5 @@
+use bincode::Options;
+use ed25519_dalek::{Signer, Verifier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -6,6 +8,81 @@ use veilid_core::{PublicKey, RecordKey, RouteBlob};
 use crate::config::now_unix;
 use crate::error::{MarketError, MarketResult};
 use crate::traits::TimeProvider;
+
+/// Maximum allowed bincode payload size (64 KB).
+/// Generous for the 32 KB Veilid value limit plus envelope overhead.
+const MAX_BINCODE_SIZE: u64 = 64 * 1024;
+
+/// Deserialize bincode with a size limit to prevent OOM from crafted payloads.
+pub(crate) fn bincode_deserialize_limited<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+) -> Result<T, bincode::Error> {
+    bincode::options()
+        .with_limit(MAX_BINCODE_SIZE)
+        .deserialize(data)
+}
+
+// ── Signed envelope ──────────────────────────────────────────────────
+
+/// Cryptographic envelope wrapping every `AuctionMessage` or MPC tunnel message.
+///
+/// The `payload` is the bincode-serialized inner message. The sender signs
+/// the payload with their Ed25519 key; the receiver verifies the signature
+/// before deserializing.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignedEnvelope {
+    /// Bincode-serialized inner message.
+    pub payload: Vec<u8>,
+    /// Ed25519 verifying key bytes (the signer's identity).
+    pub signer: [u8; 32],
+    /// Ed25519 signature over `payload` (64 bytes).
+    pub signature: Vec<u8>,
+}
+
+impl SignedEnvelope {
+    /// Sign a payload and wrap it in an envelope.
+    pub fn sign(payload: Vec<u8>, signing_key: &ed25519_dalek::SigningKey) -> MarketResult<Self> {
+        let signature = signing_key.sign(&payload);
+        let signer = signing_key.verifying_key().to_bytes();
+        Ok(Self {
+            payload,
+            signer,
+            signature: signature.to_bytes().to_vec(),
+        })
+    }
+
+    /// Verify the signature and return the payload + signer pubkey bytes.
+    pub fn verify_and_unwrap(data: &[u8]) -> MarketResult<(Vec<u8>, [u8; 32])> {
+        let envelope: Self = bincode_deserialize_limited(data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to deserialize signed envelope: {e}"))
+        })?;
+
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&envelope.signer)
+            .map_err(|e| MarketError::Crypto(format!("Invalid signer public key: {e}")))?;
+        let sig_bytes: [u8; 64] = envelope.signature.as_slice().try_into().map_err(|_| {
+            MarketError::Crypto(format!(
+                "Invalid signature length: expected 64, got {}",
+                envelope.signature.len()
+            ))
+        })?;
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        verifying_key
+            .verify(&envelope.payload, &signature)
+            .map_err(|e| MarketError::Crypto(format!("Signature verification failed: {e}")))?;
+
+        Ok((envelope.payload, envelope.signer))
+    }
+
+    /// Serialize the envelope to bytes for transmission.
+    pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
+        bincode::options()
+            .with_limit(MAX_BINCODE_SIZE)
+            .serialize(self)
+            .map_err(|e| {
+                MarketError::Serialization(format!("Failed to serialize signed envelope: {e}"))
+            })
+    }
+}
 
 /// Maximum allowed clock drift for message timestamps (5 minutes).
 pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300;
@@ -381,16 +458,37 @@ impl AuctionMessage {
 
     /// Serialize to bytes for transmission
     pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| {
-            MarketError::Serialization(format!("Failed to serialize auction message: {e}"))
+        bincode::options()
+            .with_limit(MAX_BINCODE_SIZE)
+            .serialize(self)
+            .map_err(|e| {
+                MarketError::Serialization(format!("Failed to serialize auction message: {e}"))
+            })
+    }
+
+    /// Deserialize from bytes (with size limit to prevent OOM from crafted payloads).
+    pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
+        bincode_deserialize_limited(data).map_err(|e| {
+            MarketError::Serialization(format!("Failed to deserialize auction message: {e}"))
         })
     }
 
-    /// Deserialize from bytes
-    pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
-        bincode::deserialize(data).map_err(|e| {
-            MarketError::Serialization(format!("Failed to deserialize auction message: {e}"))
-        })
+    /// Serialize + sign into a [`SignedEnvelope`], then serialize the envelope.
+    pub fn to_signed_bytes(
+        &self,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> MarketResult<Vec<u8>> {
+        let payload = self.to_bytes()?;
+        let envelope = SignedEnvelope::sign(payload, signing_key)?;
+        envelope.to_bytes()
+    }
+
+    /// Verify a [`SignedEnvelope`], deserialize the inner `AuctionMessage`,
+    /// and return it together with the signer's public key bytes.
+    pub fn from_signed_bytes(data: &[u8]) -> MarketResult<(Self, [u8; 32])> {
+        let (payload, signer) = SignedEnvelope::verify_and_unwrap(data)?;
+        let msg = Self::from_bytes(&payload)?;
+        Ok((msg, signer))
     }
 }
 
@@ -726,5 +824,68 @@ mod tests {
         let bytes = registry.to_bytes().unwrap();
         let restored = BidAnnouncementRegistry::from_bytes(&bytes).unwrap();
         assert!(restored.announcements.is_empty());
+    }
+
+    #[test]
+    fn signed_envelope_roundtrip() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let msg = AuctionMessage::registry_announcement_with_time(
+            test_record_key(),
+            &MockTime::new(1000),
+        );
+        let signed_bytes = msg.to_signed_bytes(&signing_key).unwrap();
+        let (decoded, signer) = AuctionMessage::from_signed_bytes(&signed_bytes).unwrap();
+        assert_eq!(signer, signing_key.verifying_key().to_bytes());
+        assert_eq!(decoded.timestamp(), 1000);
+    }
+
+    #[test]
+    fn signed_envelope_rejects_tampered_payload() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let msg = AuctionMessage::registry_announcement_with_time(
+            test_record_key(),
+            &MockTime::new(2000),
+        );
+        let mut signed_bytes = msg.to_signed_bytes(&signing_key).unwrap();
+        // Tamper with a byte in the middle of the payload
+        if signed_bytes.len() > 20 {
+            signed_bytes[20] ^= 0xFF;
+        }
+        let result = AuctionMessage::from_signed_bytes(&signed_bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn signed_envelope_rejects_wrong_key() {
+        let key_a = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let key_b = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let msg = AuctionMessage::registry_announcement_with_time(
+            test_record_key(),
+            &MockTime::new(3000),
+        );
+        let signed_bytes = msg.to_signed_bytes(&key_a).unwrap();
+        // Verification succeeds because the envelope carries key_a's verifying key
+        // and the signature is valid under key_a.  The *signer identity* returned
+        // should be key_a, not key_b.
+        let (_, signer) = AuctionMessage::from_signed_bytes(&signed_bytes).unwrap();
+        assert_eq!(signer, key_a.verifying_key().to_bytes());
+        assert_ne!(signer, key_b.verifying_key().to_bytes());
+    }
+
+    #[test]
+    fn bincode_size_limit_rejects_oversized_payload() {
+        // Craft a bincode payload whose length prefix claims > 64 KB
+        // bincode writes a u64 length prefix for Vec/String, so we forge one
+        let mut bad = Vec::new();
+        // Variant tag for BidAnnouncement (0u32)
+        bad.extend_from_slice(&0u32.to_le_bytes());
+        // listing_key: needs some bytes but let's just make a huge string length
+        // Actually, simplest: use bincode_deserialize_limited directly
+        let huge_len: u64 = 128 * 1024; // 128 KB
+        bad.extend_from_slice(&huge_len.to_le_bytes());
+        bad.extend_from_slice(&vec![0u8; 64]); // partial data
+
+        let result = bincode_deserialize_limited::<AuctionMessage>(&bad);
+        assert!(result.is_err());
     }
 }

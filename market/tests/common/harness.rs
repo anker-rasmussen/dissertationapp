@@ -209,6 +209,7 @@ impl MultiPartyHarness {
             commitment,
             timestamp,
             bid_key: bid_key.clone(),
+            signing_pubkey: [0u8; 32],
         };
 
         // Serialize and store bid record

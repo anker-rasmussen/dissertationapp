@@ -498,6 +498,7 @@ mod tests {
             commitment: [1u8; 32],
             timestamp: 1000,
             bid_key: make_test_record_key(10),
+            signing_pubkey: [1u8; 32],
         };
         let other_bid = BidRecord {
             listing_key: listing_key.clone(),
@@ -505,6 +506,7 @@ mod tests {
             commitment: [2u8; 32],
             timestamp: 1000,
             bid_key: make_test_record_key(20),
+            signing_pubkey: [2u8; 32],
         };
 
         index.bids.push(my_bid);
@@ -530,6 +532,7 @@ mod tests {
             commitment: [99u8; 32],
             timestamp: 1000,
             bid_key: make_test_record_key(990),
+            signing_pubkey: [99u8; 32],
         };
         index.bids.push(other_bid);
 

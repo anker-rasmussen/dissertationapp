@@ -51,6 +51,9 @@ pub struct SellerEntry {
     pub catalog_key: String,
     /// When this seller was registered (unix timestamp).
     pub registered_at: u64,
+    /// Ed25519 signing public key (hex-encoded) for message authentication.
+    #[serde(default)]
+    pub signing_pubkey: String,
 }
 
 /// The master registry stored in the bootstrap node's DHT record (subkey 0, CBOR).
@@ -357,6 +360,7 @@ impl RegistryOperations {
         &mut self,
         seller_pubkey: &str,
         catalog_key: &str,
+        signing_pubkey: &str,
     ) -> MarketResult<()> {
         let registry_key = self
             .master_registry_key
@@ -405,6 +409,7 @@ impl RegistryOperations {
                 seller_pubkey: seller_pubkey.to_string(),
                 catalog_key: catalog_key.to_string(),
                 registered_at: now_unix(),
+                signing_pubkey: signing_pubkey.to_string(),
             });
 
             let data = registry.to_cbor().map_err(|e| {
@@ -865,11 +870,13 @@ mod tests {
                     seller_pubkey: "pk1".to_string(),
                     catalog_key: "ck1".to_string(),
                     registered_at: 1000,
+                    signing_pubkey: String::new(),
                 },
                 SellerEntry {
                     seller_pubkey: "pk2".to_string(),
                     catalog_key: "ck2".to_string(),
                     registered_at: 2000,
+                    signing_pubkey: String::new(),
                 },
             ],
             routes: Vec::new(),
@@ -912,6 +919,7 @@ mod tests {
             seller_pubkey: "pk1".to_string(),
             catalog_key: "ck1".to_string(),
             registered_at: 1000,
+            signing_pubkey: String::new(),
         });
         assert_eq!(reg.sellers.len(), 1);
         assert_eq!(reg.version, 1);
@@ -921,6 +929,7 @@ mod tests {
             seller_pubkey: "pk1".to_string(),
             catalog_key: "ck1".to_string(),
             registered_at: 2000,
+            signing_pubkey: String::new(),
         });
         assert_eq!(reg.sellers.len(), 1);
         assert_eq!(reg.version, 1);
@@ -930,6 +939,7 @@ mod tests {
             seller_pubkey: "pk2".to_string(),
             catalog_key: "ck2".to_string(),
             registered_at: 3000,
+            signing_pubkey: String::new(),
         });
         assert_eq!(reg.sellers.len(), 2);
         assert_eq!(reg.version, 2);
@@ -997,6 +1007,7 @@ mod tests {
                 seller_pubkey: format!("pk{}", i),
                 catalog_key: format!("ck{}", i),
                 registered_at: i as u64 * 1000,
+                signing_pubkey: String::new(),
             });
         }
         assert_eq!(reg.sellers.len(), 200);
@@ -1007,6 +1018,7 @@ mod tests {
             seller_pubkey: "pk200".to_string(),
             catalog_key: "ck200".to_string(),
             registered_at: 200_000,
+            signing_pubkey: String::new(),
         });
         assert_eq!(reg.sellers.len(), 200);
         assert_eq!(reg.version, 200); // Version unchanged
@@ -1125,6 +1137,7 @@ mod tests {
                 seller_pubkey: format!("seller_{}", i),
                 catalog_key: format!("catalog_{}", i),
                 registered_at: i as u64 * 100,
+                signing_pubkey: String::new(),
             });
         }
 
@@ -1222,6 +1235,7 @@ mod tests {
             seller_pubkey: "pk1".to_string(),
             catalog_key: "ck1".to_string(),
             registered_at: 1000,
+            signing_pubkey: String::new(),
         });
         assert_eq!(reg.version, 1);
 
@@ -1229,6 +1243,7 @@ mod tests {
             seller_pubkey: "pk2".to_string(),
             catalog_key: "ck2".to_string(),
             registered_at: 2000,
+            signing_pubkey: String::new(),
         });
         assert_eq!(reg.version, 2);
 
@@ -1237,6 +1252,7 @@ mod tests {
             seller_pubkey: "pk1".to_string(),
             catalog_key: "ck1".to_string(),
             registered_at: 3000,
+            signing_pubkey: String::new(),
         });
         assert_eq!(reg.version, 2);
     }
@@ -1368,6 +1384,7 @@ mod tests {
             seller_pubkey: "pk1".to_string(),
             catalog_key: "ck1".to_string(),
             registered_at: 600,
+            signing_pubkey: String::new(),
         });
 
         let bytes = reg.to_cbor().unwrap();
@@ -1386,6 +1403,7 @@ mod tests {
                 seller_pubkey: "pk1".to_string(),
                 catalog_key: "ck1".to_string(),
                 registered_at: 100,
+                signing_pubkey: String::new(),
             }],
             routes: Vec::new(),
             version: 1,

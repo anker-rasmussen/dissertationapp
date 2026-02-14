@@ -106,6 +106,7 @@ fn test_party_id_assignment_deterministic() {
         commitment: [1u8; 32],
         timestamp: 1000,
         bid_key: make_test_record_key(10),
+        signing_pubkey: [1u8; 32],
     };
     let bid2 = BidRecord {
         listing_key: listing_key.clone(),
@@ -113,6 +114,7 @@ fn test_party_id_assignment_deterministic() {
         commitment: [2u8; 32],
         timestamp: 2000,
         bid_key: make_test_record_key(20),
+        signing_pubkey: [2u8; 32],
     };
     let bid3 = BidRecord {
         listing_key: listing_key.clone(),
@@ -120,6 +122,7 @@ fn test_party_id_assignment_deterministic() {
         commitment: [3u8; 32],
         timestamp: 3000,
         bid_key: make_test_record_key(30),
+        signing_pubkey: [3u8; 32],
     };
 
     // Add in order 1, 2, 3
@@ -165,6 +168,7 @@ fn test_seller_always_party_zero() {
         commitment: [1u8; 32],
         timestamp: 100, // Earliest — created at listing time
         bid_key: make_test_record_key(10),
+        signing_pubkey: [1u8; 32],
     };
     let bidder_a = BidRecord {
         listing_key: listing_key.clone(),
@@ -172,6 +176,7 @@ fn test_seller_always_party_zero() {
         commitment: [2u8; 32],
         timestamp: 500,
         bid_key: make_test_record_key(20),
+        signing_pubkey: [2u8; 32],
     };
     let bidder_b = BidRecord {
         listing_key: listing_key.clone(),
@@ -179,6 +184,7 @@ fn test_seller_always_party_zero() {
         commitment: [3u8; 32],
         timestamp: 600,
         bid_key: make_test_record_key(30),
+        signing_pubkey: [3u8; 32],
     };
 
     let mut index = BidIndex::new(listing_key);

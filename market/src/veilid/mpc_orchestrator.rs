@@ -1,3 +1,4 @@
+use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -48,6 +49,8 @@ pub struct MpcOrchestrator {
     pub(crate) my_node_id: PublicKey,
     pub(crate) bid_storage: BidStorage,
     pub(crate) node_offset: u16,
+    /// Ed25519 signing key for authenticating outgoing messages.
+    pub(crate) signing_key: SigningKey,
     /// Currently active MPC tunnel proxy (if any)
     pub(crate) active_tunnel_proxy: Arc<Mutex<Option<MpcTunnelProxy>>>,
     /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
@@ -63,6 +66,7 @@ impl MpcOrchestrator {
         my_node_id: PublicKey,
         bid_storage: BidStorage,
         node_offset: u16,
+        signing_key: SigningKey,
     ) -> Self {
         Self {
             api,
@@ -70,6 +74,7 @@ impl MpcOrchestrator {
             my_node_id,
             bid_storage,
             node_offset,
+            signing_key,
             active_tunnel_proxy: Arc::new(Mutex::new(None)),
             route_managers: Arc::new(Mutex::new(HashMap::new())),
             pending_verifications: Arc::new(Mutex::new(HashMap::new())),
@@ -223,7 +228,12 @@ impl MpcOrchestrator {
             route_manager
                 .lock()
                 .await
-                .broadcast_route_announcement(listing_key, my_pubkey, peer_route_blobs)
+                .broadcast_route_announcement(
+                    listing_key,
+                    my_pubkey,
+                    peer_route_blobs,
+                    &self.signing_key,
+                )
                 .await?;
         }
 
@@ -301,9 +311,32 @@ impl MpcOrchestrator {
 
         debug!("Bid value retrieved from local storage");
 
+        // Build party_signers map from bid_index: party_id → signing_pubkey.
+        // sorted_bidders() returns pubkeys in party order; match them back to
+        // BidRecords to extract each party's Ed25519 signing pubkey.
+        let party_signers: HashMap<usize, [u8; 32]> = {
+            let mut bids_sorted: Vec<_> = bid_index.bids.iter().collect();
+            bids_sorted.sort_by(|a, b| {
+                a.timestamp
+                    .cmp(&b.timestamp)
+                    .then_with(|| a.bidder.cmp(&b.bidder))
+            });
+            bids_sorted
+                .into_iter()
+                .enumerate()
+                .map(|(pid, bid)| (pid, bid.signing_pubkey))
+                .collect()
+        };
+
         // Start MPC tunnel proxy with the routes
-        let tunnel_proxy =
-            MpcTunnelProxy::new(self.api.clone(), party_id, routes, self.node_offset);
+        let tunnel_proxy = MpcTunnelProxy::new(
+            self.api.clone(),
+            party_id,
+            routes,
+            self.node_offset,
+            self.signing_key.clone(),
+            &party_signers,
+        );
         tunnel_proxy.run()?;
 
         // Store tunnel proxy so AppMessages can be routed to it

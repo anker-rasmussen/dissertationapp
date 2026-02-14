@@ -1,3 +1,4 @@
+use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -68,6 +69,7 @@ impl MpcRouteManager {
         listing_key: &RecordKey,
         my_pubkey: &PublicKey,
         peer_route_blobs: &[(String, Vec<u8>)],
+        signing_key: &SigningKey,
     ) -> MarketResult<()> {
         let route_blob = self
             .my_route_blob
@@ -89,7 +91,7 @@ impl MpcRouteManager {
             route_blob.clone(),
         );
 
-        let data = announcement.to_bytes()?;
+        let data = announcement.to_signed_bytes(signing_key)?;
 
         let routing_context = self
             .api

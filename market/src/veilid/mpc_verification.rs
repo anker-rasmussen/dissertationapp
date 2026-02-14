@@ -191,10 +191,10 @@ impl MpcOrchestrator {
         let message =
             AuctionMessage::winner_decryption_request(listing_key.clone(), self.my_node_id.clone());
 
-        let data = match message.to_bytes() {
+        let data = match message.to_signed_bytes(&self.signing_key) {
             Ok(d) => d,
             Err(e) => {
-                error!("Failed to serialize WinnerDecryptionRequest: {}", e);
+                error!("Failed to sign WinnerDecryptionRequest: {}", e);
                 return;
             }
         };
@@ -260,7 +260,7 @@ impl MpcOrchestrator {
             decryption_hash.to_string(),
         );
 
-        let data = message.to_bytes()?;
+        let data = message.to_signed_bytes(&self.signing_key)?;
 
         // Look up the winner's route while holding locks, then release before async work
         let winner_route = {
