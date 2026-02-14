@@ -17,14 +17,12 @@ path = "src/bin/devnet-ctl.rs"
 [features]
 default = []
 test = []
-devnet = ["veilid-core/footgun"]
 
 [dependencies]
 # UI Framework
 dioxus = { version = "0.7.2", features = ["desktop"] }
 
 # Veilid P2P Network
-# footgun feature optionally enabled via devnet feature flag
 veilid-core = { path = "../../veilid/veilid-core", default-features = false, features = ["default-tokio"] }
 
 # Async Runtime
@@ -63,5 +61,5 @@ hex = "0.4"
 data-encoding = "2.6"
 
 [dev-dependencies]
-market = { path = ".", features = ["test", "devnet"] }
+market = { path = ".", features = ["test"] }
 serial_test = "3.0"  # Run E2E tests sequentially
