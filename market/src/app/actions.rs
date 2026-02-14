@@ -219,6 +219,9 @@ pub async fn submit_bid(
 
     // Update bid_key with the actual DHT record key
     bid_record.bid_key = bid_record_own.key.clone();
+    // Re-write finalized BidRecord so persisted data carries the real bid_key.
+    dht.set_value(&bid_record_own, bid_record.to_cbor()?)
+        .await?;
 
     // Store bid_key in local storage
     state
