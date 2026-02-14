@@ -17,14 +17,15 @@ path = "src/bin/devnet-ctl.rs"
 [features]
 default = []
 test = []
+devnet = ["veilid-core/footgun"]
 
 [dependencies]
 # UI Framework
 dioxus = { version = "0.7.2", features = ["desktop"] }
 
 # Veilid P2P Network
-# footgun feature enables unsafe routing for devnet (no privacy routes)
-veilid-core = { path = "../../veilid/veilid-core", default-features = false, features = ["default-tokio", "footgun"] }
+# footgun feature optionally enabled via devnet feature flag
+veilid-core = { path = "../../veilid/veilid-core", default-features = false, features = ["default-tokio"] }
 
 # Async Runtime
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "io-util", "net"] }
@@ -46,8 +47,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Cryptography
 sha2 = "0.10"  # SHA256 hashing for content verification
+subtle = "2"  # Constant-time comparison for commitment verification
 ed25519-dalek = { version = "2", default-features = false }  # Shared keypair derivation
 aes-gcm = "0.10"  # AES-256-GCM encryption for content
+blake3 = "1"  # BLAKE3 hashing for deterministic DHT key derivation
 rand = "0.8"  # Random number generation
 
 # Cancellation
@@ -60,5 +63,5 @@ hex = "0.4"
 data-encoding = "2.6"
 
 [dev-dependencies]
-market = { path = ".", features = ["test"] }
+market = { path = ".", features = ["test", "devnet"] }
 serial_test = "3.0"  # Run E2E tests sequentially
