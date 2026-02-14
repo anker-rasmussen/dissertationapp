@@ -104,9 +104,10 @@ pub async fn create_and_publish_listing(
 
         // Register seller directly in the master registry (shared keypair)
         {
+            let signing_hex = coordinator.signing_pubkey_hex();
             let mut ops = coordinator.registry_ops().lock().await;
             if let Err(e) = ops
-                .register_seller(&seller.to_string(), &catalog_key.to_string())
+                .register_seller(&seller.to_string(), &catalog_key.to_string(), &signing_hex)
                 .await
             {
                 tracing::warn!("Failed to register seller in master registry: {}", e);
@@ -201,6 +202,10 @@ pub async fn submit_bid(
     // Create BidRecord and publish to DHT
     let bid_ops = BidOperations::new(dht.clone());
     let timestamp = market::config::now_unix();
+    let signing_pubkey = state
+        .coordinator()
+        .map(|c| c.signing_pubkey_bytes())
+        .unwrap_or([0u8; 32]);
     let mut bid_record = BidRecord {
         listing_key: listing_record_key.clone(),
         bidder: bidder.clone(),
@@ -208,6 +213,7 @@ pub async fn submit_bid(
         timestamp,
         // Placeholder — will be updated with the actual DHT key after publish
         bid_key: listing_record_key.clone(),
+        signing_pubkey,
     };
     let bid_record_own = bid_ops.publish_bid(bid_record.clone()).await?;
 

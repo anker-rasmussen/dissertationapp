@@ -720,7 +720,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
             })
             .await?;
         seller_registry
-            .register_seller(&seller_str, &catalog_key.to_string())
+            .register_seller(&seller_str, &catalog_key.to_string(), "")
             .await?;
         eprintln!("[E2E] Listing registered in per-seller catalog registry");
 
@@ -805,6 +805,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
             commitment: commitment_seller,
             timestamp: now,
             bid_key: seller_bid_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, seller_bid)
@@ -824,6 +825,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
             commitment: commitment1,
             timestamp: now + 1,
             bid_key: bid1_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops.register_bid(&listing_record, bid1).await?;
         listing_ops
@@ -845,6 +847,7 @@ async fn test_e2e_real_devnet_3_party_auction() {
             commitment: commitment2,
             timestamp: now + 2,
             bid_key: bid2_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops.register_bid(&listing_record, bid2).await?;
         listing_ops
@@ -1081,7 +1084,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
             })
             .await?;
         seller_registry
-            .register_seller(&seller_str, &catalog_key.to_string())
+            .register_seller(&seller_str, &catalog_key.to_string(), "")
             .await?;
         eprintln!("[E2E] Listing registered in per-seller catalog registry");
 
@@ -1135,6 +1138,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
             commitment: commitment_seller,
             timestamp: now,
             bid_key: seller_bid_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, seller_bid)
@@ -1154,6 +1158,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
             commitment: commitment1,
             timestamp: now + 1,
             bid_key: bid1_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops.register_bid(&listing_record, bid1).await?;
         listing_ops
@@ -1175,6 +1180,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
             commitment: commitment2,
             timestamp: now + 2,
             bid_key: bid2_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops.register_bid(&listing_record, bid2).await?;
         listing_ops
@@ -1196,6 +1202,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
             commitment: commitment3,
             timestamp: now + 3,
             bid_key: bid3_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops.register_bid(&listing_record, bid3).await?;
         listing_ops
@@ -1217,6 +1224,7 @@ async fn test_e2e_real_devnet_5_party_auction() {
             commitment: commitment4,
             timestamp: now + 4,
             bid_key: bid4_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops.register_bid(&listing_record, bid4).await?;
         listing_ops
@@ -1368,7 +1376,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
             })
             .await?;
         seller_registry
-            .register_seller(&seller_str, &catalog_key.to_string())
+            .register_seller(&seller_str, &catalog_key.to_string(), "")
             .await?;
         eprintln!("[E2E] Listing registered in per-seller catalog registry");
 
@@ -1412,6 +1420,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
             commitment: commitment_seller,
             timestamp: now,
             bid_key: seller_bid_record.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, seller_bid)
@@ -1438,6 +1447,7 @@ async fn test_e2e_real_devnet_10_party_auction() {
                 commitment,
                 timestamp: now + i as u64,
                 bid_key: bid_record.key.clone(),
+                signing_pubkey: [0u8; 32],
             };
             seller_bid_ops.register_bid(&listing_record, bid).await?;
             listing_ops
@@ -1812,6 +1822,7 @@ async fn test_e2e_appmessage_bid_announcements() {
             commitment: seller_commitment,
             timestamp: now,
             bid_key: seller_bid_record_dht.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         let seller_bid_ops = BidOperations::new(seller_dht.clone());
         seller_bid_ops
@@ -1854,6 +1865,7 @@ async fn test_e2e_appmessage_bid_announcements() {
             commitment: bidder1_commitment,
             timestamp: now + 1,
             bid_key: bid1_record_dht.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         // Write to the pre-created DHT record (not publish_bid which creates a new one)
         bidder1_dht
@@ -1879,6 +1891,7 @@ async fn test_e2e_appmessage_bid_announcements() {
             commitment: bidder2_commitment,
             timestamp: now + 2,
             bid_key: bid2_record_dht.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         // Write to the pre-created DHT record (not publish_bid which creates a new one)
         bidder2_dht
@@ -2017,6 +2030,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
             commitment: seller_commitment,
             timestamp: now, // Earliest = party 0
             bid_key: seller_bid_record_dht.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         let seller_bid_ops = BidOperations::new(seller_dht.clone());
         seller_bid_ops
@@ -2058,6 +2072,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
             commitment: bidder1_commitment,
             timestamp: now + 1,
             bid_key: bid1_record_dht.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, bid1.clone())
@@ -2089,6 +2104,7 @@ async fn test_e2e_real_bid_flow_with_commitments() {
             commitment: bidder2_commitment,
             timestamp: now + 2,
             bid_key: bid2_record_dht.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, bid2.clone())
@@ -2261,6 +2277,7 @@ async fn test_e2e_full_mpc_execution() {
             commitment: make_real_commitment(100, &seller_nonce),
             timestamp: now,
             bid_key: seller_bid_rec.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         let seller_bid_ops = BidOperations::new(seller_dht.clone());
         seller_bid_ops
@@ -2298,6 +2315,7 @@ async fn test_e2e_full_mpc_execution() {
             commitment: make_real_commitment(200, &b1_nonce),
             timestamp: now + 1,
             bid_key: b1_rec.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, bid1.clone())
@@ -2323,6 +2341,7 @@ async fn test_e2e_full_mpc_execution() {
             commitment: make_real_commitment(150, &b2_nonce),
             timestamp: now + 2,
             bid_key: b2_rec.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, bid2.clone())
@@ -2513,6 +2532,7 @@ async fn test_e2e_winner_verification_and_decryption() {
             commitment: make_real_commitment(50, &s_nonce),
             timestamp: now,
             bid_key: s_bid_rec.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         let seller_bid_ops = BidOperations::new(seller_dht.clone());
         seller_bid_ops
@@ -2550,6 +2570,7 @@ async fn test_e2e_winner_verification_and_decryption() {
             commitment: make_real_commitment(300, &b1_nonce),
             timestamp: now + 1,
             bid_key: b1_rec.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, bid1.clone())
@@ -2575,6 +2596,7 @@ async fn test_e2e_winner_verification_and_decryption() {
             commitment: make_real_commitment(100, &b2_nonce),
             timestamp: now + 2,
             bid_key: b2_rec.key.clone(),
+            signing_pubkey: [0u8; 32],
         };
         seller_bid_ops
             .register_bid(&listing_record, bid2.clone())

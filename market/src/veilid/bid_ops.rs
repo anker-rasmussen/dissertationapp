@@ -136,6 +136,7 @@ mod tests {
             commitment: [bidder_id; 32],
             timestamp: 1000,
             bid_key: make_test_record_key(bidder_id as u64),
+            signing_pubkey: [bidder_id; 32],
         }
     }
 

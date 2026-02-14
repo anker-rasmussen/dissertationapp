@@ -39,6 +39,20 @@ fn get_data_dir() -> PathBuf {
     base_dir.join(format!("smpc-auction-node-{}", node_offset))
 }
 
+/// Runtime security checks for network-mode specific requirements.
+fn validate_runtime_security() -> MarketResult<()> {
+    if std::env::var("MARKET_MODE").as_deref() == Ok("public")
+        && std::env::var(config::MARKET_NETWORK_KEY_ENV).is_err()
+    {
+        return Err(MarketError::Config(format!(
+            "Public mode requires an explicit {} env var. \
+             Refusing to use default development network key.",
+            config::MARKET_NETWORK_KEY_ENV
+        )));
+    }
+    Ok(())
+}
+
 /// Preflight check: ensure MP-SPDZ is ready before starting the node.
 ///
 /// Verifies that the MP-SPDZ directory, binary, and compiler exist.
@@ -127,6 +141,8 @@ fn ensure_mpspdz_ready() -> MarketResult<()> {
 fn main() -> MarketResult<()> {
     init_logging();
     info!("Starting SMPC Auction Marketplace");
+
+    validate_runtime_security()?;
 
     // Preflight: ensure MP-SPDZ artifacts are ready
     ensure_mpspdz_ready()?;
@@ -234,6 +250,7 @@ fn main() -> MarketResult<()> {
                 }
             };
             let network_key = market::config::network_key();
+            let coordinator_shutdown = shutdown_bg.clone();
             let coordinator = Arc::new(market::AuctionCoordinator::new(
                 api,
                 dht,
@@ -241,7 +258,7 @@ fn main() -> MarketResult<()> {
                 bid_storage,
                 node_offset,
                 &network_key,
-                shutdown_bg,
+                coordinator_shutdown,
             ));
 
             coordinator.clone().start_monitoring();
@@ -257,28 +274,47 @@ fn main() -> MarketResult<()> {
             // Process updates
             if let Some(mut rx) = update_rx {
                 loop {
-                    match rx.recv().await {
-                        Some(veilid_core::VeilidUpdate::AppMessage(msg)) => {
-                            let coordinator = coordinator_holder.read().clone();
-                            if let Some(coordinator) = coordinator {
-                                if let Err(e) = coordinator
-                                    .process_app_message(msg.message().to_vec())
-                                    .await
-                                {
-                                    error!("Failed to process MPC message: {}", e);
+                    tokio::select! {
+                        () = shutdown_bg.cancelled() => {
+                            info!("Shutdown signal received in node thread");
+                            break;
+                        }
+                        maybe_update = rx.recv() => {
+                            match maybe_update {
+                                Some(veilid_core::VeilidUpdate::AppMessage(msg)) => {
+                                    let coordinator = coordinator_holder.read().clone();
+                                    if let Some(coordinator) = coordinator {
+                                        if let Err(e) = coordinator
+                                            .process_app_message(msg.message().to_vec())
+                                            .await
+                                        {
+                                            error!("Failed to process MPC message: {}", e);
+                                        }
+                                    }
+                                }
+                                Some(_) => {}
+                                None => {
+                                    warn!("Update channel closed");
+                                    break;
                                 }
                             }
-                        }
-                        Some(_) => {}
-                        None => {
-                            warn!("Update channel closed");
-                            break;
                         }
                     }
                 }
             } else {
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                shutdown_bg.cancelled().await;
+            }
+
+            // Ensure node is detached and shut down before thread exits.
+            let mut node = node_holder.write().take();
+            if let Some(node_ref) = node.as_ref() {
+                if let Err(e) = node_ref.detach().await {
+                    warn!("Detach during shutdown failed (continuing): {}", e);
+                }
+            }
+            if let Some(node_ref) = node.as_mut() {
+                if let Err(e) = node_ref.shutdown().await {
+                    error!("Node shutdown failed: {}", e);
                 }
             }
         });

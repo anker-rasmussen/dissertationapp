@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -94,10 +95,25 @@ type CoordinatorLogic =
 /// Delegates shared state management (watched listings, bid announcements,
 /// decryption keys) to [`AuctionLogic`] so the same code path tested with
 /// mocks is used in production.
+///
+/// # Lock ordering
+///
+/// When acquiring multiple locks, always follow this order to prevent deadlocks:
+///
+/// 1. `registry_ops`
+/// 2. `pending_seller_registrations`
+/// 3. `owned_listings`
+/// 4. `pending_bid_announcements`
+/// 5. `my_route_blob`
+///
+/// Never hold any of these locks across an `.await` point if possible.
+/// If an async call is needed under lock, re-acquire the lock after awaiting.
 pub struct AuctionCoordinator {
     api: VeilidAPI,
     dht: DHTOperations,
     my_node_id: PublicKey,
+    /// Ed25519 signing key for authenticating outgoing messages.
+    signing_key: SigningKey,
     /// Core auction state machine — the tested generic layer.
     logic: CoordinatorLogic,
     /// Per-seller registry operations (shared via Arc<Mutex>)
@@ -107,7 +123,8 @@ pub struct AuctionCoordinator {
     /// MPC orchestrator (owns tunnel proxy, routes, verifications)
     mpc: Arc<MpcOrchestrator>,
     /// Buffered SellerRegistrations received before the registry key was known.
-    pending_seller_registrations: Arc<Mutex<Vec<(PublicKey, RecordKey)>>>,
+    /// Tuple: (seller_pubkey, catalog_key, signing_pubkey_hex)
+    pending_seller_registrations: Arc<Mutex<Vec<(PublicKey, RecordKey, String)>>>,
     /// Bid announcements that failed to broadcast (no routes yet) and need retry.
     pending_bid_announcements: Mutex<Vec<(RecordKey, RecordKey)>>,
     /// Our own broadcast private route blob (published to the registry).
@@ -126,12 +143,19 @@ impl AuctionCoordinator {
         network_key: &str,
         shutdown: CancellationToken,
     ) -> Self {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        info!(
+            "Generated Ed25519 signing key: {}",
+            hex::encode(signing_key.verifying_key().to_bytes())
+        );
+
         let mpc = Arc::new(MpcOrchestrator::new(
             api.clone(),
             dht.clone(),
             my_node_id.clone(),
             bid_storage.clone(),
             node_offset,
+            signing_key.clone(),
         ));
 
         let registry_ops = Arc::new(Mutex::new(RegistryOperations::new(
@@ -152,6 +176,7 @@ impl AuctionCoordinator {
             api,
             dht,
             my_node_id,
+            signing_key,
             logic,
             registry_ops,
             owned_listings: Arc::new(Mutex::new(HashMap::new())),
@@ -163,23 +188,43 @@ impl AuctionCoordinator {
         }
     }
 
-    /// Process an incoming AppMessage
+    /// Process an incoming AppMessage.
+    ///
+    /// All messages must be wrapped in a [`SignedEnvelope`]. The signature is
+    /// verified first; then the payload is dispatched as either an
+    /// `AuctionMessage` or an MPC tunnel message.
     pub async fn process_app_message(&self, message: Vec<u8>) -> MarketResult<()> {
-        // Try to parse as AuctionMessage first
-        if let Ok(auction_msg) = AuctionMessage::from_bytes(&message) {
-            self.handle_auction_message(auction_msg).await?;
+        // Step 1: verify the signed envelope
+        let (payload, signer) =
+            super::bid_announcement::SignedEnvelope::verify_and_unwrap(&message)?;
+
+        // Step 2: try to parse as AuctionMessage
+        if let Ok(auction_msg) = AuctionMessage::from_bytes(&payload) {
+            self.handle_auction_message(auction_msg, signer).await?;
             return Ok(());
         }
 
-        // Otherwise, forward to active MPC tunnel proxy
-        if let Some(proxy) = self.mpc.active_tunnel_proxy().lock().await.as_ref() {
-            proxy.process_message(message).await?;
+        // Step 3: forward to active MPC tunnel proxy.
+        // Clone the proxy out of the lock before awaiting process_message
+        // to avoid holding the Mutex across the .await point.
+        let proxy = self.mpc.active_tunnel_proxy().lock().await.clone();
+        if let Some(proxy) = proxy.as_ref() {
+            proxy.process_message(payload, signer).await?;
         }
         Ok(())
     }
 
-    /// Handle auction coordination messages
-    async fn handle_auction_message(&self, message: AuctionMessage) -> MarketResult<()> {
+    /// Handle auction coordination messages.
+    ///
+    /// `signer` is the Ed25519 verifying key bytes from the [`SignedEnvelope`].
+    /// Identity binding to Veilid pubkey happens via `BidRecord.signing_pubkey`
+    /// or `SellerEntry.signing_pubkey` stored in the DHT — the signed envelope
+    /// itself proves the sender owns the signing key.
+    async fn handle_auction_message(
+        &self,
+        message: AuctionMessage,
+        signer: [u8; 32],
+    ) -> MarketResult<()> {
         if !validate_timestamp(message.timestamp(), now_unix()) {
             warn!(
                 "Rejecting message with stale/future timestamp (drift > 5 min): {}",
@@ -239,7 +284,7 @@ impl AuctionCoordinator {
                 catalog_key,
                 timestamp: _,
             } => {
-                self.handle_seller_registration(seller_pubkey, catalog_key)
+                self.handle_seller_registration(seller_pubkey, catalog_key, signer)
                     .await
             }
             AuctionMessage::RegistryAnnouncement {
@@ -319,25 +364,27 @@ impl AuctionCoordinator {
                     bid_value
                 );
 
-                let managers = self.mpc.route_managers().lock().await;
+                // Fetch seller pubkey before taking route-manager locks to avoid
+                // awaiting on DHT while holding async mutexes.
+                let listing_ops = ListingOperations::new(self.dht.clone());
+                let seller_pubkey = match listing_ops.get_listing(&listing_key).await {
+                    Ok(Some(listing)) => Some(listing.seller),
+                    _ => None,
+                };
 
-                if let Some(route_manager) = managers.get(&listing_key) {
-                    let mgr = route_manager.lock().await;
-                    let routes = mgr.received_routes.lock().await;
+                let route_manager = {
+                    let managers = self.mpc.route_managers().lock().await;
+                    managers.get(&listing_key).cloned()
+                };
 
-                    let listing_ops = ListingOperations::new(self.dht.clone());
-                    let seller_pubkey = match listing_ops.get_listing(&listing_key).await {
-                        Ok(Some(listing)) => Some(listing.seller),
-                        _ => None,
+                if let Some(route_manager) = route_manager {
+                    let seller_route = {
+                        let mgr = route_manager.lock().await;
+                        let routes = mgr.received_routes.lock().await;
+                        seller_pubkey
+                            .as_ref()
+                            .and_then(|seller| routes.get(seller).cloned())
                     };
-
-                    let seller_route = seller_pubkey
-                        .as_ref()
-                        .and_then(|seller| routes.get(seller).cloned());
-
-                    drop(routes);
-                    drop(mgr);
-                    drop(managers);
 
                     if let Some(route_id) = seller_route {
                         let message = AuctionMessage::winner_bid_reveal(
@@ -347,7 +394,7 @@ impl AuctionCoordinator {
                             nonce,
                         );
 
-                        let data = message.to_bytes()?;
+                        let data = message.to_signed_bytes(&self.signing_key)?;
                         let routing_context = self.mpc.safe_routing_context()?;
 
                         match routing_context
@@ -499,15 +546,29 @@ impl AuctionCoordinator {
         &self,
         seller_pubkey: PublicKey,
         catalog_key: RecordKey,
+        signer: [u8; 32],
     ) -> MarketResult<()> {
+        let signing_hex = hex::encode(signer);
         info!(
-            "Received SellerRegistration from {} with catalog {}",
-            seller_pubkey, catalog_key
+            "Received SellerRegistration from {} with catalog {} (signer: {})",
+            seller_pubkey, catalog_key, signing_hex
         );
-        let mut ops = self.registry_ops.lock().await;
-        if ops.master_registry_key().is_some() {
+
+        // Check registry state without holding lock across .await
+        let has_registry = {
+            let ops = self.registry_ops.lock().await;
+            ops.master_registry_key().is_some()
+        };
+
+        if has_registry {
+            // Re-acquire for the async register_seller call
+            let mut ops = self.registry_ops.lock().await;
             if let Err(e) = ops
-                .register_seller(&seller_pubkey.to_string(), &catalog_key.to_string())
+                .register_seller(
+                    &seller_pubkey.to_string(),
+                    &catalog_key.to_string(),
+                    &signing_hex,
+                )
                 .await
             {
                 warn!("Failed to register seller {}: {}", seller_pubkey, e);
@@ -518,31 +579,52 @@ impl AuctionCoordinator {
                 seller_pubkey
             );
             let mut pending = self.pending_seller_registrations.lock().await;
-            pending.push((seller_pubkey, catalog_key));
+            pending.push((seller_pubkey, catalog_key, signing_hex));
         }
         Ok(())
     }
 
     async fn handle_registry_announcement(&self, registry_key: RecordKey) -> MarketResult<()> {
-        let mut ops = self.registry_ops.lock().await;
-        let existing = ops.master_registry_key();
-        if existing.is_none() {
-            info!(
-                "Received RegistryAnnouncement, setting master registry key: {}",
-                registry_key
-            );
-            ops.set_master_registry_key(registry_key);
+        // Phase 1: set the key (short lock scope, no .await inside)
+        let should_replay = {
+            let mut ops = self.registry_ops.lock().await;
+            let existing = ops.master_registry_key();
+            if existing.is_none() {
+                info!(
+                    "Received RegistryAnnouncement, setting master registry key: {}",
+                    registry_key
+                );
+                ops.set_master_registry_key(registry_key);
+                drop(ops);
+                true
+            } else if existing.as_ref() == Some(&registry_key) {
+                debug!("Received duplicate RegistryAnnouncement, ignoring");
+                false
+            } else {
+                debug!(
+                    "Received RegistryAnnouncement with different key {}, keeping first-write-wins key",
+                    registry_key
+                );
+                false
+            }
+        };
 
-            // Replay any SellerRegistrations that arrived before we knew the key
+        // Phase 2: drain pending registrations and replay (locks acquired separately)
+        if should_replay {
             let pending = {
                 let mut buf = self.pending_seller_registrations.lock().await;
                 std::mem::take(&mut *buf)
             };
             if !pending.is_empty() {
                 info!("Replaying {} buffered SellerRegistrations", pending.len());
-                for (seller_pubkey, catalog_key) in pending {
+                for (seller_pubkey, catalog_key, signing_hex) in pending {
+                    let mut ops = self.registry_ops.lock().await;
                     if let Err(e) = ops
-                        .register_seller(&seller_pubkey.to_string(), &catalog_key.to_string())
+                        .register_seller(
+                            &seller_pubkey.to_string(),
+                            &catalog_key.to_string(),
+                            &signing_hex,
+                        )
                         .await
                     {
                         warn!(
@@ -552,15 +634,7 @@ impl AuctionCoordinator {
                     }
                 }
             }
-        } else if existing.as_ref() == Some(&registry_key) {
-            debug!("Received duplicate RegistryAnnouncement, ignoring");
-        } else {
-            debug!(
-                "Received RegistryAnnouncement with different key {}, keeping first-write-wins key",
-                registry_key
-            );
         }
-        drop(ops);
         Ok(())
     }
 
@@ -726,7 +800,7 @@ impl AuctionCoordinator {
             bid_record_key.clone(),
         );
 
-        let data = announcement.to_bytes()?;
+        let data = announcement.to_signed_bytes(&self.signing_key)?;
         let sent = self.broadcast_message(&data).await?;
 
         if sent == 0 {
@@ -761,7 +835,7 @@ impl AuctionCoordinator {
                 bid_record_key.clone(),
             );
 
-            match announcement.to_bytes() {
+            match announcement.to_signed_bytes(&self.signing_key) {
                 Ok(data) => match self.broadcast_message(&data).await {
                     Ok(sent) if sent > 0 => {
                         info!(
@@ -851,7 +925,7 @@ impl AuctionCoordinator {
             catalog_key
         );
         let msg = AuctionMessage::seller_registration(self.my_node_id.clone(), catalog_key.clone());
-        let data = msg.to_bytes()?;
+        let data = msg.to_signed_bytes(&self.signing_key)?;
         let sent = self.broadcast_message(&data).await?;
         info!("Sent SellerRegistration to {} peers", sent);
         Ok(())
@@ -874,7 +948,7 @@ impl AuctionCoordinator {
             registry_key
         );
         let msg = AuctionMessage::registry_announcement(registry_key);
-        let data = msg.to_bytes()?;
+        let data = msg.to_signed_bytes(&self.signing_key)?;
         let sent = self.broadcast_message(&data).await?;
         info!("Sent RegistryAnnouncement to {} peers", sent);
         Ok(())
@@ -883,6 +957,21 @@ impl AuctionCoordinator {
     /// Get a reference to the shared registry operations.
     pub const fn registry_ops(&self) -> &Arc<Mutex<RegistryOperations>> {
         &self.registry_ops
+    }
+
+    /// Get the signing key (for callers that need to sign on behalf of this node).
+    pub const fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
+
+    /// Hex-encoded Ed25519 verifying key for this node's signing identity.
+    pub fn signing_pubkey_hex(&self) -> String {
+        hex::encode(self.signing_key.verifying_key().to_bytes())
+    }
+
+    /// Raw verifying key bytes.
+    pub fn signing_pubkey_bytes(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
     }
 
     /// Fetch all listings via two-hop discovery. Delegates to `registry_ops`.

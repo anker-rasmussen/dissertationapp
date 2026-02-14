@@ -1,3 +1,4 @@
+use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use veilid_core::{RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target, VeilidAPI};
 
+use super::bid_announcement::{bincode_deserialize_limited, SignedEnvelope};
 use crate::error::{MarketError, MarketResult};
 
 /// Calculate the base port for a given node offset.
@@ -50,6 +52,11 @@ struct MpcTunnelProxyInner {
     api: VeilidAPI,
     party_id: usize,
     party_routes: HashMap<usize, RouteId>,
+    /// Reverse mapping: signer pubkey bytes → party id.
+    /// Built from `party_signers` at construction time.
+    signer_to_party: HashMap<[u8; 32], usize>,
+    /// Signing key for outgoing messages.
+    signing_key: SigningKey,
     base_port: u16,
     /// Active sessions: Map<RemotePartyID, TcpStream>
     /// Note: This simple model assumes one connection per party pair (which MP-SPDZ usually does).
@@ -60,11 +67,18 @@ struct MpcTunnelProxyInner {
 }
 
 impl MpcTunnelProxy {
+    /// Create a new MPC tunnel proxy.
+    ///
+    /// `party_signers` maps party ID → Ed25519 verifying key bytes, used
+    /// to authenticate incoming MPC messages (the envelope signer must match
+    /// the expected party).
     pub fn new(
         api: VeilidAPI,
         party_id: usize,
         party_routes: HashMap<usize, RouteId>,
         node_offset: u16,
+        signing_key: SigningKey,
+        party_signers: &HashMap<usize, [u8; 32]>,
     ) -> Self {
         // Offset ports based on node to avoid conflicts when running multiple nodes on same machine
         // Node 5: base 5050
@@ -72,9 +86,15 @@ impl MpcTunnelProxy {
         // Node 7: base 5070
         let base_port = base_port_for_offset(node_offset);
 
+        // Build reverse mapping: signer → party_id
+        let signer_to_party: HashMap<[u8; 32], usize> = party_signers
+            .iter()
+            .map(|(&pid, &key)| (key, pid))
+            .collect();
+
         info!(
-            "MPC TunnelProxy for Party {}: using base port {} (node offset {})",
-            party_id, base_port, node_offset
+            "MPC TunnelProxy for Party {}: using base port {} (node offset {}), {} authenticated peers",
+            party_id, base_port, node_offset, signer_to_party.len()
         );
 
         Self {
@@ -82,6 +102,8 @@ impl MpcTunnelProxy {
                 api,
                 party_id,
                 party_routes,
+                signer_to_party,
+                signing_key,
                 base_port,
                 sessions: Mutex::new(HashMap::new()),
                 pending_data: Mutex::new(HashMap::new()),
@@ -110,6 +132,15 @@ impl MpcTunnelProxy {
         }
 
         Ok(())
+    }
+
+    /// Serialize an MPC message and wrap it in a signed envelope.
+    fn sign_mpc_message(&self, msg: &MpcMessage) -> MarketResult<Vec<u8>> {
+        let payload = bincode::serialize(msg).map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize MPC message: {e}"))
+        })?;
+        let envelope = SignedEnvelope::sign(payload, &self.inner.signing_key)?;
+        envelope.to_bytes()
     }
 
     /// Cleanup resources: clear active sessions to drop TCP connections.
@@ -172,7 +203,7 @@ impl MpcTunnelProxy {
             let open_msg = MpcMessage::Open {
                 source_party_id: self.inner.party_id,
             };
-            let data = bincode::serialize(&open_msg)?;
+            let data = self.sign_mpc_message(&open_msg)?;
             ctx.app_message(Target::RouteId(target_route.clone()), data)
                 .await?;
 
@@ -180,6 +211,7 @@ impl MpcTunnelProxy {
             let ctx_clone = ctx.clone();
             let target_route_clone = target_route.clone();
             let my_pid = self.inner.party_id;
+            let proxy_for_send = self.clone();
 
             let mut buf = vec![0u8; 31000]; // Keep under 32KB with bincode envelope overhead
             loop {
@@ -196,7 +228,13 @@ impl MpcTunnelProxy {
                     source_party_id: my_pid,
                     payload: buf[..n].to_vec(),
                 };
-                let data = bincode::serialize(&msg)?;
+                let data = match proxy_for_send.sign_mpc_message(&msg) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        error!("Failed to sign MPC message: {}", e);
+                        break;
+                    }
+                };
 
                 if let Err(e) = ctx_clone
                     .app_message(Target::RouteId(target_route_clone.clone()), data)
@@ -211,7 +249,13 @@ impl MpcTunnelProxy {
             let close_msg = MpcMessage::Close {
                 source_party_id: my_pid,
             };
-            let data = bincode::serialize(&close_msg)?;
+            let data = match self.sign_mpc_message(&close_msg) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("Failed to sign Close message: {}", e);
+                    return Ok(());
+                }
+            };
             let _ = ctx_clone
                 .app_message(Target::RouteId(target_route_clone), data)
                 .await;
@@ -224,10 +268,40 @@ impl MpcTunnelProxy {
         }
     }
 
-    /// Process incoming Veilid message (AppMessage)
+    /// Process incoming Veilid message (already unwrapped from [`SignedEnvelope`]).
+    ///
+    /// `signer` is the Ed25519 verifying key from the envelope. The method
+    /// verifies that the claimed `source_party_id` matches the signer via the
+    /// `signer_to_party` reverse mapping built at construction.
     #[allow(clippy::too_many_lines)]
-    pub async fn process_message(&self, message: Vec<u8>) -> MarketResult<()> {
-        let mpc_msg: MpcMessage = bincode::deserialize(&message)?;
+    pub async fn process_message(&self, message: Vec<u8>, signer: [u8; 32]) -> MarketResult<()> {
+        let mpc_msg: MpcMessage = bincode_deserialize_limited(&message)?;
+
+        // Authenticate: verify the signer corresponds to the claimed party ID.
+        let claimed_party = match &mpc_msg {
+            MpcMessage::Open { source_party_id }
+            | MpcMessage::Data {
+                source_party_id, ..
+            }
+            | MpcMessage::Close { source_party_id } => *source_party_id,
+        };
+        if let Some(&expected_party) = self.inner.signer_to_party.get(&signer) {
+            if expected_party != claimed_party {
+                warn!(
+                    "MPC tunnel auth failed: signer maps to party {} but message claims party {}",
+                    expected_party, claimed_party
+                );
+                return Err(MarketError::Crypto("MPC tunnel party ID mismatch".into()));
+            }
+        } else {
+            warn!(
+                "MPC tunnel: unknown signer {}, rejecting message",
+                hex::encode(signer)
+            );
+            return Err(MarketError::Crypto(
+                "MPC tunnel message from unknown signer".into(),
+            ));
+        }
 
         match mpc_msg {
             MpcMessage::Open { source_party_id } => {
@@ -330,7 +404,7 @@ impl MpcTunnelProxy {
                                         source_party_id: my_pid,
                                         payload: buf[..n].to_vec(),
                                     };
-                                    if let Ok(data) = bincode::serialize(&msg) {
+                                    if let Ok(data) = proxy.sign_mpc_message(&msg) {
                                         let _ = ctx
                                             .app_message(Target::RouteId(route.clone()), data)
                                             .await;

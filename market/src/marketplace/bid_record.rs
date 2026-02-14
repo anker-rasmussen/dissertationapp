@@ -22,6 +22,12 @@ pub struct BidRecord {
 
     /// DHT key where this bid record is stored
     pub bid_key: RecordKey,
+
+    /// Ed25519 signing public key for message authentication.
+    /// Only the BidRecord owner can write this; verified against
+    /// the `SignedEnvelope.signer` field on incoming messages.
+    #[serde(default)]
+    pub signing_pubkey: [u8; 32],
 }
 
 impl BidRecord {
@@ -152,6 +158,7 @@ mod tests {
             commitment: [bidder_id; 32],
             timestamp: 1000,
             bid_key: make_test_record_key(bidder_id as u64),
+            signing_pubkey: [bidder_id; 32],
         }
     }
 
