@@ -42,9 +42,7 @@ impl BidRecord {
 
     /// Deserialize from CBOR
     pub fn from_cbor(data: &[u8]) -> Result<Self, MarketError> {
-        ciborium::de::from_reader(data).map_err(|e| {
-            MarketError::Serialization(format!("Failed to deserialize bid record: {e}"))
-        })
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 }
 
@@ -89,22 +87,33 @@ impl BidIndex {
         }
     }
 
-    /// Get bidders sorted by bid timestamp (ascending), with pubkey as tiebreaker.
-    /// The seller's auto-bid (created at listing time) always has the earliest
-    /// timestamp, making them party 0. Remaining bidders are ordered by time.
-    pub fn sorted_bidders(&self) -> Vec<PublicKey> {
-        let mut bids_sorted: Vec<_> = self.bids.iter().collect();
-        bids_sorted.sort_by(|a, b| {
-            a.timestamp
-                .cmp(&b.timestamp)
-                .then_with(|| a.bidder.cmp(&b.bidder))
-        });
-        bids_sorted.into_iter().map(|b| b.bidder.clone()).collect()
+    /// Get bidders sorted deterministically by pubkey.
+    /// Seller (matching seller_pubkey) is always party 0.
+    /// Remaining bidders are sorted by pubkey bytes (lexicographic).
+    pub fn sorted_bidders(&self, seller: &PublicKey) -> Vec<PublicKey> {
+        // Partition: seller vs non-seller bids
+        let (seller_bids, mut non_seller_bids): (Vec<_>, Vec<_>) =
+            self.bids.iter().partition(|b| &b.bidder == seller);
+
+        // Sort non-seller bids by pubkey only
+        non_seller_bids.sort_by(|a, b| a.bidder.cmp(&b.bidder));
+
+        // Return seller first, then sorted non-sellers
+        if let Some(seller_bid) = seller_bids.first() {
+            let mut result = vec![seller_bid.bidder.clone()];
+            result.extend(non_seller_bids.into_iter().map(|b| b.bidder.clone()));
+            result
+        } else {
+            // No seller bid found, just sort all by pubkey
+            let mut all_bids: Vec<_> = self.bids.iter().collect();
+            all_bids.sort_by(|a, b| a.bidder.cmp(&b.bidder));
+            all_bids.into_iter().map(|b| b.bidder.clone()).collect()
+        }
     }
 
     /// Get party ID for a specific bidder
-    pub fn get_party_id(&self, bidder: &PublicKey) -> Option<usize> {
-        let sorted = self.sorted_bidders();
+    pub fn get_party_id(&self, bidder: &PublicKey, seller: &PublicKey) -> Option<usize> {
+        let sorted = self.sorted_bidders(seller);
         sorted.iter().position(|b| b == bidder)
     }
 
@@ -117,9 +126,7 @@ impl BidIndex {
     }
 
     pub fn from_cbor(data: &[u8]) -> Result<Self, MarketError> {
-        ciborium::de::from_reader(data).map_err(|e| {
-            MarketError::Serialization(format!("Failed to deserialize bid index: {e}"))
-        })
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 
     /// Merge another index into this one
@@ -218,44 +225,51 @@ mod tests {
         let listing_key = make_test_key();
         let mut index = BidIndex::new(listing_key.clone());
 
-        // Add bids with different timestamps (all use default timestamp=1000)
-        // Since all have same timestamp, falls back to pubkey sort
+        // Add bids (seller is bidder 1)
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
 
-        let sorted = index.sorted_bidders();
+        let seller = make_bidder(1);
+        let sorted = index.sorted_bidders(&seller);
         assert_eq!(sorted.len(), 3);
 
-        // All bids have timestamp=1000, so sorted by pubkey string as tiebreaker
-        for i in 0..sorted.len() - 1 {
-            assert!(sorted[i].to_string() <= sorted[i + 1].to_string());
+        // Seller should be first (party 0)
+        assert_eq!(sorted[0], make_bidder(1));
+
+        // Remaining bidders sorted by pubkey
+        for i in 1..sorted.len() - 1 {
+            assert!(sorted[i] <= sorted[i + 1]);
         }
     }
 
     #[test]
-    fn test_bid_index_sorted_bidders_by_timestamp() {
+    fn test_bid_index_sorted_bidders_by_pubkey() {
         let time = MockTime::new(2000);
         let listing_key = make_test_key();
         let mut index = BidIndex::new(listing_key.clone());
 
-        // Create bids with distinct timestamps
+        // Create bids with distinct timestamps (timestamps are now ignored)
         let mut bid3 = make_bid_record(listing_key.clone(), 3);
-        bid3.timestamp = 3000; // Latest
+        bid3.timestamp = 3000; // Latest timestamp (ignored)
         let mut bid1 = make_bid_record(listing_key.clone(), 1);
-        bid1.timestamp = 1000; // Earliest
+        bid1.timestamp = 1000; // Earliest timestamp (ignored)
         let mut bid2 = make_bid_record(listing_key.clone(), 2);
-        bid2.timestamp = 2000; // Middle
+        bid2.timestamp = 2000; // Middle timestamp (ignored)
 
         index.add_bid_with_time(bid3, &time);
         index.add_bid_with_time(bid1, &time);
         index.add_bid_with_time(bid2, &time);
 
-        let sorted = index.sorted_bidders();
+        // Seller is bidder 1
+        let seller = make_bidder(1);
+        let sorted = index.sorted_bidders(&seller);
         assert_eq!(sorted.len(), 3);
 
-        // Should be sorted by timestamp: bidder1 (ts=1000), bidder2 (ts=2000), bidder3 (ts=3000)
+        // Seller should be party 0 regardless of timestamp
         assert_eq!(sorted[0], make_bidder(1));
+
+        // Remaining bidders sorted by pubkey only
         assert_eq!(sorted[1], make_bidder(2));
         assert_eq!(sorted[2], make_bidder(3));
     }
@@ -270,10 +284,12 @@ mod tests {
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
 
+        let seller = make_bidder(1);
+
         // Each bidder should have a unique party ID
-        let id1 = index.get_party_id(&make_bidder(1));
-        let id2 = index.get_party_id(&make_bidder(2));
-        let id3 = index.get_party_id(&make_bidder(3));
+        let id1 = index.get_party_id(&make_bidder(1), &seller);
+        let id2 = index.get_party_id(&make_bidder(2), &seller);
+        let id3 = index.get_party_id(&make_bidder(3), &seller);
 
         assert!(id1.is_some());
         assert!(id2.is_some());
@@ -294,8 +310,9 @@ mod tests {
         let listing_key = make_test_key();
         let index = BidIndex::new(listing_key);
 
+        let seller = make_bidder(1);
         let unknown_bidder = make_bidder(99);
-        assert!(index.get_party_id(&unknown_bidder).is_none());
+        assert!(index.get_party_id(&unknown_bidder, &seller).is_none());
     }
 
     #[test]
@@ -304,7 +321,6 @@ mod tests {
         let listing_key = make_test_key();
 
         // Create two indices with same bids added in different order
-        // Both bids have same default timestamp (1000), so pubkey tiebreaker applies
         let mut index1 = BidIndex::new(listing_key.clone());
         index1.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
         index1.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
@@ -314,23 +330,30 @@ mod tests {
         index2.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
 
         // Party IDs should be the same regardless of insertion order
+        let seller = make_bidder(1);
         let bidder1 = make_bidder(1);
         let bidder2 = make_bidder(2);
 
-        assert_eq!(index1.get_party_id(&bidder1), index2.get_party_id(&bidder1));
-        assert_eq!(index1.get_party_id(&bidder2), index2.get_party_id(&bidder2));
+        assert_eq!(
+            index1.get_party_id(&bidder1, &seller),
+            index2.get_party_id(&bidder1, &seller)
+        );
+        assert_eq!(
+            index1.get_party_id(&bidder2, &seller),
+            index2.get_party_id(&bidder2, &seller)
+        );
     }
 
     #[test]
-    fn test_bid_index_deterministic_party_ids_by_timestamp() {
+    fn test_bid_index_deterministic_party_ids_seller_first() {
         let time = MockTime::new(5000);
         let listing_key = make_test_key();
 
-        // Create bids with distinct timestamps
+        // Create bids with distinct timestamps (timestamps now ignored)
         let mut bid1 = make_bid_record(listing_key.clone(), 1);
-        bid1.timestamp = 2000;
+        bid1.timestamp = 2000; // Later timestamp (ignored)
         let mut bid2 = make_bid_record(listing_key.clone(), 2);
-        bid2.timestamp = 1000; // Earlier = lower party ID
+        bid2.timestamp = 1000; // Earlier timestamp (ignored)
 
         // Add in different orders
         let mut index1 = BidIndex::new(listing_key.clone());
@@ -341,15 +364,22 @@ mod tests {
         index2.add_bid_with_time(bid2, &time);
         index2.add_bid_with_time(bid1, &time);
 
+        let seller = make_bidder(1);
         let bidder1 = make_bidder(1);
         let bidder2 = make_bidder(2);
 
-        assert_eq!(index1.get_party_id(&bidder1), index2.get_party_id(&bidder1));
-        assert_eq!(index1.get_party_id(&bidder2), index2.get_party_id(&bidder2));
+        assert_eq!(
+            index1.get_party_id(&bidder1, &seller),
+            index2.get_party_id(&bidder1, &seller)
+        );
+        assert_eq!(
+            index1.get_party_id(&bidder2, &seller),
+            index2.get_party_id(&bidder2, &seller)
+        );
 
-        // Bidder 2 has earlier timestamp (1000) so should be party 0
-        assert_eq!(index1.get_party_id(&bidder2), Some(0));
-        assert_eq!(index1.get_party_id(&bidder1), Some(1));
+        // Seller (bidder 1) should always be party 0, regardless of timestamp
+        assert_eq!(index1.get_party_id(&bidder1, &seller), Some(0));
+        assert_eq!(index1.get_party_id(&bidder2, &seller), Some(1));
     }
 
     #[test]

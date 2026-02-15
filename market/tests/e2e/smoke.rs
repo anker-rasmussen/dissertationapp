@@ -1356,13 +1356,10 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
         let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
         assert_eq!(bid_index.bids.len(), 3, "Should have 3 bids");
 
-        let sorted = bid_index.sorted_bidders();
+        let sorted = bid_index.sorted_bidders(&seller_id);
         assert_eq!(sorted.len(), 3);
-        // Seller has earliest timestamp (now) → party 0
-        assert_eq!(
-            sorted[0], seller_id,
-            "Seller (earliest timestamp) should be party 0"
-        );
+        // Seller is always party 0 (by design of sorted_bidders)
+        assert_eq!(sorted[0], seller_id, "Seller should always be party 0");
         eprintln!("[E2E] Party ordering verified: seller is party 0");
 
         // ===== Verify commitments match =====

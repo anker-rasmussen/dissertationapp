@@ -57,6 +57,134 @@ pub fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Timeout for individual app_message sends.
+pub const APP_MESSAGE_TIMEOUT_SECS: u64 = 10;
+
+/// Timeout for auctions stuck in pending-MPC state.
+pub const AUCTION_STALE_TIMEOUT_SECS: u64 = 600;
+
+/// Default node offset for devnet deployments.
+/// Determines port (5160 + offset) and IP (1.2.3.1 + offset).
+pub const DEFAULT_NODE_OFFSET: u16 = 9;
+
+/// Default bootstrap nodes for devnet.
+pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &["udp://1.2.3.1:5160"];
+
+/// Default update channel capacity for Veilid updates.
+pub const DEFAULT_UPDATE_CHANNEL_CAPACITY: usize = 4096;
+
+/// Default timeout for attachment operations (waiting for AttachedWeak state).
+pub const DEFAULT_ATTACHMENT_TIMEOUT_SECS: u64 = 20;
+
+/// Default wait time for MPC route establishment.
+pub const DEFAULT_MPC_ROUTE_WAIT_SECS: u64 = 20;
+
+/// Default timeout for MPC execution (mascot-party.x process).
+pub const DEFAULT_MPC_EXECUTION_TIMEOUT_SECS: u64 = 120;
+
+use std::path::PathBuf;
+
+/// Centralized configuration for the marketplace application.
+///
+/// This struct consolidates all runtime configuration parameters,
+/// enabling easier testing, deployment flexibility, and reduced
+/// coupling to environment variables throughout the codebase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketConfig {
+    /// Network key for shared-keypair registry derivation.
+    pub network_key: String,
+    /// Bootstrap node addresses (e.g., "udp://1.2.3.1:5160").
+    pub bootstrap_nodes: Vec<String>,
+    /// Path to MP-SPDZ installation directory.
+    pub mp_spdz_dir: PathBuf,
+    /// Whether to use insecure (unencrypted) protected storage.
+    /// Should be `false` in production.
+    pub insecure_storage: bool,
+    /// Port offset for devnet deployments (base port = 5160).
+    pub node_offset: u16,
+    /// Timeout (seconds) for Veilid attachment operations.
+    pub attachment_timeout_secs: u64,
+    /// Wait time (seconds) for MPC route establishment.
+    pub mpc_route_wait_secs: u64,
+    /// Timeout (seconds) for MPC execution (mascot-party.x).
+    pub mpc_execution_timeout_secs: u64,
+    /// Timeout (seconds) for individual app_message sends.
+    pub app_message_timeout_secs: u64,
+    /// Capacity for Veilid update channel.
+    pub update_channel_capacity: usize,
+    /// Timeout (seconds) for auctions stuck in pending-MPC state.
+    pub auction_stale_timeout_secs: u64,
+}
+
+impl MarketConfig {
+    /// Construct configuration from environment variables with sensible defaults.
+    ///
+    /// Environment variables:
+    /// - `MARKET_NETWORK_KEY`: Network key (default: "development-network-2025")
+    /// - `MP_SPDZ_DIR`: MP-SPDZ directory path
+    /// - `MARKET_NODE_OFFSET`: Port offset for devnet (default: 9)
+    /// - `MARKET_INSECURE_STORAGE`: Set to "true" to enable (default: false)
+    ///
+    /// All timeout values use hardcoded defaults unless explicitly overridden
+    /// via `with_*` builder methods.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let network_key = network_key();
+
+        let mp_spdz_dir = std::env::var(MP_SPDZ_DIR_ENV)
+            .unwrap_or_else(|_| DEFAULT_MP_SPDZ_DIR.to_string())
+            .into();
+
+        let node_offset = std::env::var("MARKET_NODE_OFFSET")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(DEFAULT_NODE_OFFSET);
+
+        let insecure_storage = std::env::var("MARKET_INSECURE_STORAGE")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        Self {
+            network_key,
+            bootstrap_nodes: DEFAULT_BOOTSTRAP_NODES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            mp_spdz_dir,
+            insecure_storage,
+            node_offset,
+            attachment_timeout_secs: DEFAULT_ATTACHMENT_TIMEOUT_SECS,
+            mpc_route_wait_secs: DEFAULT_MPC_ROUTE_WAIT_SECS,
+            mpc_execution_timeout_secs: DEFAULT_MPC_EXECUTION_TIMEOUT_SECS,
+            app_message_timeout_secs: APP_MESSAGE_TIMEOUT_SECS,
+            update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
+            auction_stale_timeout_secs: AUCTION_STALE_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl Default for MarketConfig {
+    /// Default configuration matches current hardcoded values for devnet.
+    fn default() -> Self {
+        Self {
+            network_key: DEFAULT_NETWORK_KEY.to_string(),
+            bootstrap_nodes: DEFAULT_BOOTSTRAP_NODES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            mp_spdz_dir: DEFAULT_MP_SPDZ_DIR.into(),
+            insecure_storage: false,
+            node_offset: DEFAULT_NODE_OFFSET,
+            attachment_timeout_secs: DEFAULT_ATTACHMENT_TIMEOUT_SECS,
+            mpc_route_wait_secs: DEFAULT_MPC_ROUTE_WAIT_SECS,
+            mpc_execution_timeout_secs: DEFAULT_MPC_EXECUTION_TIMEOUT_SECS,
+            app_message_timeout_secs: APP_MESSAGE_TIMEOUT_SECS,
+            update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
+            auction_stale_timeout_secs: AUCTION_STALE_TIMEOUT_SECS,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,12 +197,14 @@ mod tests {
     #[test]
     fn test_now_unix_reasonable() {
         let now = now_unix();
-        // Verify timestamp is reasonable (after 2023-11-01)
-        // 1700000000 = 2023-11-14 22:13:20 UTC
-        assert!(now > 1700000000, "Timestamp should be after 2023");
-        // Verify it's not too far in the future (before 2030)
-        // 1900000000 = 2030-03-15 01:06:40 UTC
-        assert!(now < 1900000000, "Timestamp should be before 2030");
+        // Verify timestamp is reasonable (after 2023)
+        // Unix epoch: 1970-01-01, so (2023 - 1970) * 365.25 days * 86400 sec/day ≈ 1672531200
+        const YEAR_2023: u64 = 1672531200;
+        assert!(now > YEAR_2023, "Timestamp should be after 2023");
+        // Verify it's not too far in the future (before 2035)
+        // (2035 - 1970) * 365.25 days * 86400 sec/day ≈ 2051222400
+        const YEAR_2035: u64 = 2051222400;
+        assert!(now < YEAR_2035, "Timestamp should be before 2035");
     }
 
     #[test]
@@ -111,5 +241,87 @@ mod tests {
     fn test_dht_subkey_count() {
         // Verify subkey count matches the number of defined subkeys
         assert_eq!(DHT_SUBKEY_COUNT, 4);
+    }
+
+    #[test]
+    fn test_market_config_default() {
+        let config = MarketConfig::default();
+        assert_eq!(config.network_key, DEFAULT_NETWORK_KEY);
+        assert_eq!(config.bootstrap_nodes, vec!["udp://1.2.3.1:5160"]);
+        assert_eq!(config.mp_spdz_dir.to_str().unwrap(), DEFAULT_MP_SPDZ_DIR);
+        assert!(!config.insecure_storage);
+        assert_eq!(config.node_offset, DEFAULT_NODE_OFFSET);
+        assert_eq!(
+            config.attachment_timeout_secs,
+            DEFAULT_ATTACHMENT_TIMEOUT_SECS
+        );
+        assert_eq!(config.mpc_route_wait_secs, DEFAULT_MPC_ROUTE_WAIT_SECS);
+        assert_eq!(
+            config.mpc_execution_timeout_secs,
+            DEFAULT_MPC_EXECUTION_TIMEOUT_SECS
+        );
+        assert_eq!(config.app_message_timeout_secs, APP_MESSAGE_TIMEOUT_SECS);
+        assert_eq!(
+            config.update_channel_capacity,
+            DEFAULT_UPDATE_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            config.auction_stale_timeout_secs,
+            AUCTION_STALE_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn test_market_config_from_env_defaults() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var(MARKET_NETWORK_KEY_ENV);
+        std::env::remove_var(MP_SPDZ_DIR_ENV);
+        std::env::remove_var("MARKET_NODE_OFFSET");
+        std::env::remove_var("MARKET_INSECURE_STORAGE");
+
+        let config = MarketConfig::from_env();
+        assert_eq!(config.network_key, DEFAULT_NETWORK_KEY);
+        assert_eq!(config.node_offset, DEFAULT_NODE_OFFSET);
+        assert!(!config.insecure_storage);
+    }
+
+    #[test]
+    fn test_market_config_from_env_override() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var(MARKET_NETWORK_KEY_ENV, "test-network");
+        std::env::set_var(MP_SPDZ_DIR_ENV, "/custom/path");
+        std::env::set_var("MARKET_NODE_OFFSET", "15");
+        std::env::set_var("MARKET_INSECURE_STORAGE", "true");
+
+        let config = MarketConfig::from_env();
+        assert_eq!(config.network_key, "test-network");
+        assert_eq!(config.mp_spdz_dir.to_str().unwrap(), "/custom/path");
+        assert_eq!(config.node_offset, 15);
+        assert!(config.insecure_storage);
+
+        // Clean up
+        std::env::remove_var(MARKET_NETWORK_KEY_ENV);
+        std::env::remove_var(MP_SPDZ_DIR_ENV);
+        std::env::remove_var("MARKET_NODE_OFFSET");
+        std::env::remove_var("MARKET_INSECURE_STORAGE");
+    }
+
+    #[test]
+    fn test_market_config_insecure_storage_case_insensitive() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        for value in ["true", "TRUE", "True", "TrUe"] {
+            std::env::set_var("MARKET_INSECURE_STORAGE", value);
+            let config = MarketConfig::from_env();
+            assert!(config.insecure_storage, "Failed for value: {}", value);
+        }
+
+        for value in ["false", "FALSE", "0", "no", ""] {
+            std::env::set_var("MARKET_INSECURE_STORAGE", value);
+            let config = MarketConfig::from_env();
+            assert!(!config.insecure_storage, "Failed for value: {}", value);
+        }
+
+        std::env::remove_var("MARKET_INSECURE_STORAGE");
     }
 }

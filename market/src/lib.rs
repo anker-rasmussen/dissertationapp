@@ -21,6 +21,7 @@ pub mod crypto;
 pub mod error;
 pub mod marketplace;
 pub mod traits;
+pub mod util;
 pub mod veilid;
 
 pub use error::{MarketError, MarketResult};

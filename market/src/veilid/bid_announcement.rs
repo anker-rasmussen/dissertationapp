@@ -125,9 +125,7 @@ impl BidAnnouncementRegistry {
 
     /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
-        ciborium::from_reader(data).map_err(|e| {
-            MarketError::Serialization(format!("Failed to deserialize bid registry: {e}"))
-        })
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 }
 

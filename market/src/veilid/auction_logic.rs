@@ -221,8 +221,8 @@ where
     }
 
     /// Determine party ID from bid index.
-    pub fn get_my_party_id(&self, bid_index: &BidIndex) -> Option<usize> {
-        let sorted = bid_index.sorted_bidders();
+    pub fn get_my_party_id(&self, bid_index: &BidIndex, seller: &PublicKey) -> Option<usize> {
+        let sorted = bid_index.sorted_bidders(seller);
         sorted.iter().position(|b| b == &self.my_node_id)
     }
 
@@ -512,7 +512,8 @@ mod tests {
         index.bids.push(my_bid);
         index.bids.push(other_bid);
 
-        let party_id = logic.get_my_party_id(&index);
+        let seller = make_test_public_key(1); // Our node is seller
+        let party_id = logic.get_my_party_id(&index, &seller);
         assert!(party_id.is_some());
         // Party ID should be in range [0, 2)
         assert!(party_id.unwrap() < 2);
@@ -536,7 +537,8 @@ mod tests {
         };
         index.bids.push(other_bid);
 
-        let party_id = logic.get_my_party_id(&index);
+        let seller = make_test_public_key(99); // Other node is seller
+        let party_id = logic.get_my_party_id(&index, &seller);
         assert!(party_id.is_none());
     }
 

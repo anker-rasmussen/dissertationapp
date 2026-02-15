@@ -58,13 +58,13 @@ pub struct VeilidNode {
     /// Whether to use insecure (unencrypted) protected storage.
     /// Defaults to `false` for production safety; set to `true` for devnet/test.
     insecure_storage: bool,
-    update_tx: mpsc::UnboundedSender<VeilidUpdate>,
-    update_rx: Option<mpsc::UnboundedReceiver<VeilidUpdate>>,
+    update_tx: mpsc::Sender<VeilidUpdate>,
+    update_rx: Option<mpsc::Receiver<VeilidUpdate>>,
 }
 
 impl VeilidNode {
     pub fn new(data_dir: PathBuf) -> Self {
-        let (update_tx, update_rx) = mpsc::unbounded_channel();
+        let (update_tx, update_rx) = mpsc::channel(4096);
         Self {
             api: None,
             state: Arc::new(RwLock::new(NodeState::default())),
@@ -228,7 +228,9 @@ impl VeilidNode {
 
         let update_callback = Arc::new(move |update: VeilidUpdate| {
             // Forward update to channel for async processing
-            let _ = update_tx.send(update.clone());
+            if let Err(e) = update_tx.try_send(update.clone()) {
+                tracing::warn!("Veilid update channel full, dropping update: {}", e);
+            }
 
             // Update internal state synchronously
             match &update {
@@ -317,7 +319,7 @@ impl VeilidNode {
         self.state.read().clone()
     }
 
-    pub fn take_update_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<VeilidUpdate>> {
+    pub fn take_update_receiver(&mut self) -> Option<mpsc::Receiver<VeilidUpdate>> {
         self.update_rx.take()
     }
 

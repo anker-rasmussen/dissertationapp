@@ -76,8 +76,8 @@ impl MarketRegistry {
         Ok(buffer)
     }
 
-    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
-        ciborium::from_reader(data)
+    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 
     /// Add or update a node's broadcast route, deduplicating by node_id.
@@ -142,8 +142,8 @@ impl SellerCatalog {
         Ok(buffer)
     }
 
-    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
-        ciborium::from_reader(data)
+    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 
     /// Add a listing, deduplicating by key.
