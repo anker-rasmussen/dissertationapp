@@ -188,7 +188,9 @@ fn main() -> MarketResult<()> {
 
             if let Err(e) = node.attach().await {
                 error!("Failed to attach to network: {}", e);
-                let _ = node.shutdown().await;
+                if let Err(e) = node.shutdown().await {
+                    tracing::error!("Failed to shutdown Veilid node: {}", e);
+                }
                 return;
             }
 
@@ -209,7 +211,9 @@ fn main() -> MarketResult<()> {
                     error!(
                         "Timeout waiting for network attachment after {max_wait_secs}s, giving up"
                     );
-                    let _ = node.shutdown().await;
+                    if let Err(e) = node.shutdown().await {
+                        tracing::error!("Failed to shutdown Veilid node: {}", e);
+                    }
                     return;
                 }
                 if retries % 30 == 0 {

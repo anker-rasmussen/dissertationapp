@@ -162,6 +162,7 @@ impl MpcOrchestrator {
         bid_index: BidIndex,
         listing_title: &str,
         peer_route_blobs: &[(String, Vec<u8>)],
+        seller_pubkey: &PublicKey,
     ) -> MarketResult<()> {
         info!("Handling auction end for listing '{}'", listing_title);
 
@@ -180,8 +181,8 @@ impl MpcOrchestrator {
 
         info!("Discovered {} bids for auction", bid_index.bids.len());
 
-        // Sort bidders by timestamp (seller's auto-bid has earliest timestamp = party 0)
-        let sorted_bidders = bid_index.sorted_bidders();
+        // Sort bidders: seller = party 0, remaining sorted by pubkey
+        let sorted_bidders = bid_index.sorted_bidders(seller_pubkey);
 
         // MASCOT MPC requires at least 2 parties.
         // Return Err so the monitoring loop retries — DHT propagation may
@@ -233,6 +234,7 @@ impl MpcOrchestrator {
                         &bid_index,
                         routes,
                         &sorted_bidders,
+                        seller_pubkey,
                     )
                     .await
                 }
@@ -381,6 +383,7 @@ impl MpcOrchestrator {
         bid_index: &BidIndex,
         routes: HashMap<usize, RouteId>,
         all_parties: &[PublicKey],
+        seller_pubkey: &PublicKey,
     ) -> MarketResult<()> {
         info!(
             "Executing {}-party MPC auction as Party {} (MASCOT)",
@@ -398,19 +401,20 @@ impl MpcOrchestrator {
         debug!("Bid value retrieved from local storage");
 
         // Build party_signers map from bid_index: party_id → signing_pubkey.
-        // sorted_bidders() returns pubkeys in party order; match them back to
+        // Use sorted_bidders() to get pubkeys in party order; match them back to
         // BidRecords to extract each party's Ed25519 signing pubkey.
         let party_signers: HashMap<usize, [u8; 32]> = {
-            let mut bids_sorted: Vec<_> = bid_index.bids.iter().collect();
-            bids_sorted.sort_by(|a, b| {
-                a.timestamp
-                    .cmp(&b.timestamp)
-                    .then_with(|| a.bidder.cmp(&b.bidder))
-            });
-            bids_sorted
-                .into_iter()
+            let sorted = bid_index.sorted_bidders(seller_pubkey);
+            sorted
+                .iter()
                 .enumerate()
-                .map(|(pid, bid)| (pid, bid.signing_pubkey))
+                .filter_map(|(pid, pubkey)| {
+                    bid_index
+                        .bids
+                        .iter()
+                        .find(|b| &b.bidder == pubkey)
+                        .map(|bid| (pid, bid.signing_pubkey))
+                })
                 .collect()
         };
 
@@ -518,6 +522,12 @@ impl MpcOrchestrator {
         // Clear active tunnel proxy reference before guard drops
         *self.active_tunnel_proxy.lock().await = None;
         // _cleanup_guard drops here, calling tunnel_proxy.cleanup() + removing hosts file
+
+        // Route manager cleanup is handled by the per-role handlers:
+        //   - Losers: handle_bidder_mpc_result() cleans up immediately
+        //   - No-sale sellers: handle_seller_mpc_result() cleans up immediately
+        //   - Winners: cleaned up after receiving decryption hash (auction_coordinator)
+        //   - Sellers with a sale: cleaned up after sending decryption hash (mpc_verification)
         Ok(())
     }
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use veilid_core::{RouteId, SafetySelection, SafetySpec, Sequencing, Stability, Target, VeilidAPI};
 
@@ -64,6 +65,8 @@ struct MpcTunnelProxyInner {
     sessions: Mutex<HashMap<usize, tokio::net::tcp::OwnedWriteHalf>>,
     /// Buffer for data received before Open message (race condition)
     pending_data: Mutex<HashMap<usize, Vec<Vec<u8>>>>,
+    /// Cancellation token for graceful shutdown of TCP listener tasks.
+    cancel_token: CancellationToken,
 }
 
 impl MpcTunnelProxy {
@@ -107,6 +110,7 @@ impl MpcTunnelProxy {
                 base_port,
                 sessions: Mutex::new(HashMap::new()),
                 pending_data: Mutex::new(HashMap::new()),
+                cancel_token: CancellationToken::new(),
             }),
         }
     }
@@ -123,9 +127,13 @@ impl MpcTunnelProxy {
             let listen_port = party_port(self.inner.base_port, pid);
             let proxy = self.clone();
             let route_id = route_id.clone();
+            let cancel_token = self.inner.cancel_token.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = proxy.run_outgoing_proxy(listen_port, pid, route_id).await {
+                if let Err(e) = proxy
+                    .run_outgoing_proxy(listen_port, pid, route_id, cancel_token)
+                    .await
+                {
                     error!("Proxy for Party {} failed: {}", pid, e);
                 }
             });
@@ -143,12 +151,14 @@ impl MpcTunnelProxy {
         envelope.to_bytes()
     }
 
-    /// Cleanup resources: clear active sessions to drop TCP connections.
+    /// Cleanup resources: signal shutdown and clear active sessions.
     pub fn cleanup(&self) {
         info!(
             "Cleaning up MPC tunnel proxy for Party {}",
             self.inner.party_id
         );
+        // Signal all listener tasks to shut down
+        self.inner.cancel_token.cancel();
         // Clear all active sessions to drop TCP connections
         // Note: We can't async here (Drop context), so we use try_lock
         if let Ok(mut sessions) = self.inner.sessions.try_lock() {
@@ -164,6 +174,7 @@ impl MpcTunnelProxy {
         listen_port: u16,
         target_pid: usize,
         target_route: RouteId,
+        cancel_token: CancellationToken,
     ) -> MarketResult<()> {
         let addr = format!("127.0.0.1:{listen_port}");
         let listener = TcpListener::bind(&addr)
@@ -176,7 +187,16 @@ impl MpcTunnelProxy {
         );
 
         loop {
-            let (socket, _) = listener.accept().await?;
+            let socket = tokio::select! {
+                result = listener.accept() => {
+                    let (socket, _) = result?;
+                    socket
+                }
+                () = cancel_token.cancelled() => {
+                    info!("Proxy for Party {} shutting down via cancellation", target_pid);
+                    break Ok(());
+                }
+            };
             debug!("MP-SPDZ connected to proxy for Party {}", target_pid);
 
             let (mut rd, wr) = socket.into_split();
@@ -453,6 +473,10 @@ impl MpcTunnelProxy {
                 info!("Received CLOSE from Party {}", source_party_id);
                 let mut sessions = self.inner.sessions.lock().await;
                 sessions.remove(&source_party_id);
+                drop(sessions);
+                // Also evict any pending data for this party
+                let mut pending = self.inner.pending_data.lock().await;
+                pending.remove(&source_party_id);
             }
         }
         Ok(())

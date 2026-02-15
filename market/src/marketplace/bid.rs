@@ -33,6 +33,7 @@ impl Bid {
     pub fn new(listing_key: RecordKey, bidder: PublicKey, amount: u64) -> Self {
         use rand::RngCore;
         use sha2::{Digest, Sha256};
+        assert!(amount > 0, "Bid amount must be greater than zero");
 
         let mut nonce = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut nonce);
@@ -61,6 +62,7 @@ impl Bid {
         time: &T,
     ) -> Self {
         use sha2::{Digest, Sha256};
+        assert!(amount > 0, "Bid amount must be greater than zero");
 
         // Generate random nonce for commitment
         let nonce = rng.random_bytes_32();
@@ -116,8 +118,8 @@ impl Bid {
     }
 
     /// Deserialize a bid from CBOR bytes
-    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
-        ciborium::from_reader(data)
+    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 }
 
@@ -146,8 +148,8 @@ impl SealedBid {
     }
 
     /// Deserialize from CBOR bytes
-    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
-        ciborium::from_reader(data)
+    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 }
 
@@ -185,8 +187,8 @@ impl BidCollection {
     }
 
     /// Deserialize from CBOR bytes
-    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
-        ciborium::from_reader(data)
+    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 }
 
@@ -391,5 +393,22 @@ mod tests {
 
         assert_eq!(original.listing_key, restored.listing_key);
         assert_eq!(original.bid_count(), restored.bid_count());
+    }
+
+    #[test]
+    #[should_panic(expected = "Bid amount must be greater than zero")]
+    fn test_bid_new_zero_amount_panics() {
+        let rng = MockRandom::new(42);
+        let time = MockTime::new(1000);
+
+        // This should panic due to the assert!(amount > 0) in Bid::new_with_providers
+        Bid::new_with_providers(make_test_key(), make_test_pubkey(), 0, &rng, &time);
+    }
+
+    #[test]
+    #[should_panic(expected = "Bid amount must be greater than zero")]
+    fn test_bid_new_default_zero_amount_panics() {
+        // Also test the non-providers version
+        Bid::new(make_test_key(), make_test_pubkey(), 0);
     }
 }

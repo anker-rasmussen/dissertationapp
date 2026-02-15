@@ -132,6 +132,8 @@ pub struct AuctionCoordinator {
     my_route_blob: Mutex<Option<Vec<u8>>>,
     /// Token used to signal graceful shutdown of background tasks.
     shutdown: CancellationToken,
+    /// Handle for the background monitoring task.
+    monitor_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl AuctionCoordinator {
@@ -186,6 +188,7 @@ impl AuctionCoordinator {
             pending_bid_announcements: Mutex::new(Vec::new()),
             my_route_blob: Mutex::new(None),
             shutdown,
+            monitor_handle: std::sync::Mutex::new(None),
         }
     }
 
@@ -1285,13 +1288,14 @@ impl AuctionCoordinator {
     pub fn start_monitoring(self: Arc<Self>) {
         info!("Starting auction deadline monitor");
         let token = self.shutdown.clone();
+        let monitor_self = self.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // Every node independently opens/creates the deterministic master
             // registry on startup.  The key is derived from the shared network
             // keypair, so all nodes converge on the same DHT record without
             // needing a broadcast.
-            match self.ensure_master_registry().await {
+            match monitor_self.ensure_master_registry().await {
                 Ok(key) => info!("Master registry ready at startup: {}", key),
                 Err(e) => warn!("Failed to initialise master registry at startup: {}", e),
             }
@@ -1313,13 +1317,13 @@ impl AuctionCoordinator {
                 // (~60s) to prevent relay nodes from dropping stale routes.
                 let should_refresh_route = !broadcast_route_ready || (tick_count % 6 == 0);
                 if should_refresh_route {
-                    if self.mpc.has_active_auctions().await {
+                    if monitor_self.mpc.has_active_auctions().await {
                         debug!(
                             "Skipping broadcast route refresh at tick {} while MPC is active",
                             tick_count
                         );
                     } else {
-                        match self.create_and_register_broadcast_route().await {
+                        match monitor_self.create_and_register_broadcast_route().await {
                             Ok(()) => {
                                 if broadcast_route_ready {
                                     debug!("Broadcast route refreshed (tick {})", tick_count);
@@ -1339,23 +1343,26 @@ impl AuctionCoordinator {
                 // every tick for the first 6 ticks (~60s), then every 3rd tick (~30s)
                 let should_broadcast = tick_count <= 6 || tick_count % 3 == 0;
                 if should_broadcast {
-                    if let Err(e) = self.broadcast_registry_announcement().await {
+                    if let Err(e) = monitor_self.broadcast_registry_announcement().await {
                         debug!("Periodic registry broadcast failed: {}", e);
                     }
                 }
 
                 // Retry any bid announcements that failed due to missing routes
                 if broadcast_route_ready {
-                    self.retry_pending_bid_announcements().await;
+                    monitor_self.retry_pending_bid_announcements().await;
                 }
 
-                let expired = self.logic.get_expired_listings().await;
+                let expired = monitor_self.logic.get_expired_listings().await;
 
                 for (key, listing) in expired {
                     info!("Auction deadline reached for listing '{}'", listing.title);
 
-                    match self.handle_auction_end_wrapper(&key, &listing).await {
-                        Ok(()) => self.logic.unwatch_listing(&key).await,
+                    match monitor_self
+                        .handle_auction_end_wrapper(&key, &listing)
+                        .await
+                    {
+                        Ok(()) => monitor_self.logic.unwatch_listing(&key).await,
                         Err(e) => {
                             // Keep listing watched so it retries on the next tick.
                             // Transient failures (e.g. bid key not stored yet) resolve
@@ -1369,6 +1376,11 @@ impl AuctionCoordinator {
                 }
             }
         });
+
+        // Store the handle for potential awaiting on shutdown
+        if let Ok(mut guard) = self.monitor_handle.lock() {
+            *guard = Some(handle);
+        }
     }
 
     /// Wrapper that prepares data for MpcOrchestrator::handle_auction_end
@@ -1442,7 +1454,13 @@ impl AuctionCoordinator {
         };
 
         self.mpc
-            .handle_auction_end(listing_key, bid_index, &listing.title, &peer_route_blobs)
+            .handle_auction_end(
+                listing_key,
+                bid_index,
+                &listing.title,
+                &peer_route_blobs,
+                &listing.seller,
+            )
             .await
     }
 }

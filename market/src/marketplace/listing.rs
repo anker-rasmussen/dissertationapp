@@ -163,8 +163,8 @@ impl PublicListing {
     }
 
     /// Deserialize a public listing from CBOR bytes
-    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
-        ciborium::from_reader(data)
+    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 }
 
@@ -230,8 +230,8 @@ impl Listing {
     }
 
     /// Deserialize a listing from CBOR bytes
-    pub fn from_cbor(data: &[u8]) -> Result<Self, ciborium::de::Error<std::io::Error>> {
-        ciborium::from_reader(data)
+    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
 
     /// Create a `PublicListing` with the decryption key stripped out.
