@@ -23,4 +23,7 @@
 //! 3. Run the tests serially
 //! 4. Clean up the devnet after each test
 
+mod helpers;
+
+mod edge_cases;
 mod smoke;
