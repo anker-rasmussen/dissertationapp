@@ -20,7 +20,7 @@ impl MockTime {
 
     /// Create a mock time provider starting at a reasonable default (2024-01-01).
     pub fn default_time() -> Self {
-        Self::new(1704067200) // 2024-01-01 00:00:00 UTC
+        Self::new(1_704_067_200) // 2024-01-01 00:00:00 UTC
     }
 
     /// Set the current time to a specific value.

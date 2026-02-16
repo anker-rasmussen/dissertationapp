@@ -24,7 +24,7 @@ impl MockRandom {
 
     /// Create a mock random source with a default seed.
     pub fn default_seed() -> Self {
-        Self::new(0x12345678_9ABCDEF0)
+        Self::new(0x1234_5678_9ABC_DEF0)
     }
 
     /// Reset the counter to generate the same sequence again.
@@ -38,11 +38,11 @@ impl MockRandom {
     }
 
     /// Simple deterministic mixing function.
-    fn mix(&self, counter: u64) -> u64 {
+    const fn mix(&self, counter: u64) -> u64 {
         let mut x = self.seed.wrapping_add(counter);
-        x = x.wrapping_mul(0x517CC1B727220A95);
+        x = x.wrapping_mul(0x517C_C1B7_2722_0A95);
         x ^= x >> 32;
-        x = x.wrapping_mul(0x517CC1B727220A95);
+        x = x.wrapping_mul(0x517C_C1B7_2722_0A95);
         x ^= x >> 32;
         x
     }

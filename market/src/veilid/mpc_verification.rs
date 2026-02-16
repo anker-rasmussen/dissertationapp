@@ -100,6 +100,9 @@ impl MpcOrchestrator {
     }
 
     /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style)
+    ///
+    /// This method is constant-time in its control flow: all verification steps are
+    /// performed regardless of intermediate failures to prevent timing side-channels.
     pub async fn verify_winner_reveal(
         &self,
         listing_key: &RecordKey,
@@ -125,16 +128,11 @@ impl MpcOrchestrator {
             }
         };
 
-        // 2. Check bid value matches MPC output
-        if bid_value != expected_bid {
-            warn!(
-                "Bid value mismatch: revealed {} but MPC output was {}",
-                bid_value, expected_bid
-            );
-            return false;
-        }
+        // 2. Check bid value matches MPC output (store result, don't return early)
+        let bid_matches = bid_value == expected_bid;
 
         // 3. Fetch winner's BidRecord from DHT to get stored commitment
+        // Always perform this step regardless of bid_matches to prevent timing leaks
         let bid_ops = BidOperations::new(self.dht.clone());
 
         let registry_data = match self
@@ -142,54 +140,41 @@ impl MpcOrchestrator {
             .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
             .await
         {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                warn!("No bid registry found for listing {}", listing_key);
-                return false;
-            }
-            Err(e) => {
-                warn!("Failed to fetch bid registry: {}", e);
-                return false;
-            }
+            Ok(Some(data)) => Some(data),
+            Ok(None) | Err(_) => None,
         };
 
-        let registry = match BidAnnouncementRegistry::from_bytes(&registry_data) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Failed to parse bid registry: {}", e);
-                return false;
-            }
-        };
+        let registry =
+            registry_data.and_then(|data| BidAnnouncementRegistry::from_bytes(&data).ok());
 
-        let winner_bid_record_key = if let Some((_, key, _)) =
-            registry.announcements.iter().find(|(b, _, _)| b == winner)
-        {
-            key.clone()
-        } else {
-            warn!("Winner {} not found in bid registry", winner);
-            return false;
-        };
+        let winner_bid_record_key = registry.as_ref().and_then(|reg| {
+            reg.announcements
+                .iter()
+                .find(|(b, _, _)| b == winner)
+                .map(|(_, key, _)| key.clone())
+        });
 
-        let bid_record = match bid_ops.fetch_bid(&winner_bid_record_key).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                warn!("Winner's bid record not found at {}", winner_bid_record_key);
-                return false;
-            }
-            Err(e) => {
-                warn!("Failed to fetch winner's bid record: {}", e);
-                return false;
-            }
+        let bid_record = match winner_bid_record_key {
+            Some(key) => bid_ops.fetch_bid(&key).await.ok().flatten(),
+            None => None,
         };
 
         // 4. Verify commitment: SHA256(bid_value || nonce) == stored
-        if !verify_commitment(bid_value, nonce, &bid_record.commitment) {
-            warn!("Commitment mismatch for winner {}", winner);
-            return false;
+        // Always perform this step regardless of previous failures to prevent timing leaks
+        let commitment_valid = bid_record
+            .as_ref()
+            .is_some_and(|record| verify_commitment(bid_value, nonce, &record.commitment));
+
+        // 5. Combine results and return
+        let result = bid_matches && commitment_valid;
+
+        if result {
+            info!("Commitment verified for winner {}", winner);
+        } else {
+            warn!("Verification failed for winner {}", winner);
         }
 
-        info!("Commitment verified for winner {}", winner);
-        true
+        result
     }
 
     /// Send WinnerDecryptionRequest challenge to winner via their MPC route

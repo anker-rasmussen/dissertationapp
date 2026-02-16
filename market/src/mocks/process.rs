@@ -91,6 +91,7 @@ impl SharedBidRegistry {
                 }
             }
         }
+        drop(bids);
 
         winner.map(|(party_id, _, _)| party_id)
     }
@@ -114,6 +115,7 @@ impl SharedBidRegistry {
                 }
             }
         }
+        drop(bids);
 
         winner.map(|(party_id, bid, _)| (party_id, bid))
     }

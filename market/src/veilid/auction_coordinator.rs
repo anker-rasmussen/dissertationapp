@@ -360,6 +360,11 @@ impl AuctionCoordinator {
         let seller_pubkey = listing.seller.to_string();
         let registry_result = {
             let ops = self.registry_ops.lock().await;
+            // Note: tokio::sync::Mutex is held across .await here for a single DHT read.
+            // This is safe (tokio::sync::Mutex is designed for async contexts) and the
+            // lock scope is bounded by registry fetch latency (~ms). For current throughput
+            // requirements, this is acceptable. Restructuring would require exposing
+            // RegistryOperations internals or duplicating fetch_registry logic.
             ops.get_seller_signing_pubkey(&seller_pubkey).await?
         };
         if registry_result.is_some() {
@@ -1138,6 +1143,10 @@ impl AuctionCoordinator {
     async fn broadcast_message(&self, data: &[u8]) -> MarketResult<usize> {
         let route_blobs = {
             let ops = self.registry_ops.lock().await;
+            // Note: tokio::sync::Mutex is held across .await for a single DHT read
+            // (fetch_registry). This is safe with tokio::sync::Mutex and the lock
+            // scope is bounded by registry fetch latency. Acceptable for current
+            // throughput requirements.
             ops.fetch_route_blobs(&self.my_node_id.to_string()).await?
         };
 
@@ -1180,6 +1189,14 @@ impl AuctionCoordinator {
 
     /// Ensure the master registry is available (create or use already-known key).
     pub async fn ensure_master_registry(&self) -> MarketResult<RecordKey> {
+        // Fast path: check if key is already known without holding lock across .await
+        {
+            let ops = self.registry_ops.lock().await;
+            if let Some(key) = ops.master_registry_key() {
+                return Ok(key);
+            }
+        }
+        // Slow path: need to create/open registry (startup only, infrequent)
         let mut ops = self.registry_ops.lock().await;
         ops.ensure_master_registry().await
     }
@@ -1428,6 +1445,10 @@ impl AuctionCoordinator {
         let peer_route_blobs = loop {
             let blobs = {
                 let ops = self.registry_ops.lock().await;
+                // Note: tokio::sync::Mutex held across .await for DHT read in retry loop.
+                // This is safe with tokio::sync::Mutex; lock scope is bounded by a single
+                // registry fetch. The loop is for route discovery readiness, not a lock
+                // contention issue.
                 ops.fetch_route_blobs(&self.my_node_id.to_string())
                     .await
                     .unwrap_or_default()

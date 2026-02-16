@@ -33,12 +33,12 @@ pub fn make_test_record_key(id: u64) -> RecordKey {
     let mut key_bytes = [0u8; 32];
     key_bytes[..8].copy_from_slice(&id.to_le_bytes());
     // Fill rest with a pattern
-    for i in 8..32 {
-        key_bytes[i] = ((id >> ((i % 8) * 8)) & 0xFF) as u8;
+    for (j, byte) in key_bytes[8..32].iter_mut().enumerate() {
+        *byte = ((id >> ((j % 8) * 8)) & 0xFF) as u8;
     }
 
     let encoded = data_encoding::BASE64URL_NOPAD.encode(&key_bytes);
-    let key_str = format!("VLD0:{}", encoded);
+    let key_str = format!("VLD0:{encoded}");
     RecordKey::try_from(key_str.as_str()).expect("Should create valid RecordKey")
 }
 
@@ -50,7 +50,7 @@ pub fn make_test_public_key(id: u8) -> veilid_core::PublicKey {
     key_bytes[1] = id.wrapping_add(1);
 
     let encoded = data_encoding::BASE64URL_NOPAD.encode(&key_bytes);
-    let key_str = format!("VLD0:{}", encoded);
+    let key_str = format!("VLD0:{encoded}");
     veilid_core::PublicKey::try_from(key_str.as_str()).expect("Should create valid PublicKey")
 }
 
@@ -188,7 +188,7 @@ impl MockDht {
             Some(MockDhtFailure::All) => true,
             Some(MockDhtFailure::Reads) => !is_write,
             Some(MockDhtFailure::Writes) => is_write,
-            Some(MockDhtFailure::OnKey(k)) => key.map(|key| key == k).unwrap_or(false),
+            Some(MockDhtFailure::OnKey(k)) => key.is_some_and(|key| key == k),
         }
     }
 
@@ -231,12 +231,18 @@ impl DhtStore for MockDht {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let record = MockOwnedRecord::new(id);
 
-        let mut storage = self.inner.storage.write().await;
-        storage.insert(record.key.to_string(), RecordStorage::default());
+        self.inner
+            .storage
+            .write()
+            .await
+            .insert(record.key.to_string(), RecordStorage::default());
 
         // Track ownership
-        let mut owners = self.inner.record_owners.write().await;
-        owners.insert(record.key.to_string(), self.node_id.clone());
+        self.inner
+            .record_owners
+            .write()
+            .await
+            .insert(record.key.to_string(), self.node_id.clone());
 
         Ok(record)
     }
@@ -289,14 +295,8 @@ impl DhtStore for MockDht {
             }
         }
 
-        // Reject writes to nonexistent records
-        let mut storage = self.inner.storage.write().await;
-        let record_storage = storage.get_mut(&key_str).ok_or_else(|| {
-            MarketError::Dht(format!("MockDht: record {} does not exist", key_str))
-        })?;
-
-        // Validate subkey bounds
-        if subkey >= crate::config::DHT_SUBKEY_COUNT as u32 {
+        // Validate bounds before acquiring write lock
+        if subkey >= u32::from(crate::config::DHT_SUBKEY_COUNT) {
             return Err(MarketError::Dht(format!(
                 "MockDht: subkey {} exceeds max {} for record {}",
                 subkey,
@@ -304,8 +304,6 @@ impl DhtStore for MockDht {
                 key_str
             )));
         }
-
-        // Validate size limit
         if value.len() > crate::traits::dht::MAX_DHT_VALUE_SIZE {
             return Err(MarketError::Dht(format!(
                 "MockDht: value size {} exceeds max {} bytes",
@@ -314,7 +312,13 @@ impl DhtStore for MockDht {
             )));
         }
 
+        // Reject writes to nonexistent records
+        let mut storage = self.inner.storage.write().await;
+        let record_storage = storage
+            .get_mut(&key_str)
+            .ok_or_else(|| MarketError::Dht(format!("MockDht: record {key_str} does not exist")))?;
         record_storage.subkeys.insert(subkey, value);
+        drop(storage);
 
         Ok(())
     }
@@ -325,8 +329,7 @@ impl DhtStore for MockDht {
             return Err(MarketError::Dht("MockDht: simulated delete failure".into()));
         }
 
-        let mut storage = self.inner.storage.write().await;
-        storage.remove(&key_str);
+        self.inner.storage.write().await.remove(&key_str);
         Ok(())
     }
 
