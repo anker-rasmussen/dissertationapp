@@ -99,12 +99,12 @@ impl MockTransport {
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&counter.to_le_bytes());
         // Fill with pattern
-        for i in 8..32 {
-            bytes[i] = ((counter >> ((i % 8) * 8)) & 0xFF) as u8;
+        for (j, byte) in bytes[8..32].iter_mut().enumerate() {
+            *byte = ((counter >> ((j % 8) * 8)) & 0xFF) as u8;
         }
 
         let encoded = data_encoding::BASE64URL_NOPAD.encode(&bytes);
-        let key_str = format!("VLD0:{}", encoded);
+        let key_str = format!("VLD0:{encoded}");
         RouteId::try_from(key_str.as_str()).expect("Should create valid RouteId")
     }
 }
@@ -139,7 +139,7 @@ impl MessageTransport for MockTransport {
         // Create a mock RouteBlob
         let blob = RouteBlob {
             route_id: route_id.clone(),
-            blob: format!("mock_route_blob_{}", counter).into_bytes(),
+            blob: format!("mock_route_blob_{counter}").into_bytes(),
         };
 
         self.routes
