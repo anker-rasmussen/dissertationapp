@@ -25,7 +25,7 @@ use tokio::time::timeout;
 use super::helpers::{
     check_mp_spdz_available, create_encrypted_listing, create_test_listing, init_test_tracing,
     libipspoof_path, make_real_commitment, print_error_chain, setup_e2e_environment,
-    E2EParticipant, TestNode,
+    wait_for_broadcast_routes, E2EParticipant, TestNode,
 };
 
 // ============================================================================
@@ -913,7 +913,9 @@ async fn test_e2e_full_mpc_execution_happy_path() {
             .update_listing(&listing_record, &listing)
             .await?;
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Wait for all 3 nodes' broadcast routes to appear in the registry.
+        wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await;
+
         bidder1
             .coordinator
             .broadcast_bid_announcement(&listing_record.key, &b1_rec.key)
@@ -1151,7 +1153,9 @@ async fn test_e2e_full_winner_verification_and_decryption() {
             .update_listing(&listing_record, &listing)
             .await?;
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Wait for all 3 nodes' broadcast routes to appear in the registry.
+        wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await;
+
         bidder1
             .coordinator
             .broadcast_bid_announcement(&listing_record.key, &b1_rec.key)
