@@ -555,6 +555,53 @@ pub fn print_error_chain(e: &MarketError) {
     eprintln!("   Debug: {:?}", e);
 }
 
+/// Wait until at least `expected_peers` broadcast routes are visible from a
+/// node's perspective.  Returns `true` if the routes were found, `false` on
+/// timeout.
+pub async fn wait_for_broadcast_routes(
+    coordinator: &AuctionCoordinator,
+    my_node_id: &str,
+    expected_peers: usize,
+    timeout_secs: u64,
+) -> bool {
+    let start = tokio::time::Instant::now();
+    let max_wait = Duration::from_secs(timeout_secs);
+    loop {
+        let routes = {
+            let ops = coordinator.registry_ops().lock().await;
+            ops.fetch_route_blobs(my_node_id).await
+        };
+        match routes {
+            Ok(r) if r.len() >= expected_peers => {
+                eprintln!(
+                    "[E2E] Broadcast routes ready: {} peers visible (needed {})",
+                    r.len(),
+                    expected_peers
+                );
+                return true;
+            }
+            Ok(r) => {
+                eprintln!(
+                    "[E2E] Only {} peer routes visible (need {}), waiting...",
+                    r.len(),
+                    expected_peers
+                );
+            }
+            Err(e) => {
+                eprintln!("[E2E] Route fetch error: {}, retrying...", e);
+            }
+        }
+        if start.elapsed() > max_wait {
+            eprintln!(
+                "[E2E] WARNING: Route registration timed out after {}s",
+                timeout_secs
+            );
+            return false;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
 /// Initialize tracing for tests.
 pub fn init_test_tracing() {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};

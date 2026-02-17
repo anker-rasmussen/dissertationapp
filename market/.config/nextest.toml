@@ -9,9 +9,9 @@ retries = 0
 
 [profile.e2e]
 # E2E tests run serially and need longer timeouts
-# MPC tests: ~60s node startup + ~60s MPC + ~10s post-MPC + shutdown
+# Concurrent auctions: ~60s node startup + ~120s deadline wait + ~120s MPC×2 + ~60s post-MPC
 test-threads = 1
-slow-timeout = { period = "120s", terminate-after = 5 }
+slow-timeout = { period = "120s", terminate-after = 8 }
 
 # Setup script for E2E tests - sets LD_PRELOAD for IP spoofing
 [[profile.e2e.scripts]]
