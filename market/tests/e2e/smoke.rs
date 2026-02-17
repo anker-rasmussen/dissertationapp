@@ -1267,3 +1267,420 @@ async fn test_e2e_full_winner_verification_and_decryption() {
         Err(_) => panic!("Winner verification test timed out (10 min)"),
     }
 }
+
+/// Test sequential auctions: after auction 1 completes, a new seller runs
+/// auction 2 on the same devnet with the same bidder nodes.  Validates that
+/// bidder state from auction 1 does not interfere with auction 2.
+#[tokio::test]
+#[ignore]
+#[serial]
+#[allow(clippy::too_many_lines)]
+async fn test_e2e_full_sequential_auctions() {
+    init_test_tracing();
+
+    if !check_mp_spdz_available() {
+        eprintln!("[E2E] SKIPPING test_e2e_full_sequential_auctions: mascot-party.x not found");
+        return;
+    }
+
+    let _devnet = setup_e2e_environment().expect("E2E setup failed");
+
+    let result = timeout(Duration::from_secs(900), async {
+        // ── Shared bidders across both auctions ──────────────────────────
+        let mut bidder1 = E2EParticipant::new(21).await?;
+        let mut bidder2 = E2EParticipant::new(22).await?;
+        let bidder1_id = bidder1.node_id().unwrap();
+        let bidder2_id = bidder2.node_id().unwrap();
+        let bidder1_signing = bidder1.signing_pubkey_bytes();
+        let bidder2_signing = bidder2.signing_pubkey_bytes();
+        let bidder1_dht = bidder1.dht().unwrap();
+        let bidder2_dht = bidder2.dht().unwrap();
+
+        // ════════════════════════════════════════════════════════════════
+        // AUCTION 1 — seller1 lists, bidder1 wins with highest bid
+        // ════════════════════════════════════════════════════════════════
+        eprintln!("\n[E2E] ═══ AUCTION 1 START ═══");
+        let mut seller1 = E2EParticipant::new(20).await?;
+        let seller1_id = seller1.node_id().unwrap();
+        let seller1_signing = seller1.signing_pubkey_bytes();
+        let seller1_dht = seller1.dht().unwrap();
+
+        let listing1_record = seller1_dht.create_dht_record().await?;
+        let listing1 = create_encrypted_listing(
+            listing1_record.key.clone(),
+            seller1_id.clone(),
+            100,
+            1,
+            "Auction 1 secret content: first sale",
+        );
+
+        use market::veilid::listing_ops::ListingOperations;
+        let listing1_ops = ListingOperations::new(seller1_dht.clone());
+        listing1_ops
+            .update_listing(&listing1_record, &listing1)
+            .await?;
+        seller1
+            .coordinator
+            .register_owned_listing(listing1_record.clone())
+            .await?;
+        seller1
+            .coordinator
+            .store_decryption_key(&listing1_record.key, listing1.decryption_key.clone())
+            .await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Seller1 reserve bid
+        let s1_nonce: [u8; 32] = rand::random();
+        seller1
+            .bid_storage
+            .store_bid(&listing1_record.key, 100, s1_nonce)
+            .await;
+        let s1_bid_rec = seller1_dht.create_dht_record().await?;
+        let s1_bid = BidRecord {
+            listing_key: listing1_record.key.clone(),
+            bidder: seller1_id.clone(),
+            commitment: make_real_commitment(100, &s1_nonce),
+            timestamp: now,
+            bid_key: s1_bid_rec.key.clone(),
+            signing_pubkey: seller1_signing,
+        };
+        let bid_ops1 = BidOperations::new(seller1_dht.clone());
+        bid_ops1
+            .register_bid(&listing1_record, s1_bid.clone())
+            .await?;
+        seller1_dht
+            .set_dht_value(&s1_bid_rec, s1_bid.to_cbor()?)
+            .await?;
+        seller1
+            .bid_storage
+            .store_bid_key(&listing1_record.key, &s1_bid_rec.key)
+            .await;
+        seller1
+            .coordinator
+            .add_own_bid_to_registry(
+                &listing1_record.key,
+                seller1_id.clone(),
+                s1_bid_rec.key.clone(),
+                now,
+            )
+            .await?;
+
+        // Bidder1 bids 250 on auction 1
+        let b1_nonce1: [u8; 32] = rand::random();
+        bidder1
+            .bid_storage
+            .store_bid(&listing1_record.key, 250, b1_nonce1)
+            .await;
+        let b1_rec1 = bidder1_dht.create_dht_record().await?;
+        let bid1_a1 = BidRecord {
+            listing_key: listing1_record.key.clone(),
+            bidder: bidder1_id.clone(),
+            commitment: make_real_commitment(250, &b1_nonce1),
+            timestamp: now + 1,
+            bid_key: b1_rec1.key.clone(),
+            signing_pubkey: bidder1_signing,
+        };
+        bid_ops1
+            .register_bid(&listing1_record, bid1_a1.clone())
+            .await?;
+        bidder1
+            .bid_storage
+            .store_bid_key(&listing1_record.key, &b1_rec1.key)
+            .await;
+        bidder1_dht
+            .set_dht_value(&b1_rec1, bid1_a1.to_cbor()?)
+            .await?;
+
+        // Bidder2 bids 150 on auction 1
+        let b2_nonce1: [u8; 32] = rand::random();
+        bidder2
+            .bid_storage
+            .store_bid(&listing1_record.key, 150, b2_nonce1)
+            .await;
+        let b2_rec1 = bidder2_dht.create_dht_record().await?;
+        let bid2_a1 = BidRecord {
+            listing_key: listing1_record.key.clone(),
+            bidder: bidder2_id.clone(),
+            commitment: make_real_commitment(150, &b2_nonce1),
+            timestamp: now + 2,
+            bid_key: b2_rec1.key.clone(),
+            signing_pubkey: bidder2_signing,
+        };
+        bid_ops1
+            .register_bid(&listing1_record, bid2_a1.clone())
+            .await?;
+        bidder2
+            .bid_storage
+            .store_bid_key(&listing1_record.key, &b2_rec1.key)
+            .await;
+        bidder2_dht
+            .set_dht_value(&b2_rec1, bid2_a1.to_cbor()?)
+            .await?;
+
+        listing1_ops
+            .update_listing(&listing1_record, &listing1)
+            .await?;
+
+        // Wait for routes (3 nodes → bidder1 sees 2 peers)
+        wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await;
+
+        bidder1
+            .coordinator
+            .broadcast_bid_announcement(&listing1_record.key, &b1_rec1.key)
+            .await?;
+        bidder2
+            .coordinator
+            .broadcast_bid_announcement(&listing1_record.key, &b2_rec1.key)
+            .await?;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        bidder1
+            .coordinator
+            .watch_listing(listing1.to_public())
+            .await;
+        bidder2
+            .coordinator
+            .watch_listing(listing1.to_public())
+            .await;
+
+        eprintln!("[E2E] Auction 1: polling for MPC completion (max 180s)...");
+        let mpc1_start = tokio::time::Instant::now();
+        loop {
+            if bidder1
+                .coordinator
+                .get_decryption_key(&listing1_record.key)
+                .await
+                .is_some()
+            {
+                eprintln!(
+                    "[E2E] Auction 1: bidder1 got key after {:?}",
+                    mpc1_start.elapsed()
+                );
+                break;
+            }
+            if mpc1_start.elapsed() > Duration::from_secs(180) {
+                return Err(MarketError::Timeout(
+                    "Auction 1 MPC did not complete within 180s".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+
+        let a1_b1_key = bidder1
+            .coordinator
+            .get_decryption_key(&listing1_record.key)
+            .await;
+        let a1_b2_key = bidder2
+            .coordinator
+            .get_decryption_key(&listing1_record.key)
+            .await;
+        assert!(a1_b1_key.is_some(), "Auction 1: winner should have key");
+        assert!(a1_b2_key.is_none(), "Auction 1: loser should NOT have key");
+        eprintln!("[E2E] ═══ AUCTION 1 PASSED ═══\n");
+
+        // ════════════════════════════════════════════════════════════════
+        // AUCTION 2 — new seller2, same bidders, fresh listing
+        // ════════════════════════════════════════════════════════════════
+        eprintln!("[E2E] ═══ AUCTION 2 START (new seller, same bidders) ═══");
+        let mut seller2 = E2EParticipant::new(23).await?;
+        let seller2_id = seller2.node_id().unwrap();
+        let seller2_signing = seller2.signing_pubkey_bytes();
+        let seller2_dht = seller2.dht().unwrap();
+
+        let listing2_record = seller2_dht.create_dht_record().await?;
+        let listing2 = create_encrypted_listing(
+            listing2_record.key.clone(),
+            seller2_id.clone(),
+            200,
+            1,
+            "Auction 2 secret content: second sale from new seller",
+        );
+
+        let listing2_ops = ListingOperations::new(seller2_dht.clone());
+        listing2_ops
+            .update_listing(&listing2_record, &listing2)
+            .await?;
+        seller2
+            .coordinator
+            .register_owned_listing(listing2_record.clone())
+            .await?;
+        seller2
+            .coordinator
+            .store_decryption_key(&listing2_record.key, listing2.decryption_key.clone())
+            .await;
+
+        let now2 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Seller2 reserve bid
+        let s2_nonce: [u8; 32] = rand::random();
+        seller2
+            .bid_storage
+            .store_bid(&listing2_record.key, 200, s2_nonce)
+            .await;
+        let s2_bid_rec = seller2_dht.create_dht_record().await?;
+        let s2_bid = BidRecord {
+            listing_key: listing2_record.key.clone(),
+            bidder: seller2_id.clone(),
+            commitment: make_real_commitment(200, &s2_nonce),
+            timestamp: now2,
+            bid_key: s2_bid_rec.key.clone(),
+            signing_pubkey: seller2_signing,
+        };
+        let bid_ops2 = BidOperations::new(seller2_dht.clone());
+        bid_ops2
+            .register_bid(&listing2_record, s2_bid.clone())
+            .await?;
+        seller2_dht
+            .set_dht_value(&s2_bid_rec, s2_bid.to_cbor()?)
+            .await?;
+        seller2
+            .bid_storage
+            .store_bid_key(&listing2_record.key, &s2_bid_rec.key)
+            .await;
+        seller2
+            .coordinator
+            .add_own_bid_to_registry(
+                &listing2_record.key,
+                seller2_id.clone(),
+                s2_bid_rec.key.clone(),
+                now2,
+            )
+            .await?;
+
+        // Bidder1 bids 500 on auction 2
+        let b1_nonce2: [u8; 32] = rand::random();
+        bidder1
+            .bid_storage
+            .store_bid(&listing2_record.key, 500, b1_nonce2)
+            .await;
+        let b1_rec2 = bidder1_dht.create_dht_record().await?;
+        let bid1_a2 = BidRecord {
+            listing_key: listing2_record.key.clone(),
+            bidder: bidder1_id.clone(),
+            commitment: make_real_commitment(500, &b1_nonce2),
+            timestamp: now2 + 1,
+            bid_key: b1_rec2.key.clone(),
+            signing_pubkey: bidder1_signing,
+        };
+        bid_ops2
+            .register_bid(&listing2_record, bid1_a2.clone())
+            .await?;
+        bidder1
+            .bid_storage
+            .store_bid_key(&listing2_record.key, &b1_rec2.key)
+            .await;
+        bidder1_dht
+            .set_dht_value(&b1_rec2, bid1_a2.to_cbor()?)
+            .await?;
+
+        // Bidder2 bids 350 on auction 2
+        let b2_nonce2: [u8; 32] = rand::random();
+        bidder2
+            .bid_storage
+            .store_bid(&listing2_record.key, 350, b2_nonce2)
+            .await;
+        let b2_rec2 = bidder2_dht.create_dht_record().await?;
+        let bid2_a2 = BidRecord {
+            listing_key: listing2_record.key.clone(),
+            bidder: bidder2_id.clone(),
+            commitment: make_real_commitment(350, &b2_nonce2),
+            timestamp: now2 + 2,
+            bid_key: b2_rec2.key.clone(),
+            signing_pubkey: bidder2_signing,
+        };
+        bid_ops2
+            .register_bid(&listing2_record, bid2_a2.clone())
+            .await?;
+        bidder2
+            .bid_storage
+            .store_bid_key(&listing2_record.key, &b2_rec2.key)
+            .await;
+        bidder2_dht
+            .set_dht_value(&b2_rec2, bid2_a2.to_cbor()?)
+            .await?;
+
+        listing2_ops
+            .update_listing(&listing2_record, &listing2)
+            .await?;
+
+        // Wait for seller2's route to appear (4 nodes total → bidder1 sees 3 peers)
+        wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 3, 60).await;
+
+        bidder1
+            .coordinator
+            .broadcast_bid_announcement(&listing2_record.key, &b1_rec2.key)
+            .await?;
+        bidder2
+            .coordinator
+            .broadcast_bid_announcement(&listing2_record.key, &b2_rec2.key)
+            .await?;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        bidder1
+            .coordinator
+            .watch_listing(listing2.to_public())
+            .await;
+        bidder2
+            .coordinator
+            .watch_listing(listing2.to_public())
+            .await;
+
+        eprintln!("[E2E] Auction 2: polling for MPC completion (max 180s)...");
+        let mpc2_start = tokio::time::Instant::now();
+        loop {
+            if bidder1
+                .coordinator
+                .get_decryption_key(&listing2_record.key)
+                .await
+                .is_some()
+            {
+                eprintln!(
+                    "[E2E] Auction 2: bidder1 got key after {:?}",
+                    mpc2_start.elapsed()
+                );
+                break;
+            }
+            if mpc2_start.elapsed() > Duration::from_secs(180) {
+                return Err(MarketError::Timeout(
+                    "Auction 2 MPC did not complete within 180s".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+
+        let a2_b1_key = bidder1
+            .coordinator
+            .get_decryption_key(&listing2_record.key)
+            .await;
+        let a2_b2_key = bidder2
+            .coordinator
+            .get_decryption_key(&listing2_record.key)
+            .await;
+        assert!(a2_b1_key.is_some(), "Auction 2: winner should have key");
+        assert!(a2_b2_key.is_none(), "Auction 2: loser should NOT have key");
+
+        eprintln!("[E2E] ═══ AUCTION 2 PASSED ═══");
+        eprintln!("[E2E] test_e2e_full_sequential_auctions PASSED (both auctions completed)");
+
+        let _ = seller1.shutdown().await;
+        let _ = seller2.shutdown().await;
+        let _ = bidder1.shutdown().await;
+        let _ = bidder2.shutdown().await;
+
+        Ok::<_, MarketError>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("Sequential auctions test failed: {}", e),
+        Err(_) => panic!("Sequential auctions test timed out (15 min)"),
+    }
+}
