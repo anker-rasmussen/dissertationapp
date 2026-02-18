@@ -914,8 +914,15 @@ async fn test_e2e_full_mpc_execution_happy_path() {
             .update_listing(&listing_record, &listing)
             .await?;
 
+        // Watch listing early so route managers exist before MPC signals arrive.
+        bidder1.coordinator.watch_listing(listing.to_public()).await;
+        bidder2.coordinator.watch_listing(listing.to_public()).await;
+
         // Wait for all 3 nodes' broadcast routes to appear in the registry.
-        wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await;
+        assert!(
+            wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await,
+            "Broadcast routes not ready within timeout"
+        );
 
         bidder1
             .coordinator
@@ -928,9 +935,6 @@ async fn test_e2e_full_mpc_execution_happy_path() {
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         eprintln!("[E2E] All bids placed, announcements broadcast. Starting monitoring...");
-
-        bidder1.coordinator.watch_listing(listing.to_public()).await;
-        bidder2.coordinator.watch_listing(listing.to_public()).await;
 
         eprintln!("[E2E] Polling for MPC completion (max 180s)...");
 
@@ -1154,8 +1158,15 @@ async fn test_e2e_full_winner_verification_and_decryption() {
             .update_listing(&listing_record, &listing)
             .await?;
 
+        // Watch listing early so route managers exist before MPC signals arrive.
+        bidder1.coordinator.watch_listing(listing.to_public()).await;
+        bidder2.coordinator.watch_listing(listing.to_public()).await;
+
         // Wait for all 3 nodes' broadcast routes to appear in the registry.
-        wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await;
+        assert!(
+            wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await,
+            "Broadcast routes not ready within timeout"
+        );
 
         bidder1
             .coordinator
@@ -1166,9 +1177,6 @@ async fn test_e2e_full_winner_verification_and_decryption() {
             .broadcast_bid_announcement(&listing_record.key, &b2_rec.key)
             .await?;
         tokio::time::sleep(Duration::from_secs(10)).await;
-
-        bidder1.coordinator.watch_listing(listing.to_public()).await;
-        bidder2.coordinator.watch_listing(listing.to_public()).await;
 
         eprintln!("[E2E] Polling for MPC + post-MPC flow (max 180s)...");
 
@@ -1426,8 +1434,21 @@ async fn test_e2e_full_sequential_auctions() {
             .update_listing(&listing1_record, &listing1)
             .await?;
 
+        // Watch listing early so route managers exist before MPC signals arrive.
+        bidder1
+            .coordinator
+            .watch_listing(listing1.to_public())
+            .await;
+        bidder2
+            .coordinator
+            .watch_listing(listing1.to_public())
+            .await;
+
         // Wait for routes (3 nodes → bidder1 sees 2 peers)
-        wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await;
+        assert!(
+            wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 2, 60).await,
+            "Auction 1: broadcast routes not ready within timeout"
+        );
 
         bidder1
             .coordinator
@@ -1438,15 +1459,6 @@ async fn test_e2e_full_sequential_auctions() {
             .broadcast_bid_announcement(&listing1_record.key, &b2_rec1.key)
             .await?;
         tokio::time::sleep(Duration::from_secs(10)).await;
-
-        bidder1
-            .coordinator
-            .watch_listing(listing1.to_public())
-            .await;
-        bidder2
-            .coordinator
-            .watch_listing(listing1.to_public())
-            .await;
 
         eprintln!("[E2E] Auction 1: polling for MPC completion (max 180s)...");
         let mpc1_start = tokio::time::Instant::now();
@@ -1611,8 +1623,21 @@ async fn test_e2e_full_sequential_auctions() {
             .update_listing(&listing2_record, &listing2)
             .await?;
 
+        // Watch listing early so route managers exist before MPC signals arrive.
+        bidder1
+            .coordinator
+            .watch_listing(listing2.to_public())
+            .await;
+        bidder2
+            .coordinator
+            .watch_listing(listing2.to_public())
+            .await;
+
         // Wait for seller2's route to appear (4 nodes total → bidder1 sees 3 peers)
-        wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 3, 60).await;
+        assert!(
+            wait_for_broadcast_routes(&bidder1.coordinator, &bidder1_id.to_string(), 3, 60).await,
+            "Auction 2: broadcast routes not ready within timeout"
+        );
 
         bidder1
             .coordinator
@@ -1623,15 +1648,6 @@ async fn test_e2e_full_sequential_auctions() {
             .broadcast_bid_announcement(&listing2_record.key, &b2_rec2.key)
             .await?;
         tokio::time::sleep(Duration::from_secs(10)).await;
-
-        bidder1
-            .coordinator
-            .watch_listing(listing2.to_public())
-            .await;
-        bidder2
-            .coordinator
-            .watch_listing(listing2.to_public())
-            .await;
 
         eprintln!("[E2E] Auction 2: polling for MPC completion (max 180s)...");
         let mpc2_start = tokio::time::Instant::now();
