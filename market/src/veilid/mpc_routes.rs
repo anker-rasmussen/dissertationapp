@@ -119,6 +119,8 @@ impl MpcRouteManager {
                         }
                         Err(e) => warn!("Failed to send route announcement to {}: {}", node_id, e),
                     }
+                    // Allow Veilid to flush the message before tearing down the route
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     let _ = self.api.release_private_route(imported_route);
                 }
                 Err(e) => {
@@ -250,6 +252,8 @@ impl MpcRouteManager {
                         }
                         Err(e) => warn!("Failed to send MpcReady to {}: {}", node_id, e),
                     }
+                    // Allow Veilid to flush the message before tearing down the route
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     let _ = self.api.release_private_route(imported_route);
                 }
                 Err(e) => {

@@ -324,7 +324,7 @@ impl MpcOrchestrator {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(30);
+        let max_wait = std::time::Duration::from_secs(45);
         let mut rebroadcast_counter: u8 = 0;
 
         let routes = loop {
@@ -352,7 +352,7 @@ impl MpcOrchestrator {
             // announcement.  Uses pre-fetched peer_route_blobs (no DHT
             // overhead).
             rebroadcast_counter = rebroadcast_counter.wrapping_add(1);
-            if rebroadcast_counter.is_multiple_of(5) && !peer_route_blobs.is_empty() {
+            if rebroadcast_counter.is_multiple_of(3) && !peer_route_blobs.is_empty() {
                 let my_pubkey = &bidders[my_party_id];
                 route_manager
                     .lock()

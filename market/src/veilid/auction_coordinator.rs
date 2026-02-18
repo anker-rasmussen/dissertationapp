@@ -25,6 +25,24 @@ use crate::traits::{
     DhtStore, MessageTransport, MpcResult, MpcRunner, SystemTimeProvider, TransportTarget,
 };
 
+/// An MPC signal received before the listing was watched.
+enum BufferedMpcSignal {
+    RouteAnnouncement {
+        party_pubkey: PublicKey,
+        route_blob: RouteBlob,
+        received_at: u64,
+    },
+    Ready {
+        party_pubkey: PublicKey,
+        received_at: u64,
+    },
+}
+
+/// Max buffered signals per listing before oldest entries are evicted.
+const MPC_SIGNAL_BUFFER_CAP: usize = 50;
+/// Buffered signals older than this (seconds) are discarded on replay.
+const MPC_SIGNAL_BUFFER_TTL: u64 = 60;
+
 // ---------------------------------------------------------------------------
 // Stub transport and MPC runner for the embedded AuctionLogic.
 //
@@ -130,6 +148,8 @@ pub struct AuctionCoordinator {
     pending_bid_announcements: Mutex<Vec<(RecordKey, RecordKey)>>,
     /// Our own broadcast private route blob (published to the registry).
     my_route_blob: Mutex<Option<Vec<u8>>>,
+    /// MPC signals received before the listing was watched (no route manager yet).
+    buffered_mpc_signals: Mutex<HashMap<RecordKey, Vec<BufferedMpcSignal>>>,
     /// Token used to signal graceful shutdown of background tasks.
     shutdown: CancellationToken,
     /// Handle for the background monitoring task.
@@ -187,6 +207,7 @@ impl AuctionCoordinator {
             pending_seller_registrations: Arc::new(Mutex::new(Vec::new())),
             pending_bid_announcements: Mutex::new(Vec::new()),
             my_route_blob: Mutex::new(None),
+            buffered_mpc_signals: Mutex::new(HashMap::new()),
             shutdown,
             monitor_handle: std::sync::Mutex::new(None),
         }
@@ -732,7 +753,19 @@ impl AuctionCoordinator {
                 .register_route_announcement(party_pubkey, route_blob)
                 .await?;
         } else {
-            debug!("Received route for unwatched auction {}", listing_key);
+            debug!(
+                "Buffering MPC route announcement for unwatched auction {}",
+                listing_key
+            );
+            self.buffer_mpc_signal(
+                listing_key,
+                BufferedMpcSignal::RouteAnnouncement {
+                    party_pubkey,
+                    route_blob,
+                    received_at: now_unix(),
+                },
+            )
+            .await;
         }
         Ok(())
     }
@@ -772,9 +805,29 @@ impl AuctionCoordinator {
         if let Some(manager) = manager {
             manager.lock().await.register_ready(party_pubkey).await;
         } else {
-            debug!("Received MpcReady for unwatched auction {}", listing_key);
+            debug!("Buffering MpcReady for unwatched auction {}", listing_key);
+            self.buffer_mpc_signal(
+                listing_key,
+                BufferedMpcSignal::Ready {
+                    party_pubkey,
+                    received_at: now_unix(),
+                },
+            )
+            .await;
         }
         Ok(())
+    }
+
+    /// Push a signal into the per-listing buffer, evicting the oldest entry
+    /// if the cap is reached.
+    #[allow(clippy::significant_drop_tightening)]
+    async fn buffer_mpc_signal(&self, listing_key: RecordKey, signal: BufferedMpcSignal) {
+        let mut buf = self.buffered_mpc_signals.lock().await;
+        let entry = buf.entry(listing_key).or_default();
+        if entry.len() >= MPC_SIGNAL_BUFFER_CAP {
+            entry.remove(0);
+        }
+        entry.push(signal);
     }
 
     async fn handle_winner_bid_reveal(
@@ -959,6 +1012,59 @@ impl AuctionCoordinator {
         let key = listing.key.clone();
         self.logic.watch_listing(listing).await;
         self.mpc.ensure_route_manager(&key).await;
+
+        // Replay any MPC signals that arrived before the route manager existed.
+        let signals = {
+            let mut buf = self.buffered_mpc_signals.lock().await;
+            buf.remove(&key).unwrap_or_default()
+        };
+        if !signals.is_empty() {
+            let now = now_unix();
+            let manager = {
+                let managers = self.mpc.route_managers().lock().await;
+                managers.get(&key).cloned()
+            };
+            if let Some(manager) = manager {
+                let mut replayed = 0usize;
+                for signal in signals {
+                    match signal {
+                        BufferedMpcSignal::RouteAnnouncement {
+                            party_pubkey,
+                            route_blob,
+                            received_at,
+                        } => {
+                            if now.saturating_sub(received_at) <= MPC_SIGNAL_BUFFER_TTL {
+                                if let Err(e) = manager
+                                    .lock()
+                                    .await
+                                    .register_route_announcement(party_pubkey, route_blob)
+                                    .await
+                                {
+                                    warn!("Failed to replay buffered route announcement: {}", e);
+                                } else {
+                                    replayed += 1;
+                                }
+                            }
+                        }
+                        BufferedMpcSignal::Ready {
+                            party_pubkey,
+                            received_at,
+                        } => {
+                            if now.saturating_sub(received_at) <= MPC_SIGNAL_BUFFER_TTL {
+                                manager.lock().await.register_ready(party_pubkey).await;
+                                replayed += 1;
+                            }
+                        }
+                    }
+                }
+                if replayed > 0 {
+                    info!(
+                        "Replayed {} buffered MPC signals for listing {}",
+                        replayed, key
+                    );
+                }
+            }
+        }
     }
 
     /// Register an owned listing (for sellers who created it)
@@ -1371,13 +1477,13 @@ impl AuctionCoordinator {
                         info!("Auction monitor shutting down");
                         break;
                     }
-                    () = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {}
+                    () = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
                 }
                 tick_count = tick_count.wrapping_add(1);
 
-                // Create broadcast route on first tick, then refresh every 6 ticks
+                // Create broadcast route on first tick, then refresh every 12 ticks
                 // (~60s) to prevent relay nodes from dropping stale routes.
-                let should_refresh_route = !broadcast_route_ready || tick_count.is_multiple_of(6);
+                let should_refresh_route = !broadcast_route_ready || tick_count.is_multiple_of(12);
                 if should_refresh_route {
                     if monitor_self.mpc.has_active_auctions().await {
                         debug!(
@@ -1402,8 +1508,8 @@ impl AuctionCoordinator {
                 }
 
                 // Re-broadcast registry key for late joiners:
-                // every tick for the first 6 ticks (~60s), then every 3rd tick (~30s)
-                let should_broadcast = tick_count <= 6 || tick_count.is_multiple_of(3);
+                // every tick for the first 12 ticks (~60s), then every 6th tick (~30s)
+                let should_broadcast = tick_count <= 12 || tick_count.is_multiple_of(6);
                 if should_broadcast {
                     if let Err(e) = monitor_self.broadcast_registry_announcement().await {
                         debug!("Periodic registry broadcast failed: {}", e);
