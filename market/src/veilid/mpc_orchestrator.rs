@@ -356,7 +356,7 @@ impl MpcOrchestrator {
             // announcement.  Uses pre-fetched peer_route_blobs (no DHT
             // overhead).
             rebroadcast_counter = rebroadcast_counter.wrapping_add(1);
-            if rebroadcast_counter % 5 == 0 && !peer_route_blobs.is_empty() {
+            if rebroadcast_counter.is_multiple_of(5) && !peer_route_blobs.is_empty() {
                 let my_pubkey = &bidders[my_party_id];
                 route_manager
                     .lock()

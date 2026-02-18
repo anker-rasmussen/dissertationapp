@@ -1332,7 +1332,7 @@ impl AuctionCoordinator {
 
                 // Create broadcast route on first tick, then refresh every 6 ticks
                 // (~60s) to prevent relay nodes from dropping stale routes.
-                let should_refresh_route = !broadcast_route_ready || (tick_count % 6 == 0);
+                let should_refresh_route = !broadcast_route_ready || tick_count.is_multiple_of(6);
                 if should_refresh_route {
                     if monitor_self.mpc.has_active_auctions().await {
                         debug!(
@@ -1358,7 +1358,7 @@ impl AuctionCoordinator {
 
                 // Re-broadcast registry key for late joiners:
                 // every tick for the first 6 ticks (~60s), then every 3rd tick (~30s)
-                let should_broadcast = tick_count <= 6 || tick_count % 3 == 0;
+                let should_broadcast = tick_count <= 6 || tick_count.is_multiple_of(3);
                 if should_broadcast {
                     if let Err(e) = monitor_self.broadcast_registry_announcement().await {
                         debug!("Periodic registry broadcast failed: {}", e);

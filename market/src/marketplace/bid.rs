@@ -175,7 +175,7 @@ impl BidCollection {
         self.bids.push(bid);
     }
 
-    pub fn bid_count(&self) -> usize {
+    pub const fn bid_count(&self) -> usize {
         self.bids.len()
     }
 

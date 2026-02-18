@@ -51,14 +51,19 @@ pub const MP_SPDZ_DIR_ENV: &str = "MP_SPDZ_DIR";
 /// `SystemTimeProvider::new().now_unix()` in production code paths.
 /// For testable code, prefer accepting a `TimeProvider` parameter instead.
 pub fn now_unix() -> u64 {
+    #[allow(clippy::expect_used)]
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("System clock is before Unix epoch")
         .as_secs()
 }
 
-/// Timeout for individual app_message sends.
+/// Timeout for individual app_message sends (control messages).
 pub const APP_MESSAGE_TIMEOUT_SECS: u64 = 10;
+
+/// Timeout for MPC tunnel relay messages (data relay over safe routes).
+/// Longer than control messages because safe-route hops add latency.
+pub const MPC_TUNNEL_TIMEOUT_SECS: u64 = 30;
 
 /// Timeout for auctions stuck in pending-MPC state.
 pub const AUCTION_STALE_TIMEOUT_SECS: u64 = 600;
@@ -114,6 +119,10 @@ pub struct MarketConfig {
     pub update_channel_capacity: usize,
     /// Timeout (seconds) for auctions stuck in pending-MPC state.
     pub auction_stale_timeout_secs: u64,
+    /// Routing table limit for over-attached peers.
+    pub limit_over_attached: u32,
+    /// Maximum seconds to wait for network attachment.
+    pub max_attachment_wait_secs: u64,
 }
 
 impl MarketConfig {
@@ -159,6 +168,8 @@ impl MarketConfig {
             app_message_timeout_secs: APP_MESSAGE_TIMEOUT_SECS,
             update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
             auction_stale_timeout_secs: AUCTION_STALE_TIMEOUT_SECS,
+            limit_over_attached: 8,
+            max_attachment_wait_secs: 180,
         }
     }
 }
@@ -181,6 +192,8 @@ impl Default for MarketConfig {
             app_message_timeout_secs: APP_MESSAGE_TIMEOUT_SECS,
             update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
             auction_stale_timeout_secs: AUCTION_STALE_TIMEOUT_SECS,
+            limit_over_attached: 8,
+            max_attachment_wait_secs: 180,
         }
     }
 }

@@ -55,10 +55,10 @@ impl<D: DhtStore> BidOperations<D> {
         let mut retry_delay = std::time::Duration::from_millis(BID_REGISTER_INITIAL_DELAY_MS);
 
         for attempt in 0..max_retries {
-            // Fetch current bid index from subkey
-            let old_value = self
+            // Fetch current bid index from subkey WITH sequence number
+            let (old_value, seq) = self
                 .dht
-                .get_subkey(&listing_key, subkeys::BID_INDEX)
+                .get_subkey_with_seq(&listing_key, subkeys::BID_INDEX)
                 .await?;
 
             let mut index = if let Some(data) = old_value {
@@ -71,12 +71,12 @@ impl<D: DhtStore> BidOperations<D> {
             // Add our bid
             index.add_bid(bid.clone());
 
-            // Try to write back
+            // Try to write back with CAS
             let data = index.to_cbor()?;
 
             match self
                 .dht
-                .set_subkey(listing_record, subkeys::BID_INDEX, data)
+                .set_subkey_cas(listing_record, subkeys::BID_INDEX, data, seq)
                 .await
             {
                 Ok(()) => {
@@ -89,9 +89,10 @@ impl<D: DhtStore> BidOperations<D> {
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to write bid index (attempt {}/{}): {}",
+                        "Failed to write bid index (attempt {}/{}, CAS seq {:?}): {}",
                         attempt + 1,
                         max_retries,
+                        seq,
                         e
                     );
                     if attempt < max_retries - 1 {

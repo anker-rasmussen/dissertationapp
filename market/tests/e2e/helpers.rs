@@ -287,11 +287,12 @@ impl TestNode {
             network_key: "development-network-2025".to_string(),
             bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
             port_offset: offset,
+            limit_over_attached: 8,
         };
 
-        let node = VeilidNode::new(data_dir.clone())
-            .with_devnet(config)
-            .with_insecure_storage(true);
+        let mut market_config = market::config::MarketConfig::default();
+        market_config.insecure_storage = true;
+        let node = VeilidNode::new(data_dir.clone(), &market_config).with_devnet(config);
 
         Self {
             node,

@@ -25,6 +25,8 @@ pub struct DevNetConfig {
     pub bootstrap_nodes: Vec<String>,
     /// Port offset from base port 5160 (0=bootstrap, 1-4=nodes, 5+=market clients)
     pub port_offset: u16,
+    /// Routing table limit for over-attached peers.
+    pub limit_over_attached: u32,
 }
 
 impl Default for DevNetConfig {
@@ -46,6 +48,7 @@ impl Default for DevNetConfig {
             // Use UDP for BOOT protocol - TCP requires VL framing which BOOT doesn't have
             bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
             port_offset,
+            limit_over_attached: 8,
         }
     }
 }
@@ -63,14 +66,14 @@ pub struct VeilidNode {
 }
 
 impl VeilidNode {
-    pub fn new(data_dir: PathBuf) -> Self {
-        let (update_tx, update_rx) = mpsc::channel(4096);
+    pub fn new(data_dir: PathBuf, config: &crate::config::MarketConfig) -> Self {
+        let (update_tx, update_rx) = mpsc::channel(config.update_channel_capacity);
         Self {
             api: None,
             state: Arc::new(RwLock::new(NodeState::default())),
             data_dir,
             devnet_config: None,
-            insecure_storage: false,
+            insecure_storage: config.insecure_storage,
             update_tx,
             update_rx: Some(update_rx),
         }
@@ -146,7 +149,7 @@ impl VeilidNode {
                     bootstrap: devnet.bootstrap_nodes.clone(),
                     bootstrap_keys: vec![], // No signature verification for devnet
                     // Lower limits for small devnet (5 nodes + 3 market instances = 8 total)
-                    limit_over_attached: 8,
+                    limit_over_attached: devnet.limit_over_attached,
                     limit_fully_attached: 6,
                     limit_attached_strong: 4,
                     limit_attached_good: 3,
@@ -319,7 +322,7 @@ impl VeilidNode {
         self.state.read().clone()
     }
 
-    pub fn take_update_receiver(&mut self) -> Option<mpsc::Receiver<VeilidUpdate>> {
+    pub const fn take_update_receiver(&mut self) -> Option<mpsc::Receiver<VeilidUpdate>> {
         self.update_rx.take()
     }
 

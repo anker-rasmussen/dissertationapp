@@ -294,14 +294,15 @@ async fn test_e2e_smoke_single_node_diagnostic() {
         network_key: "development-network-2025".to_string(),
         bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
         port_offset: 35,
+        limit_over_attached: 8,
     };
     eprintln!("   Network key: {}", config.network_key);
     eprintln!("   Bootstrap: {:?}", config.bootstrap_nodes);
     eprintln!("   Port offset: {} (port 5195)", config.port_offset);
 
-    let mut node = VeilidNode::new(data_dir.clone())
-        .with_devnet(config)
-        .with_insecure_storage(true);
+    let mut market_config = market::config::MarketConfig::default();
+    market_config.insecure_storage = true;
+    let mut node = VeilidNode::new(data_dir.clone(), &market_config).with_devnet(config);
 
     eprintln!("5. Starting Veilid node...");
     match node.start().await {

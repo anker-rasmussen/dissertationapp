@@ -170,15 +170,15 @@ fn main() -> MarketResult<()> {
             let data_dir = get_data_dir();
             info!("Using data directory: {:?}", data_dir);
 
+            let config = market::config::MarketConfig::from_env();
+
             // Create node based on network mode
             let mut node = if std::env::var("MARKET_MODE").as_deref() == Ok("public") {
                 info!("Connecting to PUBLIC Veilid network");
-                VeilidNode::new(data_dir).with_public_network()
+                VeilidNode::new(data_dir, &config).with_public_network()
             } else {
                 info!("Connecting to LOCAL devnet");
-                VeilidNode::new(data_dir)
-                    .with_devnet(DevNetConfig::default())
-                    .with_insecure_storage(true)
+                VeilidNode::new(data_dir, &config).with_devnet(DevNetConfig::default())
             };
 
             if let Err(e) = node.start().await {
@@ -199,7 +199,7 @@ fn main() -> MarketResult<()> {
             // up to 180s for attachment.
             info!("Waiting for network to stabilize...");
             let mut retries = 0;
-            let max_wait_secs = 180;
+            let max_wait_secs = config.max_attachment_wait_secs;
             loop {
                 let state = node.state();
                 if state.is_attached {
