@@ -58,6 +58,7 @@ pub(crate) async fn spawn_mascot_party(
     num_parties: usize,
     hosts_file: &std::path::Path,
     bid_value: u64,
+    base_port: u16,
 ) -> MarketResult<std::process::Output> {
     info!(
         "Executing MP-SPDZ auction_n-{} program (MASCOT, interactive)...",
@@ -75,6 +76,8 @@ pub(crate) async fn spawn_mascot_party(
         .arg(".") // Output to stdout
         .arg("-ip")
         .arg(hosts_file.to_str().unwrap_or("HOSTS"))
+        .arg("-pn")
+        .arg(base_port.to_string())
         .arg("-I") // Interactive mode: read inputs from stdin
         .arg(&program_name)
         .stdin(Stdio::piped())
@@ -116,16 +119,16 @@ pub(crate) async fn spawn_mascot_party(
 
     let stdout_task = tokio::spawn(async move {
         let mut buf = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut stdout_pipe, &mut buf)
-            .await
-            .unwrap_or(0);
+        if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut stdout_pipe, &mut buf).await {
+            tracing::warn!("Failed to read MPC process stdout: {}", e);
+        }
         buf
     });
     let stderr_task = tokio::spawn(async move {
         let mut buf = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut stderr_pipe, &mut buf)
-            .await
-            .unwrap_or(0);
+        if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut stderr_pipe, &mut buf).await {
+            tracing::warn!("Failed to read MPC process stderr: {}", e);
+        }
         buf
     });
 

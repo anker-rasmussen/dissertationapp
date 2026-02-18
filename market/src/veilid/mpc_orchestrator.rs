@@ -213,7 +213,7 @@ impl MpcOrchestrator {
                 );
 
                 let result = async {
-                    // Exchange routes with other parties
+                    // Exchange routes + readiness barrier with other parties
                     let routes = self
                         .exchange_mpc_routes(
                             listing_key,
@@ -222,10 +222,6 @@ impl MpcOrchestrator {
                             peer_route_blobs,
                         )
                         .await?;
-
-                    // Wait for all parties to be ready
-                    info!("Waiting 2s for route propagation...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
                     // Trigger MPC execution
                     self.execute_mpc_auction(
@@ -251,7 +247,9 @@ impl MpcOrchestrator {
         Ok(())
     }
 
-    /// Exchange MPC routes with all other bidders
+    /// Exchange MPC routes with all other bidders, then wait for all parties
+    /// to signal readiness before returning.
+    #[allow(clippy::too_many_lines)]
     pub async fn exchange_mpc_routes(
         &self,
         listing_key: &RecordKey,
@@ -320,15 +318,16 @@ impl MpcOrchestrator {
                 .await?;
         }
 
-        // Wait for routes: the seller (party 0) may take extra time to fetch
-        // bid records from DHT before creating its MPC route, so allow up to 30s.
+        // Phase 1 — Route collection: the seller (party 0) may take extra
+        // time to fetch bid records from DHT before creating its MPC route,
+        // so allow up to 30s.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let start = std::time::Instant::now();
         let max_wait = std::time::Duration::from_secs(30);
         let mut rebroadcast_counter: u8 = 0;
 
-        loop {
+        let routes = loop {
             let routes = {
                 let mgr = route_manager.lock().await;
                 mgr.assemble_party_routes(bidders).await?
@@ -340,15 +339,12 @@ impl MpcOrchestrator {
             info!("Route collection: have {}/{} routes", received, expected);
 
             if received >= expected {
-                return Ok(routes);
+                break routes;
             }
             if start.elapsed() >= max_wait {
-                if received < expected {
-                    return Err(MarketError::Network(format!(
-                        "Incomplete route exchange: got {received}/{expected} routes after {max_wait:?}"
-                    )));
-                }
-                return Ok(routes);
+                return Err(MarketError::Network(format!(
+                    "Incomplete route exchange: got {received}/{expected} routes after {max_wait:?}"
+                )));
             }
 
             // Periodically re-broadcast our route using the peer routes we
@@ -371,7 +367,85 @@ impl MpcOrchestrator {
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        };
+
+        // Phase 2 — Readiness barrier: all parties must signal MpcReady
+        // before any party enters MPC execution.  This replaces heuristic
+        // sleeps with a deterministic synchronisation point.
+        //
+        // We keep accumulated ready signals rather than clearing them.
+        // Clearing causes a race: Party A reaches 3/3 and enters MPC,
+        // but Party B re-enters the barrier (from a retry) and clears
+        // Party A's signal.  Since Party A is already inside MPC
+        // execution and no longer rebroadcasting, Parties B and C get
+        // stuck at 2/3 indefinitely.  Ready signals are idempotent
+        // (HashSet), so accumulating them is safe.
+        {
+            let mgr = route_manager.lock().await;
+            mgr.register_ready(bidders[my_party_id].clone()).await;
+            drop(mgr);
         }
+
+        let my_pubkey = &bidders[my_party_id];
+        route_manager
+            .lock()
+            .await
+            .broadcast_mpc_ready(listing_key, my_pubkey, peer_route_blobs, &self.signing_key)
+            .await?;
+
+        let barrier_start = std::time::Instant::now();
+        // Allow 120s for the barrier: when a peer's barrier times out, it
+        // retries the full handle_auction_end flow (DHT fetch + route
+        // exchange) which takes ~30s.  A short barrier causes parties to
+        // desynchronise — one reaches 3/3 and starts MPC while others are
+        // still in their retry overhead, leading to MP-SPDZ connection
+        // timeouts.  120s accommodates multiple retry cycles.
+        let barrier_timeout = std::time::Duration::from_secs(120);
+        let mut barrier_tick: u8 = 0;
+
+        loop {
+            let ready = route_manager.lock().await.ready_count().await;
+            let expected = bidders.len();
+
+            info!("Readiness barrier: {}/{} parties ready", ready, expected);
+
+            if ready >= expected {
+                info!("All parties ready, proceeding to MPC execution");
+                break;
+            }
+            if barrier_start.elapsed() >= barrier_timeout {
+                return Err(MarketError::Network(format!(
+                    "MPC readiness barrier timed out: {ready}/{expected} parties ready after {barrier_timeout:?}"
+                )));
+            }
+
+            // Re-broadcast every 3 ticks (~3s).  Peers that enter after
+            // us need both our route announcement (to complete route
+            // collection) and our MpcReady (to complete the barrier).
+            barrier_tick = barrier_tick.wrapping_add(1);
+            if barrier_tick.is_multiple_of(3) && !peer_route_blobs.is_empty() {
+                let mgr = route_manager.lock().await;
+                mgr.broadcast_mpc_ready(
+                    listing_key,
+                    my_pubkey,
+                    peer_route_blobs,
+                    &self.signing_key,
+                )
+                .await?;
+                mgr.broadcast_route_announcement(
+                    listing_key,
+                    my_pubkey,
+                    peer_route_blobs,
+                    &self.signing_key,
+                )
+                .await?;
+                drop(mgr);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        Ok(routes)
     }
 
     /// Execute the MPC auction computation using MASCOT protocol
@@ -460,20 +534,18 @@ impl MpcOrchestrator {
         // RAII guard ensures tunnel proxy cleanup + hosts file removal on all exit paths
         let _cleanup_guard = MpcCleanupGuard::new(tunnel_proxy, hosts_file_path.clone());
 
-        // Wait for all parties to be ready
-        info!("Waiting 3 seconds for all parties to be ready...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
         // Compile MPC program for the specific number of parties
         compile_mpc_program(&mp_spdz_dir, num_parties).await?;
 
         // Spawn mascot-party.x and feed bid value via stdin
+        let base_port = super::mpc::base_port_for_offset(self.node_offset);
         let result = spawn_mascot_party(
             &mp_spdz_dir,
             party_id,
             num_parties,
             &hosts_file_path,
             bid_value,
+            base_port,
         )
         .await;
 
@@ -615,10 +687,23 @@ impl MpcOrchestrator {
             }
         }
 
+        let fetched = bid_index.bids.len();
+        let announced = bidder_list.len();
         info!(
-            "Built BidIndex with {} bids from DHT registry",
-            bid_index.bids.len()
+            "Built BidIndex with {}/{} bids from DHT registry",
+            fetched, announced
         );
+
+        // All announced bids must be fetchable. A partial view causes parties
+        // to disagree on the party count, running incompatible MPC programs
+        // (e.g. auction_n-2 vs auction_n-3).  Return an error so the
+        // monitoring loop retries after DHT propagation catches up.
+        if fetched < announced {
+            return Err(MarketError::NotFound(format!(
+                "Only fetched {fetched}/{announced} bid records from DHT — retrying"
+            )));
+        }
+
         Ok(bid_index)
     }
 
