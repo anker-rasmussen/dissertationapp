@@ -3,6 +3,9 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 #![warn(clippy::cargo)]
+#![warn(clippy::perf)]
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::expect_used)]
 // Pedantic lints that are too noisy for this codebase
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
