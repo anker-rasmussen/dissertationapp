@@ -273,6 +273,14 @@ impl AuctionCoordinator {
                 self.handle_mpc_route_announcement(listing_key, party_pubkey, route_blob, signer)
                     .await
             }
+            AuctionMessage::MpcReady {
+                listing_key,
+                party_pubkey,
+                timestamp: _,
+            } => {
+                self.handle_mpc_ready(listing_key, party_pubkey, signer)
+                    .await
+            }
             AuctionMessage::WinnerBidReveal {
                 listing_key,
                 winner,
@@ -605,10 +613,7 @@ impl AuctionCoordinator {
             };
 
             let seller_route = {
-                let received_routes = {
-                    let mgr = route_manager.lock().await;
-                    mgr.received_routes.clone()
-                };
+                let received_routes = route_manager.lock().await.received_routes.clone();
                 let routes = received_routes.lock().await;
                 seller_pubkey
                     .as_ref()
@@ -728,6 +733,46 @@ impl AuctionCoordinator {
                 .await?;
         } else {
             debug!("Received route for unwatched auction {}", listing_key);
+        }
+        Ok(())
+    }
+
+    async fn handle_mpc_ready(
+        &self,
+        listing_key: RecordKey,
+        party_pubkey: PublicKey,
+        signer: [u8; 32],
+    ) -> MarketResult<()> {
+        info!(
+            "Received MpcReady for listing {} from party {}",
+            listing_key, party_pubkey
+        );
+
+        let Some(expected_signer) = self
+            .expected_bidder_signing_key(&listing_key, &party_pubkey)
+            .await?
+        else {
+            warn!(
+                "Rejecting MpcReady for listing {listing_key}: signer binding not found for party {party_pubkey}"
+            );
+            return Ok(());
+        };
+        if expected_signer != signer {
+            warn!(
+                "Rejecting MpcReady for listing {listing_key}: signer mismatch for party {party_pubkey}"
+            );
+            return Ok(());
+        }
+
+        let manager = {
+            let managers = self.mpc.route_managers().lock().await;
+            managers.get(&listing_key).cloned()
+        };
+
+        if let Some(manager) = manager {
+            manager.lock().await.register_ready(party_pubkey).await;
+        } else {
+            debug!("Received MpcReady for unwatched auction {}", listing_key);
         }
         Ok(())
     }

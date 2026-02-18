@@ -17,7 +17,7 @@ use crate::error::{MarketError, MarketResult};
 ///
 /// # Panics
 /// Panics if `node_offset > 6000` (would overflow valid port range).
-const fn base_port_for_offset(node_offset: u16) -> u16 {
+pub(crate) const fn base_port_for_offset(node_offset: u16) -> u16 {
     assert!(node_offset <= 6000, "node_offset too large for port range");
     5000 + (node_offset * 10)
 }
@@ -169,6 +169,7 @@ impl MpcTunnelProxy {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn run_outgoing_proxy(
         &self,
         listen_port: u16,
@@ -224,8 +225,14 @@ impl MpcTunnelProxy {
                 source_party_id: self.inner.party_id,
             };
             let data = self.sign_mpc_message(&open_msg)?;
-            ctx.app_message(Target::RouteId(target_route.clone()), data)
-                .await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(crate::config::MPC_TUNNEL_TIMEOUT_SECS),
+                ctx.app_message(Target::RouteId(target_route.clone()), data),
+            )
+            .await
+            .map_err(|_| {
+                MarketError::Timeout(format!("Timeout sending Open to Party {target_pid}"))
+            })??;
 
             // Read loop: TCP -> Veilid
             let ctx_clone = ctx.clone();
@@ -256,12 +263,21 @@ impl MpcTunnelProxy {
                     }
                 };
 
-                if let Err(e) = ctx_clone
-                    .app_message(Target::RouteId(target_route_clone.clone()), data)
-                    .await
-                {
-                    error!("Failed to send data to Party {}: {}", target_pid, e);
-                    break;
+                let send_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(crate::config::MPC_TUNNEL_TIMEOUT_SECS),
+                    ctx_clone.app_message(Target::RouteId(target_route_clone.clone()), data),
+                )
+                .await;
+                match send_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!("Failed to send data to Party {}: {}", target_pid, e);
+                        break;
+                    }
+                    Err(_) => {
+                        error!("Timeout sending data to Party {}", target_pid);
+                        break;
+                    }
                 }
             }
 
@@ -276,9 +292,11 @@ impl MpcTunnelProxy {
                     return Ok(());
                 }
             };
-            let _ = ctx_clone
-                .app_message(Target::RouteId(target_route_clone), data)
-                .await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(crate::config::MPC_TUNNEL_TIMEOUT_SECS),
+                ctx_clone.app_message(Target::RouteId(target_route_clone), data),
+            )
+            .await;
 
             // Cleanup
             {
@@ -425,9 +443,13 @@ impl MpcTunnelProxy {
                                         payload: buf[..n].to_vec(),
                                     };
                                     if let Ok(data) = proxy.sign_mpc_message(&msg) {
-                                        let _ = ctx
-                                            .app_message(Target::RouteId(route.clone()), data)
-                                            .await;
+                                        let _ = tokio::time::timeout(
+                                            std::time::Duration::from_secs(
+                                                crate::config::MPC_TUNNEL_TIMEOUT_SECS,
+                                            ),
+                                            ctx.app_message(Target::RouteId(route.clone()), data),
+                                        )
+                                        .await;
                                     }
                                 }
                             });

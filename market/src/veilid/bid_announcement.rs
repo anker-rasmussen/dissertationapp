@@ -255,6 +255,15 @@ pub enum AuctionMessage {
         /// Timestamp of announcement
         timestamp: u64,
     },
+    /// Signal that this party has collected all MPC routes and is ready to execute
+    MpcReady {
+        /// Listing this readiness signal is for
+        listing_key: RecordKey,
+        /// Party's public key
+        party_pubkey: PublicKey,
+        /// Timestamp of readiness signal
+        timestamp: u64,
+    },
 }
 
 impl AuctionMessage {
@@ -267,7 +276,8 @@ impl AuctionMessage {
             | Self::MpcRouteAnnouncement { timestamp, .. }
             | Self::WinnerBidReveal { timestamp, .. }
             | Self::SellerRegistration { timestamp, .. }
-            | Self::RegistryAnnouncement { timestamp, .. } => *timestamp,
+            | Self::RegistryAnnouncement { timestamp, .. }
+            | Self::MpcReady { timestamp, .. } => *timestamp,
         }
     }
 
@@ -450,6 +460,28 @@ impl AuctionMessage {
     ) -> Self {
         Self::RegistryAnnouncement {
             registry_key,
+            timestamp: time.now_unix(),
+        }
+    }
+
+    /// Create an MPC readiness signal using system time.
+    pub fn mpc_ready(listing_key: RecordKey, party_pubkey: PublicKey) -> Self {
+        Self::MpcReady {
+            listing_key,
+            party_pubkey,
+            timestamp: now_unix(),
+        }
+    }
+
+    /// Create an MPC readiness signal with a custom time provider.
+    pub fn mpc_ready_with_time<T: TimeProvider>(
+        listing_key: RecordKey,
+        party_pubkey: PublicKey,
+        time: &T,
+    ) -> Self {
+        Self::MpcReady {
+            listing_key,
+            party_pubkey,
             timestamp: time.now_unix(),
         }
     }
@@ -709,6 +741,31 @@ mod tests {
                 assert_eq!(timestamp, 9000);
             }
             other => panic!("Expected WinnerBidReveal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mpc_ready_bincode_roundtrip() {
+        let listing_key = test_record_key();
+        let party_pubkey = test_pubkey();
+        let msg = AuctionMessage::mpc_ready_with_time(
+            listing_key.clone(),
+            party_pubkey.clone(),
+            &MockTime::new(10_000),
+        );
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
+        match decoded {
+            AuctionMessage::MpcReady {
+                listing_key: decoded_listing,
+                party_pubkey: decoded_party,
+                timestamp,
+            } => {
+                assert_eq!(decoded_listing, listing_key);
+                assert_eq!(decoded_party, party_pubkey);
+                assert_eq!(timestamp, 10_000);
+            }
+            other => panic!("Expected MpcReady, got {other:?}"),
         }
     }
 

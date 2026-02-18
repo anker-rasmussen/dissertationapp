@@ -1,5 +1,5 @@
 use ed25519_dalek::SigningKey;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -18,6 +18,7 @@ pub struct MpcRouteManager {
     my_route_id: Option<RouteId>,
     my_route_blob: Option<RouteBlob>, // Route blob for sharing with other parties
     pub(crate) received_routes: Arc<Mutex<HashMap<PublicKey, RouteId>>>,
+    pub(crate) ready_parties: Arc<Mutex<HashSet<PublicKey>>>,
 }
 
 impl MpcRouteManager {
@@ -28,6 +29,7 @@ impl MpcRouteManager {
             my_route_id: None,
             my_route_blob: None,
             received_routes: Arc::new(Mutex::new(HashMap::new())),
+            ready_parties: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -206,5 +208,67 @@ impl MpcRouteManager {
     /// Get my route blob for sharing
     pub const fn get_my_route_blob(&self) -> Option<&RouteBlob> {
         self.my_route_blob.as_ref()
+    }
+
+    /// Broadcast an `MpcReady` signal to peers using their private route blobs.
+    pub async fn broadcast_mpc_ready(
+        &self,
+        listing_key: &RecordKey,
+        my_pubkey: &PublicKey,
+        peer_route_blobs: &[(String, Vec<u8>)],
+        signing_key: &SigningKey,
+    ) -> MarketResult<()> {
+        info!(
+            "Broadcasting MpcReady for party {} on listing {}",
+            my_pubkey, listing_key
+        );
+
+        let ready_msg = AuctionMessage::mpc_ready(listing_key.clone(), my_pubkey.clone());
+        let data = ready_msg.to_signed_bytes(signing_key)?;
+
+        let routing_context = self
+            .api
+            .routing_context()?
+            .with_safety(SafetySelection::Safe(SafetySpec {
+                preferred_route: None,
+                hop_count: 1,
+                stability: Stability::Reliable,
+                sequencing: Sequencing::PreferOrdered,
+            }))?;
+
+        let mut sent_count = 0;
+        for (node_id, blob) in peer_route_blobs {
+            match self.api.import_remote_private_route(blob.clone()) {
+                Ok(imported_route) => {
+                    match routing_context
+                        .app_message(Target::RouteId(imported_route.clone()), data.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            debug!("Sent MpcReady to peer {}", node_id);
+                            sent_count += 1;
+                        }
+                        Err(e) => warn!("Failed to send MpcReady to {}: {}", node_id, e),
+                    }
+                    let _ = self.api.release_private_route(imported_route);
+                }
+                Err(e) => {
+                    debug!("Failed to import route for {}: {}", node_id, e);
+                }
+            }
+        }
+
+        info!("Broadcasted MpcReady to {} peers", sent_count);
+        Ok(())
+    }
+
+    /// Register a party as ready. Returns `true` if the party was newly inserted.
+    pub async fn register_ready(&self, party_pubkey: PublicKey) -> bool {
+        self.ready_parties.lock().await.insert(party_pubkey)
+    }
+
+    /// Number of parties that have signalled readiness.
+    pub async fn ready_count(&self) -> usize {
+        self.ready_parties.lock().await.len()
     }
 }
