@@ -167,7 +167,7 @@ impl DevnetManager {
     }
 
     pub fn wait_for_health(&self, timeout_secs: u64) -> MarketResult<()> {
-        eprintln!("[E2E] Waiting for all 9 devnet nodes to be healthy...");
+        eprintln!("[E2E] Waiting for all 20 devnet nodes to be healthy...");
         let start = std::time::Instant::now();
         loop {
             let output = Command::new("docker")
@@ -190,9 +190,9 @@ impl DevnetManager {
                     .filter(|line| line.contains("healthy"))
                     .count();
 
-                eprintln!("[E2E] Health check: {}/9 nodes healthy", healthy_count);
+                eprintln!("[E2E] Health check: {}/20 nodes healthy", healthy_count);
 
-                if healthy_count >= 9 && self.check_all_nodes_reachable() {
+                if healthy_count >= 20 && self.check_all_nodes_reachable() {
                     eprintln!("[E2E] All devnet nodes are healthy and reachable!");
                     return Ok(());
                 }
@@ -213,7 +213,7 @@ impl DevnetManager {
     }
 
     fn check_all_nodes_reachable(&self) -> bool {
-        let ports = [5160, 5161, 5162, 5163, 5164, 5165, 5166, 5167, 5168];
+        let ports: Vec<u16> = (5160..=5179).collect();
         for port in ports {
             let addr = format!("127.0.0.1:{}", port);
             if std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_secs(1))
@@ -270,7 +270,8 @@ impl Drop for DevnetManager {
 // ── TestNode ─────────────────────────────────────────────────────────
 
 /// Test node configuration for E2E tests.
-/// Uses offsets 10-39 to stay within libipspoof's MAX_PORT_OFFSET range (40).
+/// Uses offsets 20-39 to stay within libipspoof's MAX_PORT_OFFSET range (40).
+/// Devnet uses offsets 0-19 (20 nodes).
 pub struct TestNode {
     pub node: VeilidNode,
     pub offset: u16,
@@ -287,7 +288,7 @@ impl TestNode {
             network_key: "development-network-2025".to_string(),
             bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
             port_offset: offset,
-            limit_over_attached: 8,
+            limit_over_attached: 24,
         };
 
         let mut market_config = market::config::MarketConfig::default();
@@ -320,10 +321,11 @@ impl TestNode {
 
     pub async fn wait_for_ready(&self, timeout_secs: u64) -> MarketResult<()> {
         let start = std::time::Instant::now();
+        // Phase 1: wait for attachment + node IDs
         loop {
             let state = self.node.state();
             if state.is_attached && !state.node_ids.is_empty() {
-                return Ok(());
+                break;
             }
             if start.elapsed().as_secs() > timeout_secs {
                 return Err(MarketError::Timeout(format!(
@@ -333,6 +335,30 @@ impl TestNode {
                     state.is_attached,
                     state.node_ids.len()
                 )));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        // Phase 2: wait for enough peers so routing table can support
+        // private route relay operations.  AttachedWeak (2 peers) is
+        // insufficient — routes die immediately because relay nodes
+        // aren't in the table yet.
+        let min_peers = 4;
+        loop {
+            let state = self.node.state();
+            if state.peer_count >= min_peers {
+                eprintln!(
+                    "[E2E] Node {} ready: {} peers (needed {})",
+                    self.offset, state.peer_count, min_peers
+                );
+                return Ok(());
+            }
+            if start.elapsed().as_secs() > timeout_secs {
+                let state = self.node.state();
+                eprintln!(
+                    "[E2E] Node {} peer wait timeout: {} peers (needed {}), proceeding anyway",
+                    self.offset, state.peer_count, min_peers
+                );
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -368,7 +394,7 @@ impl E2EParticipant {
     pub async fn new(offset: u16) -> MarketResult<Self> {
         let mut node = TestNode::new(offset);
         node.start().await?;
-        node.wait_for_ready(90).await?;
+        node.wait_for_ready(180).await?;
 
         let node_id = node
             .node_id()
@@ -404,13 +430,44 @@ impl E2EParticipant {
         let msg_loop_handle = tokio::spawn(async move {
             if let Some(mut rx) = update_rx {
                 while let Some(update) = rx.recv().await {
-                    if let veilid_core::VeilidUpdate::AppMessage(msg) = update {
-                        if let Err(e) = coord_clone
-                            .process_app_message(msg.message().to_vec())
-                            .await
-                        {
-                            tracing::error!("Failed to process AppMessage: {}", e);
+                    match update {
+                        veilid_core::VeilidUpdate::AppMessage(msg) => {
+                            if let Err(e) = coord_clone
+                                .process_app_message(msg.message().to_vec())
+                                .await
+                            {
+                                tracing::error!("Failed to process AppMessage: {}", e);
+                            }
                         }
+                        veilid_core::VeilidUpdate::AppCall(call) => {
+                            tracing::info!(
+                                ">>> AppCall received: {} bytes, id={}",
+                                call.message().len(),
+                                call.id()
+                            );
+                            let api = coord_clone.api().clone();
+                            let call_id = call.id();
+                            match coord_clone.process_app_call(call.message().to_vec()).await {
+                                Ok(response) => {
+                                    if let Err(e) = api.app_call_reply(call_id, response).await {
+                                        tracing::error!("Failed to send app_call reply: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to process AppCall: {}", e);
+                                    let _ = api.app_call_reply(call_id, vec![0x00]).await;
+                                }
+                            }
+                        }
+                        veilid_core::VeilidUpdate::RouteChange(change) => {
+                            coord_clone
+                                .handle_route_change(
+                                    change.dead_routes.clone(),
+                                    change.dead_remote_routes.clone(),
+                                )
+                                .await;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -445,7 +502,16 @@ impl E2EParticipant {
 
 // ── Listing helpers ──────────────────────────────────────────────────
 
-/// Create a test listing using MockTime for predictable timestamps.
+/// Real unix time for listing `created_at` so that `auction_end` is a
+/// real-world deadline (not immediately expired as with `MockTime(1000)`).
+fn listing_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("System clock before epoch")
+        .as_secs()
+}
+
+/// Create a test listing with a real `created_at` timestamp.
 pub fn create_test_listing(
     key: veilid_core::RecordKey,
     seller: PublicKey,
@@ -454,7 +520,7 @@ pub fn create_test_listing(
 ) -> Listing {
     use market::mocks::MockTime;
 
-    Listing::builder_with_time(MockTime::new(1000))
+    Listing::builder_with_time(MockTime::new(listing_now()))
         .key(key)
         .seller(seller)
         .title("E2E Test Item")
@@ -484,7 +550,7 @@ pub fn create_encrypted_listing(
     let (ciphertext, nonce) = encrypt_content(plaintext, &aes_key).expect("encryption failed");
     let decryption_key_hex = hex::encode(aes_key);
 
-    Listing::builder_with_time(MockTime::new(1000))
+    Listing::builder_with_time(MockTime::new(listing_now()))
         .key(key)
         .seller(seller)
         .title("E2E Encrypted Test Item")
@@ -504,16 +570,35 @@ pub fn make_real_commitment(bid_value: u64, nonce: &[u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Check if MP-SPDZ mascot-party.x binary is available.
+/// Check if the configured MP-SPDZ protocol binary is available.
 pub fn check_mp_spdz_available() -> bool {
     let mp_spdz_dir = std::env::var(market::config::MP_SPDZ_DIR_ENV)
         .unwrap_or_else(|_| market::config::DEFAULT_MP_SPDZ_DIR.to_string());
-    let binary = std::path::Path::new(&mp_spdz_dir).join("mascot-party.x");
+    let protocol = std::env::var(market::config::MPC_PROTOCOL_ENV)
+        .unwrap_or_else(|_| market::config::DEFAULT_MPC_PROTOCOL.to_string());
+    let binary = std::path::Path::new(&mp_spdz_dir).join(&protocol);
     binary.exists()
 }
 
 /// Setup helper — starts devnet and validates LD_PRELOAD/libipspoof prerequisites.
 pub fn setup_e2e_environment() -> MarketResult<DevnetManager> {
+    // Kill any orphaned MP-SPDZ processes from previous runs.
+    // When a test process is killed (e.g. timeout, Ctrl-C), the child
+    // MP-SPDZ process becomes an orphan and holds TCP ports
+    // indefinitely, causing "address already in use" on the next run.
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg("mascot-party.x")
+        .status();
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg("replicated-ring-party.x")
+        .status();
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg("shamir-party.x")
+        .status();
+
     let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
     let expected_preload = libipspoof_path();
 
@@ -604,13 +689,44 @@ pub async fn wait_for_broadcast_routes(
 }
 
 /// Initialize tracing for tests.
+///
+/// Writes to `/tmp/e2e-trace.log` for real-time observation with `tail -f`.
 pub fn init_test_tracing() {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-    let _ = tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,veilid_core=debug,market=debug")),
-        )
-        .with(tracing_subscriber::fmt::layer().with_test_writer())
-        .try_init();
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,veilid_core=warn,market=debug"));
+    if let Ok(file) = std::fs::File::create("/tmp/e2e-trace.log") {
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false),
+            )
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_test_writer())
+            .try_init();
+    }
+}
+
+/// Run an E2E test with standard boilerplate: tracing init, devnet setup,
+/// timeout wrapping, and pass/fail reporting.
+pub async fn run_e2e_test<F, Fut>(name: &str, timeout_secs: u64, f: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), MarketError>>,
+{
+    init_test_tracing();
+    let _devnet = setup_e2e_environment().expect("E2E setup failed");
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), f()).await {
+        Ok(Ok(())) => eprintln!("[E2E] {} PASSED", name),
+        Ok(Err(e)) => {
+            print_error_chain(&e);
+            panic!("{} failed: {}", name, e);
+        }
+        Err(_) => panic!("{} timed out after {}s", name, timeout_secs),
+    }
 }

@@ -90,11 +90,6 @@ impl MultiPartyHarness {
         &self.parties[index]
     }
 
-    /// Get a mutable reference to a party by index.
-    pub fn party_mut(&mut self, index: usize) -> &mut PartyContext {
-        &mut self.parties[index]
-    }
-
     /// Get the number of parties.
     pub fn num_parties(&self) -> usize {
         self.parties.len()
@@ -108,11 +103,6 @@ impl MultiPartyHarness {
     /// Advance time by the specified number of seconds.
     pub fn advance_time(&self, seconds: u64) {
         self.time.advance(seconds);
-    }
-
-    /// Set the current time.
-    pub fn set_time(&self, timestamp: u64) {
-        self.time.set(timestamp);
     }
 
     /// Party 0 creates a listing.
@@ -285,11 +275,6 @@ impl MultiPartyHarness {
     /// Clear bid registry (for running multiple auctions).
     pub async fn clear_bid_registry(&self) {
         self.bid_registry.clear().await;
-    }
-
-    /// Get bids registered for a specific party.
-    pub async fn get_registered_bids(&self) -> std::collections::HashMap<usize, (u64, u64)> {
-        self.bid_registry.get_bids().await
     }
 }
 

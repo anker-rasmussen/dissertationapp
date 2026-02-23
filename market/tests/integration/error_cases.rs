@@ -166,7 +166,7 @@ async fn test_dht_failure_on_listing_read() {
 
 #[test]
 fn test_n2_mpc_validation() {
-    // MASCOT MPC requires N >= 2
+    // MPC requires N >= 2
     assert!(validate_auction_parties(1).is_err());
     assert!(validate_auction_parties(0).is_err());
 
