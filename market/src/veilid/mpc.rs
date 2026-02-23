@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use veilid_core::{PublicKey, RouteId, Target, VeilidAPI};
@@ -46,14 +46,6 @@ enum MpcMessage {
     Close {
         source_party_id: usize,
         stream_id: u64,
-    },
-    /// Application-level acknowledgement (legacy, currently unused).
-    /// Kept for wire compatibility — new senders use fire-and-forget
-    /// `app_message` without waiting for ACKs.
-    Ack {
-        source_party_id: usize,
-        stream_id: u64,
-        seq: u64,
     },
     /// Route warmup ping: sent before starting MP-SPDZ to confirm that
     /// MPC private routes are alive and delivering messages.
@@ -100,9 +92,14 @@ struct ReorderBuffer {
 /// permanent gap (lost messages from a dead route) and force-flushing.
 const MAX_REORDER_BUFFER_GAP: usize = 32;
 
-/// Maximum retries for `app_message` sends before giving up.
-/// At 500ms backoff per retry, 10 retries ≈ 5s max per message.
+/// Maximum retries for `app_call` sends before giving up.
+/// At 50ms initial backoff (doubling to 1s max), 10 retries ≈ 10s worst case.
 const MAX_SEND_RETRIES: u32 = 10;
+
+/// Number of concurrent `app_call` sends allowed per stream direction.
+/// With ~10ms RTT and 31KB chunks, 8 in-flight calls overlap the latency,
+/// yielding ~8x throughput improvement on the data path.
+const SEND_PIPELINE_DEPTH: u32 = 8;
 
 struct MpcTunnelProxyInner {
     api: VeilidAPI,
@@ -315,6 +312,7 @@ impl MpcTunnelProxy {
 
     /// Serialize an MPC message and wrap it in a signed envelope.
     fn sign_mpc_message(&self, msg: &MpcMessage) -> MarketResult<Vec<u8>> {
+        let t = std::time::Instant::now();
         let payload = bincode::options()
             .with_limit(super::bid_announcement::MAX_BINCODE_SIZE)
             .serialize(msg)
@@ -322,7 +320,9 @@ impl MpcTunnelProxy {
                 MarketError::Serialization(format!("Failed to serialize MPC message: {e}"))
             })?;
         let envelope = SignedEnvelope::sign(payload, &self.inner.signing_key)?;
-        envelope.to_bytes()
+        let result = envelope.to_bytes();
+        debug!("sign_mpc_message: {:?}", t.elapsed());
+        result
     }
 
     /// Cleanup resources: signal shutdown and clear active sessions.
@@ -606,21 +606,22 @@ impl MpcTunnelProxy {
     /// - `app_call` returns an error or NACK, enabling retry logic
     /// - Matches best practice from VeilidChat (DHT) and Stigmerge (`app_call`)
     async fn send_reliable(&self, target_pid: usize, data: &[u8], label: &str) {
-        let mut backoff_ms = 200u64;
+        let send_start = std::time::Instant::now();
+        let mut backoff_ms = 50u64;
         for attempt in 0u32..MAX_SEND_RETRIES {
             let ctx = match self.inner.api.routing_context() {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("{label} attempt {attempt}: no routing context: {e}");
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(5000);
+                    backoff_ms = (backoff_ms * 2).min(1000);
                     continue;
                 }
             };
             let Some(route) = self.get_party_route(target_pid).await else {
                 warn!("{label} attempt {attempt}: no route for Party {target_pid}");
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(5000);
+                backoff_ms = (backoff_ms * 2).min(1000);
                 continue;
             };
 
@@ -628,22 +629,29 @@ impl MpcTunnelProxy {
                 Ok(reply) => {
                     // ACK = [0x01], NACK = [0x00] (tunnel not ready)
                     if reply.first() == Some(&0x01) {
-                        return; // confirmed delivery
+                        debug!(
+                            "{label}: delivered in {:?} ({attempt} retries)",
+                            send_start.elapsed()
+                        );
+                        return;
                     }
                     // NACK — peer's tunnel proxy not ready yet; retry
                     debug!("{label} attempt {attempt}: NACK from Party {target_pid} — retrying");
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(5000);
+                    backoff_ms = (backoff_ms * 2).min(1000);
                 }
                 Err(e) => {
                     debug!("{label} attempt {attempt}: app_call failed: {e} — reimporting route");
                     self.reimport_party_route(target_pid).await;
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(5000);
+                    backoff_ms = (backoff_ms * 2).min(1000);
                 }
             }
         }
-        error!("{label}: gave up after {MAX_SEND_RETRIES} retries");
+        error!(
+            "{label}: gave up after {MAX_SEND_RETRIES} retries ({:?} elapsed)",
+            send_start.elapsed()
+        );
     }
 
     /// Handle a single outgoing MP-SPDZ connection through the tunnel.
@@ -696,12 +704,14 @@ impl MpcTunnelProxy {
         }
 
         // Read loop: local TCP → Veilid
-        // Data uses fire-and-forget app_message with retry on send error.
-        // Sequence numbers + reorder buffer handle ordering at the receiver.
+        // Pipelined: spawns up to SEND_PIPELINE_DEPTH concurrent sends to
+        // overlap app_call RTT (~10ms) with TCP reads.  Sequence numbers are
+        // allocated before spawn to preserve ordering at the receiver.
         let my_pid = self.inner.party_id;
         let mut buf = vec![0u8; 31000];
         let mut total_bytes_sent: u64 = 0;
         let mut last_progress_log = std::time::Instant::now();
+        let send_sem = Arc::new(Semaphore::new(SEND_PIPELINE_DEPTH as usize));
         loop {
             let n = match rd.read(&mut buf).await {
                 Ok(0) => break,
@@ -726,7 +736,17 @@ impl MpcTunnelProxy {
             };
             let signed_data = self.sign_mpc_message(&msg)?;
             let label = format!("Data P{my_pid}→P{target_pid} s{stream_id} seq{seq}");
-            self.send_reliable(target_pid, &signed_data, &label).await;
+
+            // Acquire pipeline slot, then send concurrently
+            let Ok(permit) = Arc::clone(&send_sem).acquire_owned().await else {
+                break; // semaphore closed — shutting down
+            };
+            let proxy = self.clone();
+            tokio::spawn(async move {
+                proxy.send_reliable(target_pid, &signed_data, &label).await;
+                drop(permit);
+            });
+
             total_bytes_sent += n as u64;
 
             // Log progress every 30s to confirm data flow at info level
@@ -743,7 +763,10 @@ impl MpcTunnelProxy {
             }
         }
 
-        // Send Close via app_message (best-effort)
+        // Drain pipeline: wait for all in-flight sends before Close
+        let _ = send_sem.acquire_many(SEND_PIPELINE_DEPTH).await;
+
+        // Send Close via app_call (best-effort)
         let close_msg = MpcMessage::Close {
             source_party_id: my_pid,
             stream_id,
@@ -776,9 +799,6 @@ impl MpcTunnelProxy {
                 source_party_id, ..
             }
             | MpcMessage::Close {
-                source_party_id, ..
-            }
-            | MpcMessage::Ack {
                 source_party_id, ..
             }
             | MpcMessage::Ping {
@@ -871,9 +891,10 @@ impl MpcTunnelProxy {
                     };
                     // Brief pause while holding mutex — gives the
                     // ServerSocket time to accept + read identity before
-                    // the next Open handler connects.
+                    // the next Open handler connects.  20ms is generous
+                    // for localhost TCP accept.
                     if result.is_some() {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                     }
                     result
                 };
@@ -939,6 +960,7 @@ impl MpcTunnelProxy {
 
                     tokio::spawn(async move {
                         let mut buf = vec![0u8; 31000];
+                        let reply_sem = Arc::new(Semaphore::new(SEND_PIPELINE_DEPTH as usize));
                         loop {
                             let n = match rd.read(&mut buf).await {
                                 Ok(0) | Err(_) => break,
@@ -963,8 +985,19 @@ impl MpcTunnelProxy {
 
                             let label =
                                 format!("Reply P{my_pid}→P{target_pid} s{stream_id} seq{seq}");
-                            proxy.send_reliable(target_pid, &data, &label).await;
+
+                            // Acquire pipeline slot, then send concurrently
+                            let Ok(permit) = Arc::clone(&reply_sem).acquire_owned().await else {
+                                break; // semaphore closed — shutting down
+                            };
+                            let p = proxy.clone();
+                            tokio::spawn(async move {
+                                p.send_reliable(target_pid, &data, &label).await;
+                                drop(permit);
+                            });
                         }
+                        // Drain reply pipeline
+                        let _ = reply_sem.acquire_many(SEND_PIPELINE_DEPTH).await;
                     });
                 }
             }
@@ -974,6 +1007,7 @@ impl MpcTunnelProxy {
                 seq,
                 payload,
             } => {
+                let data_start = std::time::Instant::now();
                 let session_key: SessionKey = (source_party_id, stream_id);
 
                 // Check if session exists (quick non-blocking check)
@@ -1005,29 +1039,49 @@ impl MpcTunnelProxy {
                 }
 
                 // Reorder: deliver_ordered returns payloads ready to write in seq order
+                let t_reorder = std::time::Instant::now();
                 let ordered = self.deliver_ordered(session_key, seq, payload).await;
+                let reorder_elapsed = t_reorder.elapsed();
                 if ordered.is_empty() {
+                    debug!(
+                        "Data handler ({}, {}) seq {}: reorder {:?}, buffered (total {:?})",
+                        source_party_id,
+                        stream_id,
+                        seq,
+                        reorder_elapsed,
+                        data_start.elapsed()
+                    );
                     return Ok(());
                 }
 
-                let mut sessions = self.inner.sessions.lock().await;
-                if let Some(wr) = sessions.get_mut(&session_key) {
-                    for payload in ordered {
-                        debug!(
-                            "Data: writing {} bytes to session ({}, {})",
-                            payload.len(),
-                            source_party_id,
-                            stream_id
-                        );
-                        if let Err(e) = wr.write_all(&payload).await {
-                            error!(
-                                "Failed to write to local MP-SPDZ for ({}, {}): {}",
-                                source_party_id, stream_id, e
+                {
+                    let mut sessions = self.inner.sessions.lock().await;
+                    if let Some(wr) = sessions.get_mut(&session_key) {
+                        for payload in ordered {
+                            debug!(
+                                "Data: writing {} bytes to session ({}, {})",
+                                payload.len(),
+                                source_party_id,
+                                stream_id
                             );
-                            break;
+                            if let Err(e) = wr.write_all(&payload).await {
+                                error!(
+                                    "Failed to write to local MP-SPDZ for ({}, {}): {}",
+                                    source_party_id, stream_id, e
+                                );
+                                break;
+                            }
                         }
                     }
                 }
+                debug!(
+                    "Data handler ({}, {}) seq {}: reorder {:?}, total {:?}",
+                    source_party_id,
+                    stream_id,
+                    seq,
+                    reorder_elapsed,
+                    data_start.elapsed()
+                );
             }
             MpcMessage::Close {
                 source_party_id,
@@ -1043,16 +1097,6 @@ impl MpcTunnelProxy {
                 drop(sessions);
                 let mut pending = self.inner.pending_data.lock().await;
                 pending.remove(&session_key);
-            }
-            MpcMessage::Ack {
-                source_party_id,
-                stream_id,
-                seq,
-            } => {
-                debug!(
-                    "Received ACK from Party {} stream {} seq {} (no-op)",
-                    source_party_id, stream_id, seq
-                );
             }
             MpcMessage::Ping { source_party_id } => {
                 debug!("Received Ping from Party {}", source_party_id);
@@ -1112,6 +1156,7 @@ impl MpcTunnelProxy {
     /// All MPC data is sent via `app_call` for confirmed delivery.
     /// Returns ACK `[0x01]` on success so the sender knows the data arrived.
     pub async fn process_call(&self, message: Vec<u8>, signer: [u8; 32]) -> MarketResult<Vec<u8>> {
+        let call_start = std::time::Instant::now();
         // Peek at message type — Open still needs async spawn (30s+ TCP connect).
         let is_open = {
             let peek: MpcMessage = bincode_deserialize_limited(&message)?;
@@ -1128,6 +1173,7 @@ impl MpcTunnelProxy {
         } else {
             self.process_message(message, signer).await?;
         }
+        debug!("process_call: {:?}", call_start.elapsed());
         Ok(vec![0x01])
     }
 }
@@ -1200,29 +1246,6 @@ mod tests {
                 assert_eq!(stream_id, 1);
             }
             other => panic!("Expected Close, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_mpc_message_ack_roundtrip() {
-        let msg = MpcMessage::Ack {
-            source_party_id: 1,
-            stream_id: 3,
-            seq: 42,
-        };
-        let bytes = bincode::serialize(&msg).unwrap();
-        let decoded: MpcMessage = bincode::deserialize(&bytes).unwrap();
-        match decoded {
-            MpcMessage::Ack {
-                source_party_id,
-                stream_id,
-                seq,
-            } => {
-                assert_eq!(source_party_id, 1);
-                assert_eq!(stream_id, 3);
-                assert_eq!(seq, 42);
-            }
-            other => panic!("Expected Ack, got {other:?}"),
         }
     }
 
