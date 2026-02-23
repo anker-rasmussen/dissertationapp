@@ -39,6 +39,7 @@ pub fn make_test_record_key(id: u64) -> RecordKey {
 
     let encoded = data_encoding::BASE64URL_NOPAD.encode(&key_bytes);
     let key_str = format!("VLD0:{encoded}");
+    #[allow(clippy::expect_used)]
     RecordKey::try_from(key_str.as_str()).expect("Should create valid RecordKey")
 }
 
@@ -51,6 +52,7 @@ pub fn make_test_public_key(id: u8) -> veilid_core::PublicKey {
 
     let encoded = data_encoding::BASE64URL_NOPAD.encode(&key_bytes);
     let key_str = format!("VLD0:{encoded}");
+    #[allow(clippy::expect_used)]
     veilid_core::PublicKey::try_from(key_str.as_str()).expect("Should create valid PublicKey")
 }
 
@@ -347,6 +349,7 @@ impl DhtStore for MockDht {
         }
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     async fn set_subkey_cas(
         &self,
         record: &Self::OwnedRecord,
@@ -374,8 +377,7 @@ impl DhtStore for MockDht {
 
         if subkey >= u32::from(crate::config::DHT_SUBKEY_COUNT) {
             return Err(MarketError::Dht(format!(
-                "MockDht: subkey {} exceeds max",
-                subkey
+                "MockDht: subkey {subkey} exceeds max",
             )));
         }
         if value.len() > crate::traits::dht::MAX_DHT_VALUE_SIZE {

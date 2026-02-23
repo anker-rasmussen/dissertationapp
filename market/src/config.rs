@@ -61,10 +61,6 @@ pub fn now_unix() -> u64 {
 /// Timeout for individual app_message sends (control messages).
 pub const APP_MESSAGE_TIMEOUT_SECS: u64 = 10;
 
-/// Timeout for MPC tunnel relay messages (data relay over safe routes).
-/// Longer than control messages because safe-route hops add latency.
-pub const MPC_TUNNEL_TIMEOUT_SECS: u64 = 30;
-
 /// Timeout for auctions stuck in pending-MPC state.
 pub const AUCTION_STALE_TIMEOUT_SECS: u64 = 600;
 
@@ -84,8 +80,25 @@ pub const DEFAULT_ATTACHMENT_TIMEOUT_SECS: u64 = 20;
 /// Default wait time for MPC route establishment.
 pub const DEFAULT_MPC_ROUTE_WAIT_SECS: u64 = 20;
 
-/// Default timeout for MPC execution (mascot-party.x process).
-pub const DEFAULT_MPC_EXECUTION_TIMEOUT_SECS: u64 = 120;
+/// Default timeout for MPC execution.
+pub const DEFAULT_MPC_EXECUTION_TIMEOUT_SECS: u64 = 900;
+
+/// Default Veilid RPC timeout in milliseconds.
+///
+/// Controls how long `app_call` waits internally for a response.
+/// Lower values detect dead routes faster during MPC data transfer
+/// (reducing per-retry overhead from 10s to 5s).  DHT operations
+/// typically complete in 1-3s so 5s is sufficient for bootstrapping.
+pub const DEFAULT_RPC_TIMEOUT_MS: u32 = 5_000;
+
+/// Default MPC protocol binary name.
+///
+/// MASCOT: dishonest majority, malicious security, N >= 2 parties.
+/// Override via `MPC_PROTOCOL` env var for alternative protocols.
+pub const DEFAULT_MPC_PROTOCOL: &str = "mascot-party.x";
+
+/// Environment variable to override the MPC protocol binary.
+pub const MPC_PROTOCOL_ENV: &str = "MPC_PROTOCOL";
 
 use std::path::PathBuf;
 
@@ -111,7 +124,7 @@ pub struct MarketConfig {
     pub attachment_timeout_secs: u64,
     /// Wait time (seconds) for MPC route establishment.
     pub mpc_route_wait_secs: u64,
-    /// Timeout (seconds) for MPC execution (mascot-party.x).
+    /// Timeout (seconds) for MPC execution.
     pub mpc_execution_timeout_secs: u64,
     /// Timeout (seconds) for individual app_message sends.
     pub app_message_timeout_secs: u64,
@@ -123,6 +136,9 @@ pub struct MarketConfig {
     pub limit_over_attached: u32,
     /// Maximum seconds to wait for network attachment.
     pub max_attachment_wait_secs: u64,
+    /// Veilid RPC timeout in milliseconds (default: 10_000).
+    /// Controls how long app_call waits for a response before timing out.
+    pub rpc_timeout_ms: u32,
 }
 
 impl MarketConfig {
@@ -168,8 +184,9 @@ impl MarketConfig {
             app_message_timeout_secs: APP_MESSAGE_TIMEOUT_SECS,
             update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
             auction_stale_timeout_secs: AUCTION_STALE_TIMEOUT_SECS,
-            limit_over_attached: 8,
+            limit_over_attached: 16,
             max_attachment_wait_secs: 180,
+            rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
         }
     }
 }
@@ -192,8 +209,9 @@ impl Default for MarketConfig {
             app_message_timeout_secs: APP_MESSAGE_TIMEOUT_SECS,
             update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
             auction_stale_timeout_secs: AUCTION_STALE_TIMEOUT_SECS,
-            limit_over_attached: 8,
+            limit_over_attached: 16,
             max_attachment_wait_secs: 180,
+            rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
         }
     }
 }

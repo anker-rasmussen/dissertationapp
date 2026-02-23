@@ -66,7 +66,10 @@ fn ensure_mpspdz_ready() -> MarketResult<()> {
 
     let checks = [
         (dir.to_path_buf(), "MP-SPDZ directory"),
-        (dir.join("mascot-party.x"), "mascot-party.x binary"),
+        (
+            dir.join(market::config::DEFAULT_MPC_PROTOCOL),
+            "MPC protocol binary",
+        ),
         (dir.join("compile.py"), "compile.py"),
     ];
 
@@ -132,7 +135,7 @@ fn ensure_mpspdz_ready() -> MarketResult<()> {
             "MP-SPDZ is not ready and setup-mpspdz.sh was not found.\n\
              Please run the setup script manually:\n\
                ./setup-mpspdz.sh --mp-spdz-dir {}\n\
-             Or ensure mascot-party.x and compile.py exist in {}",
+             Or ensure the MPC binary and compile.py exist in {}",
             mp_spdz_dir, mp_spdz_dir
         ))),
     }
@@ -294,6 +297,42 @@ fn main() -> MarketResult<()> {
                                         {
                                             error!("Failed to process MPC message: {}", e);
                                         }
+                                    }
+                                }
+                                Some(veilid_core::VeilidUpdate::AppCall(call)) => {
+                                    let coordinator = coordinator_holder.read().clone();
+                                    if let Some(coordinator) = coordinator {
+                                        let api = coordinator.api().clone();
+                                        let call_id = call.id();
+                                        match coordinator
+                                            .process_app_call(call.message().to_vec())
+                                            .await
+                                        {
+                                            Ok(response) => {
+                                                if let Err(e) =
+                                                    api.app_call_reply(call_id, response).await
+                                                {
+                                                    error!("Failed to send app_call reply: {}", e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to process AppCall: {}", e);
+                                                let _ = api
+                                                    .app_call_reply(call_id, vec![0x00])
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(veilid_core::VeilidUpdate::RouteChange(change)) => {
+                                    let coordinator = coordinator_holder.read().clone();
+                                    if let Some(coordinator) = coordinator {
+                                        coordinator
+                                            .handle_route_change(
+                                                change.dead_routes.clone(),
+                                                change.dead_remote_routes.clone(),
+                                            )
+                                            .await;
                                     }
                                 }
                                 Some(_) => {}

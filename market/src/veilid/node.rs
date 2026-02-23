@@ -6,10 +6,10 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use veilid_core::{
-    api_startup, VeilidAPI, VeilidConfig, VeilidConfigCapabilities, VeilidConfigNetwork,
-    VeilidConfigProtectedStore, VeilidConfigProtocol, VeilidConfigRoutingTable, VeilidConfigTCP,
-    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate,
-    VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
+    api_startup, VeilidAPI, VeilidConfig, VeilidConfigCapabilities, VeilidConfigDHT,
+    VeilidConfigNetwork, VeilidConfigProtectedStore, VeilidConfigProtocol, VeilidConfigRPC,
+    VeilidConfigRoutingTable, VeilidConfigTCP, VeilidConfigTableStore, VeilidConfigUDP,
+    VeilidConfigWS, VeilidUpdate, VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,14 +32,14 @@ pub struct DevNetConfig {
 impl Default for DevNetConfig {
     fn default() -> Self {
         // Port offset can be overridden via MARKET_NODE_OFFSET env var
-        // The devnet uses offsets 0-8 (9 nodes), so market instances start at 9+:
-        // - MARKET_NODE_OFFSET=9 (default)  -> port 5169, IP 1.2.3.10, data: ~/.local/share/smpc-auction-node-9
-        // - MARKET_NODE_OFFSET=10 -> port 5170, IP 1.2.3.11, data: ~/.local/share/smpc-auction-node-10
-        // - MARKET_NODE_OFFSET=11 -> port 5171, IP 1.2.3.12, data: ~/.local/share/smpc-auction-node-11
+        // The devnet uses offsets 0-19 (20 nodes), so market instances start at 20+:
+        // - MARKET_NODE_OFFSET=20 (default)  -> port 5180, IP 1.2.3.21, data: ~/.local/share/smpc-auction-node-20
+        // - MARKET_NODE_OFFSET=21 -> port 5181, IP 1.2.3.22, data: ~/.local/share/smpc-auction-node-21
+        // - MARKET_NODE_OFFSET=22 -> port 5182, IP 1.2.3.23, data: ~/.local/share/smpc-auction-node-22
         let port_offset = std::env::var("MARKET_NODE_OFFSET")
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(9);
+            .unwrap_or(20);
 
         Self {
             network_key: "development-network-2025".to_string(),
@@ -48,7 +48,7 @@ impl Default for DevNetConfig {
             // Use UDP for BOOT protocol - TCP requires VL framing which BOOT doesn't have
             bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
             port_offset,
-            limit_over_attached: 8,
+            limit_over_attached: 24,
         }
     }
 }
@@ -61,6 +61,8 @@ pub struct VeilidNode {
     /// Whether to use insecure (unencrypted) protected storage.
     /// Defaults to `false` for production safety; set to `true` for devnet/test.
     insecure_storage: bool,
+    /// Veilid RPC timeout in milliseconds (default: 10_000).
+    rpc_timeout_ms: u32,
     update_tx: mpsc::Sender<VeilidUpdate>,
     update_rx: Option<mpsc::Receiver<VeilidUpdate>>,
 }
@@ -74,6 +76,7 @@ impl VeilidNode {
             data_dir,
             devnet_config: None,
             insecure_storage: config.insecure_storage,
+            rpc_timeout_ms: config.rpc_timeout_ms,
             update_tx,
             update_rx: Some(update_rx),
         }
@@ -145,14 +148,26 @@ impl VeilidNode {
             VeilidConfigNetwork {
                 network_key_password: Some(devnet.network_key.clone()),
                 detect_address_changes: Some(false), // Static addresses for devnet
+                rpc: VeilidConfigRPC {
+                    timeout_ms: self.rpc_timeout_ms,
+                    ..Default::default()
+                },
+                dht: VeilidConfigDHT {
+                    get_value_timeout_ms: self.rpc_timeout_ms * 2,
+                    set_value_timeout_ms: self.rpc_timeout_ms * 2,
+                    resolve_node_timeout_ms: self.rpc_timeout_ms * 2,
+                    ..Default::default()
+                },
                 routing_table: VeilidConfigRoutingTable {
                     bootstrap: devnet.bootstrap_nodes.clone(),
                     bootstrap_keys: vec![], // No signature verification for devnet
-                    // Lower limits for small devnet (5 nodes + 3 market instances = 8 total)
+                    // Limits for 9-node devnet (9 docker + N market instances).
+                    // Over-attached at 16 peers to ensure enough routing table
+                    // entries for unique safety route construction.
                     limit_over_attached: devnet.limit_over_attached,
-                    limit_fully_attached: 6,
-                    limit_attached_strong: 4,
-                    limit_attached_good: 3,
+                    limit_fully_attached: 20,
+                    limit_attached_strong: 16,
+                    limit_attached_good: 8,
                     limit_attached_weak: 2, // Reach "AttachedWeak" with just 2 good peers
                     ..Default::default()
                 },
@@ -172,7 +187,7 @@ impl VeilidNode {
                     },
                     ws: VeilidConfigWS {
                         connect: true,
-                        listen: true,
+                        listen: false, // Disabled in devnet — conflicts with TCP on same port
                         max_connections: 16,
                         listen_address: listen_addr,
                         path: "ws".to_string(),
@@ -183,7 +198,19 @@ impl VeilidNode {
             }
         } else {
             info!("Configuring for public Veilid network");
-            VeilidConfigNetwork::default()
+            VeilidConfigNetwork {
+                rpc: VeilidConfigRPC {
+                    timeout_ms: self.rpc_timeout_ms,
+                    ..Default::default()
+                },
+                dht: VeilidConfigDHT {
+                    get_value_timeout_ms: self.rpc_timeout_ms * 2,
+                    set_value_timeout_ms: self.rpc_timeout_ms * 2,
+                    resolve_node_timeout_ms: self.rpc_timeout_ms * 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
         };
 
         // For devnet, disable capabilities not needed by market nodes.

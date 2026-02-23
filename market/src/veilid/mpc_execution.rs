@@ -9,17 +9,33 @@ use tracing::{error, info};
 use super::mpc::MpcTunnelProxy;
 use crate::error::{MarketError, MarketResult};
 
+/// Resolve the MP-SPDZ protocol binary from env or default.
+///
+/// Default is `mascot-party.x` (dishonest majority, malicious security, N >= 2).
+/// Override via `MPC_PROTOCOL` env var.
+fn resolve_protocol(_num_parties: usize) -> String {
+    std::env::var(crate::config::MPC_PROTOCOL_ENV)
+        .unwrap_or_else(|_| crate::config::DEFAULT_MPC_PROTOCOL.to_string())
+}
+
 /// Compile the MPC program for the given number of parties using MP-SPDZ's `compile.py`.
 pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -> MarketResult<()> {
-    info!("Compiling auction_n program for {} parties...", num_parties);
+    let protocol_binary = resolve_protocol(num_parties);
+    let is_ring = protocol_binary.contains("ring");
 
-    let compile_output = Command::new(format!("{mp_spdz_dir}/compile.py"))
-        .current_dir(mp_spdz_dir)
-        .arg("auction_n")
-        .arg("--")
-        .arg(num_parties.to_string())
-        .output()
-        .await;
+    info!(
+        "Compiling auction_n program for {} parties (ring={}, binary={})...",
+        num_parties, is_ring, protocol_binary
+    );
+
+    let mut cmd = Command::new(format!("{mp_spdz_dir}/compile.py"));
+    cmd.current_dir(mp_spdz_dir);
+    if is_ring {
+        cmd.arg("-R").arg("64");
+    }
+    cmd.arg("auction_n").arg("--").arg(num_parties.to_string());
+
+    let compile_output = cmd.output().await;
 
     match compile_output {
         Ok(result) => {
@@ -51,45 +67,52 @@ pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -
     }
 }
 
-/// Spawn `mascot-party.x`, write the bid value to its stdin, and collect output.
-pub(crate) async fn spawn_mascot_party(
+/// Spawn the resolved MP-SPDZ protocol binary, write the bid value to its stdin, and collect output.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn spawn_mpc_party(
     mp_spdz_dir: &str,
     party_id: usize,
     num_parties: usize,
     hosts_file: &std::path::Path,
     bid_value: u64,
     base_port: u16,
+    timeout_secs: u64,
 ) -> MarketResult<std::process::Output> {
+    let protocol_binary = resolve_protocol(num_parties);
+
     info!(
-        "Executing MP-SPDZ auction_n-{} program (MASCOT, interactive)...",
-        num_parties
+        "Executing MP-SPDZ auction_n-{} program ({}, interactive)...",
+        num_parties, protocol_binary
     );
 
     let program_name = format!("auction_n-{num_parties}");
-    let spawn_result = Command::new(format!("{mp_spdz_dir}/mascot-party.x"))
-        .current_dir(mp_spdz_dir)
+    let mut cmd = Command::new(format!("{mp_spdz_dir}/{protocol_binary}"));
+    cmd.current_dir(mp_spdz_dir)
         .arg("-p")
-        .arg(party_id.to_string())
-        .arg("-N")
-        .arg(num_parties.to_string())
+        .arg(party_id.to_string());
+    // replicated-ring-party.x is fixed at 3 parties (no -N flag).
+    // All other protocols (mascot, semi, shamir) accept -N.
+    if !protocol_binary.contains("replicated-ring") {
+        cmd.arg("-N").arg(num_parties.to_string());
+    }
+    cmd.arg("-pn")
+        .arg(base_port.to_string())
         .arg("-OF")
         .arg(".") // Output to stdout
         .arg("-ip")
         .arg(hosts_file.to_str().unwrap_or("HOSTS"))
-        .arg("-pn")
-        .arg(base_port.to_string())
         .arg("-I") // Interactive mode: read inputs from stdin
         .arg(&program_name)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    let spawn_result = cmd.spawn();
 
     let mut child = match spawn_result {
         Ok(child) => child,
         Err(e) => {
             return Err(MarketError::Process(format!(
-                "Failed to spawn mascot-party.x: {e}"
+                "Failed to spawn {protocol_binary}: {e}"
             )));
         }
     };
@@ -98,7 +121,7 @@ pub(crate) async fn spawn_mascot_party(
     {
         use tokio::io::AsyncWriteExt;
         let mut stdin = child.stdin.take().ok_or_else(|| {
-            MarketError::Process("Failed to open stdin pipe to mascot-party.x".into())
+            MarketError::Process(format!("Failed to open stdin pipe to {protocol_binary}"))
         })?;
         stdin
             .write_all(format!("{bid_value}\n").as_bytes())
@@ -111,10 +134,14 @@ pub(crate) async fn spawn_mascot_party(
 
     // Collect stdout/stderr in background tasks so we keep &mut child for kill()
     let mut stdout_pipe = child.stdout.take().ok_or_else(|| {
-        MarketError::Process("stdout pipe not available on mascot-party.x process".into())
+        MarketError::Process(format!(
+            "stdout pipe not available on {protocol_binary} process"
+        ))
     })?;
     let mut stderr_pipe = child.stderr.take().ok_or_else(|| {
-        MarketError::Process("stderr pipe not available on mascot-party.x process".into())
+        MarketError::Process(format!(
+            "stderr pipe not available on {protocol_binary} process"
+        ))
     })?;
 
     let stdout_task = tokio::spawn(async move {
@@ -132,7 +159,7 @@ pub(crate) async fn spawn_mascot_party(
         buf
     });
 
-    match tokio::time::timeout(std::time::Duration::from_secs(120), child.wait()).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await {
         Ok(Ok(status)) => {
             let stdout = stdout_task.await.unwrap_or_default();
             let stderr = stderr_task.await.unwrap_or_default();
@@ -143,7 +170,7 @@ pub(crate) async fn spawn_mascot_party(
             })
         }
         Ok(Err(e)) => Err(MarketError::Process(format!(
-            "Failed to execute mascot-party.x: {e}"
+            "Failed to execute {protocol_binary}: {e}"
         ))),
         Err(_) => {
             let _ = child.kill().await;
@@ -153,9 +180,15 @@ pub(crate) async fn spawn_mascot_party(
                 Ok(Err(e)) => tracing::error!("Failed to reap MPC process: {}", e),
                 Err(_) => tracing::error!("Timeout waiting for MPC process to exit after kill"),
             }
-            Err(MarketError::Timeout(
-                "MPC execution timed out after 120 seconds".into(),
-            ))
+            // Log any output captured before kill for diagnostics
+            let stderr = stderr_task.await.unwrap_or_default();
+            if !stderr.is_empty() {
+                let stderr_str = String::from_utf8_lossy(&stderr);
+                error!("MP-SPDZ stderr on timeout:\n{}", stderr_str);
+            }
+            Err(MarketError::Timeout(format!(
+                "MPC execution timed out after {timeout_secs} seconds"
+            )))
         }
     }
 }

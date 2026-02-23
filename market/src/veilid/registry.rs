@@ -355,13 +355,40 @@ impl RegistryOperations {
 
     /// Register a seller in the master registry.
     /// Retries on concurrent-write conflicts.
-    #[allow(clippy::too_many_lines)]
     pub async fn register_seller(
         &mut self,
         seller_pubkey: &str,
         catalog_key: &str,
         signing_pubkey: &str,
     ) -> MarketResult<()> {
+        let spk = seller_pubkey.to_string();
+        let ck = catalog_key.to_string();
+        let sk = signing_pubkey.to_string();
+
+        self.write_registry_with_cas("seller", move |registry| {
+            if registry.sellers.iter().any(|e| e.seller_pubkey == spk) {
+                return false; // already registered
+            }
+            registry.add_seller(SellerEntry {
+                seller_pubkey: spk.clone(),
+                catalog_key: ck.clone(),
+                registered_at: now_unix(),
+                signing_pubkey: sk.clone(),
+            });
+            true
+        })
+        .await
+    }
+
+    /// Write to the master registry with compare-and-swap retry logic.
+    ///
+    /// `mutate` is called on each attempt with the current registry state.
+    /// It should apply the desired mutation and return `true` to proceed with
+    /// the write, or `false` to skip (e.g. the entry already exists).
+    async fn write_registry_with_cas<F>(&self, label: &str, mutate: F) -> MarketResult<()>
+    where
+        F: Fn(&mut MarketRegistry) -> bool,
+    {
         let registry_key = self
             .master_registry_key
             .as_ref()
@@ -369,8 +396,6 @@ impl RegistryOperations {
             .clone();
 
         let routing_context = self.dht.routing_context()?;
-
-        // Open with shared keypair for write access
         let _ = routing_context
             .open_dht_record(registry_key.clone(), Some(self.shared_keypair.clone()))
             .await
@@ -383,7 +408,14 @@ impl RegistryOperations {
         for attempt in 0..max_retries {
             let (mut registry, old_seq) = if let Some(cv) = conflict_value.take() {
                 match MarketRegistry::from_cbor(&cv) {
-                    Ok(reg) => (reg, None),
+                    Ok(reg) => {
+                        debug!(
+                            "Using conflict value as base ({} routes, {} sellers)",
+                            reg.routes.len(),
+                            reg.sellers.len()
+                        );
+                        (reg, None)
+                    }
                     Err(e) => {
                         warn!("Conflict value corrupted ({}), re-fetching", e);
                         self.read_registry_from_dht(&routing_context, &registry_key)
@@ -395,22 +427,10 @@ impl RegistryOperations {
                     .await?
             };
 
-            // Dedup check
-            if registry
-                .sellers
-                .iter()
-                .any(|e| e.seller_pubkey == seller_pubkey)
-            {
-                info!("Seller '{}' already registered, skipping", seller_pubkey);
+            if !mutate(&mut registry) {
+                info!("{} already present, skipping", label);
                 return Ok(());
             }
-
-            registry.add_seller(SellerEntry {
-                seller_pubkey: seller_pubkey.to_string(),
-                catalog_key: catalog_key.to_string(),
-                registered_at: now_unix(),
-                signing_pubkey: signing_pubkey.to_string(),
-            });
 
             let data = registry.to_cbor().map_err(|e| {
                 MarketError::Serialization(format!("Failed to serialize registry: {e}"))
@@ -425,7 +445,8 @@ impl RegistryOperations {
                         if let Some(expected) = old_seq {
                             if returned.seq() != expected && attempt < max_retries - 1 {
                                 warn!(
-                                    "Seller registration: concurrent write (seq {} -> {}), retrying",
+                                    "{} registration: concurrent write (seq {} -> {}), retrying",
+                                    label,
                                     expected,
                                     returned.seq()
                                 );
@@ -437,8 +458,8 @@ impl RegistryOperations {
                         }
                     }
                     info!(
-                        "Registered seller '{}' (attempt {}/{})",
-                        seller_pubkey,
+                        "Registered {} (attempt {}/{})",
+                        label,
                         attempt + 1,
                         max_retries
                     );
@@ -446,20 +467,20 @@ impl RegistryOperations {
                 }
                 Err(e) => {
                     if attempt < max_retries - 1 {
-                        warn!("Write failed ({}), retrying", e);
+                        warn!("{} registration write failed ({}), retrying", label, e);
                         tokio::time::sleep(retry_delay).await;
                         retry_delay *= 2;
                         continue;
                     }
                     return Err(MarketError::Dht(format!(
-                        "Failed to register seller after {max_retries} attempts: {e}"
+                        "Failed to register {label} after {max_retries} attempts: {e}",
                     )));
                 }
             }
         }
 
         Err(MarketError::Dht(format!(
-            "Failed to register seller after {max_retries} attempts"
+            "Failed to register {label} after {max_retries} attempts",
         )))
     }
 
@@ -497,106 +518,19 @@ impl RegistryOperations {
     }
 
     /// Register (or update) this node's broadcast route in the master registry.
-    /// Retries on concurrent-write conflicts (same pattern as `register_seller`).
+    /// Retries on concurrent-write conflicts.
     pub async fn register_route(&mut self, node_id: &str, route_blob: Vec<u8>) -> MarketResult<()> {
-        let registry_key = self
-            .master_registry_key
-            .as_ref()
-            .ok_or_else(|| MarketError::InvalidState("Master registry key not known yet".into()))?
-            .clone();
+        let nid = node_id.to_string();
 
-        let routing_context = self.dht.routing_context()?;
-        let _ = routing_context
-            .open_dht_record(registry_key.clone(), Some(self.shared_keypair.clone()))
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to open registry record: {e}")))?;
-
-        let max_retries: u32 = 10;
-        let mut retry_delay = std::time::Duration::from_millis(50);
-
-        // When a write conflict occurs, set_dht_value returns the current network
-        // value.  We store it here and use it directly as the base for the next
-        // attempt, which avoids a force-refresh read that may still return stale
-        // cached data (the root cause of routes being overwritten on retry).
-        let mut conflict_value: Option<Vec<u8>> = None;
-
-        for attempt in 0..max_retries {
-            let (mut registry, old_seq) = if let Some(cv) = conflict_value.take() {
-                match MarketRegistry::from_cbor(&cv) {
-                    Ok(reg) => {
-                        debug!(
-                            "Using conflict value as base ({} routes, {} sellers)",
-                            reg.routes.len(),
-                            reg.sellers.len()
-                        );
-                        (reg, None)
-                    }
-                    Err(e) => {
-                        warn!("Conflict value corrupted ({}), re-fetching", e);
-                        self.read_registry_from_dht(&routing_context, &registry_key)
-                            .await?
-                    }
-                }
-            } else {
-                self.read_registry_from_dht(&routing_context, &registry_key)
-                    .await?
-            };
-
+        self.write_registry_with_cas("route", move |registry| {
             registry.add_route(RouteEntry {
-                node_id: node_id.to_string(),
+                node_id: nid.clone(),
                 route_blob: route_blob.clone(),
                 registered_at: now_unix(),
             });
-
-            let data = registry.to_cbor().map_err(|e| {
-                MarketError::Serialization(format!("Failed to serialize registry: {e}"))
-            })?;
-
-            match routing_context
-                .set_dht_value(registry_key.clone(), 0, data, None)
-                .await
-            {
-                Ok(old_value) => {
-                    if let Some(returned) = old_value {
-                        if let Some(expected) = old_seq {
-                            if returned.seq() != expected && attempt < max_retries - 1 {
-                                warn!(
-                                    "Route registration: concurrent write (seq {} -> {}), retrying",
-                                    expected,
-                                    returned.seq()
-                                );
-                                conflict_value = Some(returned.data().to_vec());
-                                tokio::time::sleep(retry_delay).await;
-                                retry_delay *= 2;
-                                continue;
-                            }
-                        }
-                    }
-                    info!(
-                        "Registered route for node '{}' (attempt {}/{})",
-                        node_id,
-                        attempt + 1,
-                        max_retries
-                    );
-                    return Ok(());
-                }
-                Err(e) => {
-                    if attempt < max_retries - 1 {
-                        warn!("Route registration write failed ({}), retrying", e);
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay *= 2;
-                        continue;
-                    }
-                    return Err(MarketError::Dht(format!(
-                        "Failed to register route after {max_retries} attempts: {e}"
-                    )));
-                }
-            }
-        }
-
-        Err(MarketError::Dht(format!(
-            "Failed to register route after {max_retries} attempts"
-        )))
+            true
+        })
+        .await
     }
 
     /// Fetch all route blobs from the master registry, excluding the given node_id.

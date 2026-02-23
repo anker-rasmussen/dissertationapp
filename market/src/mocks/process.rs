@@ -7,14 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Recorded MPC execution for test assertions.
-#[derive(Debug, Clone)]
-pub struct RecordedExecution {
-    pub party_id: usize,
-    pub num_parties: usize,
-    pub input_value: u64,
-}
-
 /// Strategy for determining the auction winner.
 #[derive(Debug, Clone)]
 pub enum WinnerStrategy {
@@ -147,8 +139,6 @@ impl Default for SharedBidRegistry {
 pub struct MockMpcRunner {
     /// Recorded compilations: Map<program_name, num_parties>
     compilations: Arc<RwLock<HashMap<String, usize>>>,
-    /// Recorded executions.
-    executions: Arc<RwLock<Vec<RecordedExecution>>>,
     /// Recorded input writes: Map<party_id, value>
     inputs: Arc<RwLock<HashMap<usize, u64>>>,
     /// Recorded hosts files: Map<hosts_name, num_parties>
@@ -166,7 +156,6 @@ impl MockMpcRunner {
     pub fn new() -> Self {
         Self {
             compilations: Arc::new(RwLock::new(HashMap::new())),
-            executions: Arc::new(RwLock::new(Vec::new())),
             inputs: Arc::new(RwLock::new(HashMap::new())),
             hosts_files: Arc::new(RwLock::new(HashMap::new())),
             winner_strategy: Arc::new(RwLock::new(WinnerStrategy::Fixed(0))),
@@ -182,7 +171,6 @@ impl MockMpcRunner {
     pub fn with_shared_registry(registry: Arc<SharedBidRegistry>) -> Self {
         Self {
             compilations: Arc::new(RwLock::new(HashMap::new())),
-            executions: Arc::new(RwLock::new(Vec::new())),
             inputs: Arc::new(RwLock::new(HashMap::new())),
             hosts_files: Arc::new(RwLock::new(HashMap::new())),
             winner_strategy: Arc::new(RwLock::new(WinnerStrategy::CalculateFromBids)),
@@ -216,11 +204,6 @@ impl MockMpcRunner {
         self.compilations.read().await.clone()
     }
 
-    /// Get recorded executions.
-    pub async fn get_executions(&self) -> Vec<RecordedExecution> {
-        self.executions.read().await.clone()
-    }
-
     /// Get recorded inputs.
     pub async fn get_inputs(&self) -> HashMap<usize, u64> {
         self.inputs.read().await.clone()
@@ -239,7 +222,6 @@ impl MockMpcRunner {
     /// Clear all recorded data.
     pub async fn clear(&self) {
         self.compilations.write().await.clear();
-        self.executions.write().await.clear();
         self.inputs.write().await.clear();
         self.hosts_files.write().await.clear();
     }
@@ -269,17 +251,11 @@ impl MpcRunner for MockMpcRunner {
         &self,
         party_id: usize,
         num_parties: usize,
-        input_value: u64,
+        _input_value: u64,
     ) -> MarketResult<MpcResult> {
         if *self.fail_mode.read().await {
             return Err(MarketError::Mpc("simulated execute failure".into()));
         }
-
-        self.executions.write().await.push(RecordedExecution {
-            party_id,
-            num_parties,
-            input_value,
-        });
 
         // Determine winner based on strategy
         let strategy = self.winner_strategy.read().await.clone();
@@ -480,7 +456,6 @@ mod tests {
 
         // Verify defaults
         assert!(runner.get_compilations().await.is_empty());
-        assert!(runner.get_executions().await.is_empty());
         assert!(runner.get_inputs().await.is_empty());
         assert!(runner.get_hosts_files().await.is_empty());
     }
@@ -496,10 +471,9 @@ mod tests {
         // Clone the runner
         let runner2 = runner1.clone();
 
-        // Both should see the same compilations and executions
+        // Both should see the same compilations
         assert!(runner2.was_compiled("test_prog").await);
         assert_eq!(runner2.get_compilations().await.len(), 1);
-        assert_eq!(runner2.get_executions().await.len(), 1);
 
         // Operations on runner2 should affect runner1
         runner2.write_input(1, 200).await.unwrap();
@@ -521,7 +495,6 @@ mod tests {
 
         // All should be empty
         assert!(runner.get_compilations().await.is_empty());
-        assert!(runner.get_executions().await.is_empty());
         assert!(runner.get_inputs().await.is_empty());
         assert!(runner.get_hosts_files().await.is_empty());
     }
