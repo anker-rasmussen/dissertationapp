@@ -24,3 +24,7 @@ fi
 # Write LD_PRELOAD to NEXTEST_ENV so tests receive it
 echo "LD_PRELOAD=$LIBIPSPOOF" >> "$NEXTEST_ENV"
 echo "[setup-e2e] Exported LD_PRELOAD=$LIBIPSPOOF"
+
+# MASCOT (mascot-party.x) is the default MPC protocol — dishonest majority,
+# malicious security.  Override via MPC_PROTOCOL env var if needed.
+echo "[setup-e2e] Using MPC protocol: ${MPC_PROTOCOL:-mascot-party.x (default)}"
