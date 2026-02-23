@@ -44,7 +44,7 @@ impl DHTOperations {
         // Create DHT schema with configured subkeys:
         // - Subkey 0: Primary data (e.g., listing)
         // - Subkey 1: Bid index (for auctions)
-        // - Subkey 2: Coordination record (for bid announcements)
+        // - Subkey 2: Bid announcement registry
         // - Subkey 3: Bidder registry (for n-party MPC)
         let schema = DHTSchema::dflt(DHT_SUBKEY_COUNT)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
@@ -172,6 +172,77 @@ impl DHTOperations {
             .close_dht_record(record.key.clone())
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Atomic read-modify-write: opens the record once with the owner keypair,
+    /// reads the current value (local cache, no network refresh — we are the
+    /// writer so our local copy is authoritative), applies a user-supplied
+    /// transform, and writes the result back before closing.
+    pub async fn read_modify_write_subkey(
+        &self,
+        record: &OwnedDHTRecord,
+        subkey: u32,
+        transform: impl FnOnce(Option<Vec<u8>>) -> MarketResult<Vec<u8>>,
+    ) -> MarketResult<()> {
+        const MAX_DHT_VALUE_SIZE: usize = 32 * 1024;
+
+        let routing_context = self.routing_context()?;
+
+        // Open with owner keypair so both read and write see the same local state.
+        let _ = routing_context
+            .open_dht_record(record.key.clone(), Some(record.owner.clone()))
+            .await
+            .map_err(|e| {
+                MarketError::Dht(format!(
+                    "Failed to open DHT record for read-modify-write: {e}"
+                ))
+            })?;
+
+        // Read current value (force_refresh = false: our local copy is
+        // authoritative since we are the only writer for this record).
+        let current = routing_context
+            .get_dht_value(record.key.clone(), subkey, false)
+            .await
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to read subkey {subkey} during RMW: {e}"))
+            })?;
+
+        let new_value = match transform(current.map(|d| d.data().to_vec())) {
+            Ok(v) => v,
+            Err(e) => {
+                routing_context
+                    .close_dht_record(record.key.clone())
+                    .await
+                    .ok();
+                return Err(e);
+            }
+        };
+
+        if new_value.len() > MAX_DHT_VALUE_SIZE {
+            routing_context
+                .close_dht_record(record.key.clone())
+                .await
+                .ok();
+            return Err(MarketError::Dht(format!(
+                "DHT value size {} exceeds maximum {} bytes",
+                new_value.len(),
+                MAX_DHT_VALUE_SIZE
+            )));
+        }
+
+        routing_context
+            .set_dht_value(record.key.clone(), subkey, new_value, None)
+            .await
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to write subkey {subkey} during RMW: {e}"))
+            })?;
+
+        routing_context
+            .close_dht_record(record.key.clone())
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to close DHT record after RMW: {e}")))?;
 
         Ok(())
     }

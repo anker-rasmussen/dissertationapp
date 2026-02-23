@@ -5,13 +5,11 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use veilid_core::{PublicKey, RecordKey, RouteBlob};
 
-use crate::config::now_unix;
 use crate::error::{MarketError, MarketResult};
-use crate::traits::TimeProvider;
 
 /// Maximum allowed bincode payload size (64 KB).
 /// Generous for the 32 KB Veilid value limit plus envelope overhead.
-const MAX_BINCODE_SIZE: u64 = 64 * 1024;
+pub(crate) const MAX_BINCODE_SIZE: u64 = 64 * 1024;
 
 /// Deserialize bincode with a size limit to prevent OOM from crafted payloads.
 pub(crate) fn bincode_deserialize_limited<T: serde::de::DeserializeOwned>(
@@ -97,12 +95,19 @@ pub const fn validate_timestamp(message_timestamp: u64, current_time: u64) -> bo
 pub struct BidAnnouncementRegistry {
     /// List of (bidder_pubkey, bid_record_key, timestamp) tuples
     pub announcements: Vec<(PublicKey, RecordKey, u64)>,
+    /// Authoritative bid count set by the seller when finalizing the auction.
+    /// Parties must agree on this count before entering MPC execution.
+    /// `None` during the auction (still accepting bids); `Some(n)` after
+    /// the seller has finalized.
+    #[serde(default)]
+    pub total_expected: Option<u32>,
 }
 
 impl BidAnnouncementRegistry {
     pub const fn new() -> Self {
         Self {
             announcements: Vec::new(),
+            total_expected: None,
         }
     }
 
@@ -261,6 +266,8 @@ pub enum AuctionMessage {
         listing_key: RecordKey,
         /// Party's public key
         party_pubkey: PublicKey,
+        /// Number of parties this node expects in the MPC
+        num_parties: u32,
         /// Timestamp of readiness signal
         timestamp: u64,
     },
@@ -281,208 +288,106 @@ impl AuctionMessage {
         }
     }
 
-    /// Create a bid announcement using system time.
-    pub fn bid_announcement(
+    pub const fn bid_announcement(
         listing_key: RecordKey,
         bidder: PublicKey,
         bid_record_key: RecordKey,
+        timestamp: u64,
     ) -> Self {
         Self::BidAnnouncement {
             listing_key,
             bidder,
             bid_record_key,
-            timestamp: now_unix(),
+            timestamp,
         }
     }
 
-    /// Create a bid announcement with a custom time provider.
-    pub fn bid_announcement_with_time<T: TimeProvider>(
-        listing_key: RecordKey,
-        bidder: PublicKey,
-        bid_record_key: RecordKey,
-        time: &T,
-    ) -> Self {
-        Self::BidAnnouncement {
-            listing_key,
-            bidder,
-            bid_record_key,
-            timestamp: time.now_unix(),
-        }
-    }
-
-    /// Create a winner decryption request using system time.
-    pub fn winner_decryption_request(listing_key: RecordKey, winner: PublicKey) -> Self {
-        Self::WinnerDecryptionRequest {
-            listing_key,
-            winner,
-            timestamp: now_unix(),
-        }
-    }
-
-    /// Create a winner decryption request with a custom time provider.
-    pub fn winner_decryption_request_with_time<T: TimeProvider>(
+    pub const fn winner_decryption_request(
         listing_key: RecordKey,
         winner: PublicKey,
-        time: &T,
+        timestamp: u64,
     ) -> Self {
         Self::WinnerDecryptionRequest {
             listing_key,
             winner,
-            timestamp: time.now_unix(),
+            timestamp,
         }
     }
 
-    /// Create a decryption hash transfer using system time.
-    pub fn decryption_hash_transfer(
+    pub const fn decryption_hash_transfer(
         listing_key: RecordKey,
         winner: PublicKey,
         decryption_hash: String,
+        timestamp: u64,
     ) -> Self {
         Self::DecryptionHashTransfer {
             listing_key,
             winner,
             decryption_hash,
-            timestamp: now_unix(),
+            timestamp,
         }
     }
 
-    /// Create a decryption hash transfer with a custom time provider.
-    pub fn decryption_hash_transfer_with_time<T: TimeProvider>(
-        listing_key: RecordKey,
-        winner: PublicKey,
-        decryption_hash: String,
-        time: &T,
-    ) -> Self {
-        Self::DecryptionHashTransfer {
-            listing_key,
-            winner,
-            decryption_hash,
-            timestamp: time.now_unix(),
-        }
-    }
-
-    /// Create an MPC route announcement using system time.
-    pub fn mpc_route_announcement(
+    pub const fn mpc_route_announcement(
         listing_key: RecordKey,
         party_pubkey: PublicKey,
         route_blob: RouteBlob,
+        timestamp: u64,
     ) -> Self {
         Self::MpcRouteAnnouncement {
             listing_key,
             party_pubkey,
             route_blob,
-            timestamp: now_unix(),
+            timestamp,
         }
     }
 
-    /// Create an MPC route announcement with a custom time provider.
-    pub fn mpc_route_announcement_with_time<T: TimeProvider>(
-        listing_key: RecordKey,
-        party_pubkey: PublicKey,
-        route_blob: RouteBlob,
-        time: &T,
-    ) -> Self {
-        Self::MpcRouteAnnouncement {
-            listing_key,
-            party_pubkey,
-            route_blob,
-            timestamp: time.now_unix(),
-        }
-    }
-
-    /// Create a winner bid reveal using system time.
-    pub fn winner_bid_reveal(
+    pub const fn winner_bid_reveal(
         listing_key: RecordKey,
         winner: PublicKey,
         bid_value: u64,
         nonce: [u8; 32],
+        timestamp: u64,
     ) -> Self {
         Self::WinnerBidReveal {
             listing_key,
             winner,
             bid_value,
             nonce,
-            timestamp: now_unix(),
+            timestamp,
         }
     }
 
-    /// Create a winner bid reveal with a custom time provider.
-    pub fn winner_bid_reveal_with_time<T: TimeProvider>(
-        listing_key: RecordKey,
-        winner: PublicKey,
-        bid_value: u64,
-        nonce: [u8; 32],
-        time: &T,
-    ) -> Self {
-        Self::WinnerBidReveal {
-            listing_key,
-            winner,
-            bid_value,
-            nonce,
-            timestamp: time.now_unix(),
-        }
-    }
-
-    /// Create a seller registration using system time.
-    pub fn seller_registration(seller_pubkey: PublicKey, catalog_key: RecordKey) -> Self {
-        Self::SellerRegistration {
-            seller_pubkey,
-            catalog_key,
-            timestamp: now_unix(),
-        }
-    }
-
-    /// Create a seller registration with a custom time provider.
-    pub fn seller_registration_with_time<T: TimeProvider>(
+    pub const fn seller_registration(
         seller_pubkey: PublicKey,
         catalog_key: RecordKey,
-        time: &T,
+        timestamp: u64,
     ) -> Self {
         Self::SellerRegistration {
             seller_pubkey,
             catalog_key,
-            timestamp: time.now_unix(),
+            timestamp,
         }
     }
 
-    /// Create a registry announcement using system time.
-    pub fn registry_announcement(registry_key: RecordKey) -> Self {
+    pub const fn registry_announcement(registry_key: RecordKey, timestamp: u64) -> Self {
         Self::RegistryAnnouncement {
             registry_key,
-            timestamp: now_unix(),
+            timestamp,
         }
     }
 
-    /// Create a registry announcement with a custom time provider.
-    pub fn registry_announcement_with_time<T: TimeProvider>(
-        registry_key: RecordKey,
-        time: &T,
-    ) -> Self {
-        Self::RegistryAnnouncement {
-            registry_key,
-            timestamp: time.now_unix(),
-        }
-    }
-
-    /// Create an MPC readiness signal using system time.
-    pub fn mpc_ready(listing_key: RecordKey, party_pubkey: PublicKey) -> Self {
-        Self::MpcReady {
-            listing_key,
-            party_pubkey,
-            timestamp: now_unix(),
-        }
-    }
-
-    /// Create an MPC readiness signal with a custom time provider.
-    pub fn mpc_ready_with_time<T: TimeProvider>(
+    pub const fn mpc_ready(
         listing_key: RecordKey,
         party_pubkey: PublicKey,
-        time: &T,
+        num_parties: u32,
+        timestamp: u64,
     ) -> Self {
         Self::MpcReady {
             listing_key,
             party_pubkey,
-            timestamp: time.now_unix(),
+            num_parties,
+            timestamp,
         }
     }
 
@@ -525,7 +430,6 @@ impl AuctionMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mocks::MockTime;
 
     fn test_pubkey() -> PublicKey {
         crate::mocks::dht::make_test_public_key(42)
@@ -537,10 +441,7 @@ mod tests {
 
     #[test]
     fn registry_announcement_bincode_roundtrip() {
-        let msg = AuctionMessage::registry_announcement_with_time(
-            test_record_key(),
-            &MockTime::new(5000),
-        );
+        let msg = AuctionMessage::registry_announcement(test_record_key(), 5000);
         let bytes = msg.to_bytes().unwrap();
         let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
         match decoded {
@@ -557,11 +458,7 @@ mod tests {
 
     #[test]
     fn seller_registration_bincode_roundtrip() {
-        let msg = AuctionMessage::seller_registration_with_time(
-            test_pubkey(),
-            test_record_key(),
-            &MockTime::new(3000),
-        );
+        let msg = AuctionMessage::seller_registration(test_pubkey(), test_record_key(), 3000);
         let bytes = msg.to_bytes().unwrap();
         let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
         match decoded {
@@ -583,11 +480,11 @@ mod tests {
         let listing_key = test_record_key();
         let bidder = test_pubkey();
         let bid_record_key = crate::mocks::dht::make_test_record_key(123);
-        let msg = AuctionMessage::bid_announcement_with_time(
+        let msg = AuctionMessage::bid_announcement(
             listing_key.clone(),
             bidder.clone(),
             bid_record_key.clone(),
-            &MockTime::new(4000),
+            4000,
         );
         let bytes = msg.to_bytes().unwrap();
         let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
@@ -611,11 +508,8 @@ mod tests {
     fn winner_decryption_request_bincode_roundtrip() {
         let listing_key = test_record_key();
         let winner = test_pubkey();
-        let msg = AuctionMessage::winner_decryption_request_with_time(
-            listing_key.clone(),
-            winner.clone(),
-            &MockTime::new(6000),
-        );
+        let msg =
+            AuctionMessage::winner_decryption_request(listing_key.clone(), winner.clone(), 6000);
         let bytes = msg.to_bytes().unwrap();
         let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
         match decoded {
@@ -637,11 +531,11 @@ mod tests {
         let listing_key = test_record_key();
         let winner = test_pubkey();
         let decryption_hash = "test_hash_123".to_string();
-        let msg = AuctionMessage::decryption_hash_transfer_with_time(
+        let msg = AuctionMessage::decryption_hash_transfer(
             listing_key.clone(),
             winner.clone(),
             decryption_hash.clone(),
-            &MockTime::new(7000),
+            7000,
         );
         let bytes = msg.to_bytes().unwrap();
         let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
@@ -686,11 +580,11 @@ mod tests {
         let listing_key = test_record_key();
         let party_pubkey = test_pubkey();
         let route_blob = test_route_blob();
-        let msg = AuctionMessage::mpc_route_announcement_with_time(
+        let msg = AuctionMessage::mpc_route_announcement(
             listing_key.clone(),
             party_pubkey.clone(),
             route_blob.clone(),
-            &MockTime::new(8000),
+            8000,
         );
         let bytes = msg.to_bytes().unwrap();
         let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
@@ -717,12 +611,12 @@ mod tests {
         let winner = test_pubkey();
         let bid_value = 1000u64;
         let nonce = [42u8; 32];
-        let msg = AuctionMessage::winner_bid_reveal_with_time(
+        let msg = AuctionMessage::winner_bid_reveal(
             listing_key.clone(),
             winner.clone(),
             bid_value,
             nonce,
-            &MockTime::new(9000),
+            9000,
         );
         let bytes = msg.to_bytes().unwrap();
         let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
@@ -748,21 +642,19 @@ mod tests {
     fn mpc_ready_bincode_roundtrip() {
         let listing_key = test_record_key();
         let party_pubkey = test_pubkey();
-        let msg = AuctionMessage::mpc_ready_with_time(
-            listing_key.clone(),
-            party_pubkey.clone(),
-            &MockTime::new(10_000),
-        );
+        let msg = AuctionMessage::mpc_ready(listing_key.clone(), party_pubkey.clone(), 3, 10_000);
         let bytes = msg.to_bytes().unwrap();
         let decoded = AuctionMessage::from_bytes(&bytes).unwrap();
         match decoded {
             AuctionMessage::MpcReady {
                 listing_key: decoded_listing,
                 party_pubkey: decoded_party,
+                num_parties,
                 timestamp,
             } => {
                 assert_eq!(decoded_listing, listing_key);
                 assert_eq!(decoded_party, party_pubkey);
+                assert_eq!(num_parties, 3);
                 assert_eq!(timestamp, 10_000);
             }
             other => panic!("Expected MpcReady, got {other:?}"),
@@ -884,10 +776,7 @@ mod tests {
     #[test]
     fn signed_envelope_roundtrip() {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let msg = AuctionMessage::registry_announcement_with_time(
-            test_record_key(),
-            &MockTime::new(1000),
-        );
+        let msg = AuctionMessage::registry_announcement(test_record_key(), 1000);
         let signed_bytes = msg.to_signed_bytes(&signing_key).unwrap();
         let (decoded, signer) = AuctionMessage::from_signed_bytes(&signed_bytes).unwrap();
         assert_eq!(signer, signing_key.verifying_key().to_bytes());
@@ -897,10 +786,7 @@ mod tests {
     #[test]
     fn signed_envelope_rejects_tampered_payload() {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let msg = AuctionMessage::registry_announcement_with_time(
-            test_record_key(),
-            &MockTime::new(2000),
-        );
+        let msg = AuctionMessage::registry_announcement(test_record_key(), 2000);
         let mut signed_bytes = msg.to_signed_bytes(&signing_key).unwrap();
         // Tamper with a byte in the middle of the payload
         if signed_bytes.len() > 20 {
@@ -914,10 +800,7 @@ mod tests {
     fn signed_envelope_rejects_wrong_key() {
         let key_a = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         let key_b = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let msg = AuctionMessage::registry_announcement_with_time(
-            test_record_key(),
-            &MockTime::new(3000),
-        );
+        let msg = AuctionMessage::registry_announcement(test_record_key(), 3000);
         let signed_bytes = msg.to_signed_bytes(&key_a).unwrap();
         // Verification succeeds because the envelope carries key_a's verifying key
         // and the signature is valid under key_a.  The *signer identity* returned

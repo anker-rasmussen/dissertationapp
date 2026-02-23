@@ -8,7 +8,7 @@ use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use super::bid_ops::BidOperations;
 use super::mpc_execution::MpcResultContract;
 use super::mpc_orchestrator::MpcOrchestrator;
-use crate::config::subkeys;
+use crate::config::{now_unix, subkeys};
 use crate::error::{MarketError, MarketResult};
 
 /// Verify a bid commitment against the revealed bid value and nonce.
@@ -179,8 +179,11 @@ impl MpcOrchestrator {
 
     /// Send WinnerDecryptionRequest challenge to winner via their MPC route
     pub async fn send_winner_challenge(&self, listing_key: &RecordKey, winner: &PublicKey) {
-        let message =
-            AuctionMessage::winner_decryption_request(listing_key.clone(), winner.clone());
+        let message = AuctionMessage::winner_decryption_request(
+            listing_key.clone(),
+            winner.clone(),
+            now_unix(),
+        );
 
         let data = match message.to_signed_bytes(&self.signing_key) {
             Ok(d) => d,
@@ -249,10 +252,10 @@ impl MpcOrchestrator {
             };
 
             match routing_context
-                .app_message(Target::RouteId(winner_route), data.clone())
+                .app_call(Target::RouteId(winner_route), data.clone())
                 .await
             {
-                Ok(()) => {
+                Ok(_reply) => {
                     info!("Sent WinnerDecryptionRequest challenge to winner via MPC route");
                     return;
                 }
@@ -287,6 +290,7 @@ impl MpcOrchestrator {
             listing_key.clone(),
             winner.clone(),
             decryption_hash.to_string(),
+            now_unix(),
         );
 
         let data = message.to_signed_bytes(&self.signing_key)?;
@@ -320,10 +324,10 @@ impl MpcOrchestrator {
         let routing_context = self.safe_routing_context()?;
 
         match routing_context
-            .app_message(Target::RouteId(winner_route.clone()), data)
+            .app_call(Target::RouteId(winner_route.clone()), data)
             .await
         {
-            Ok(()) => {
+            Ok(_reply) => {
                 info!(
                     "Successfully sent decryption hash to winner via MPC route {}",
                     winner_route

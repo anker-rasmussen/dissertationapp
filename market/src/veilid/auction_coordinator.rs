@@ -34,6 +34,8 @@ enum BufferedMpcSignal {
     },
     Ready {
         party_pubkey: PublicKey,
+        num_parties: u32,
+        timestamp: u64,
         received_at: u64,
     },
 }
@@ -144,10 +146,15 @@ pub struct AuctionCoordinator {
     /// Buffered SellerRegistrations received before the registry key was known.
     /// Tuple: (seller_pubkey, catalog_key, signing_pubkey_hex)
     pending_seller_registrations: Arc<Mutex<Vec<(PublicKey, RecordKey, String)>>>,
+    /// Serialises read-modify-write on the DHT bid announcement registry so
+    /// concurrent announcements don't overwrite each other.
+    bid_registry_lock: Mutex<()>,
     /// Bid announcements that failed to broadcast (no routes yet) and need retry.
     pending_bid_announcements: Mutex<Vec<(RecordKey, RecordKey)>>,
     /// Our own broadcast private route blob (published to the registry).
     my_route_blob: Mutex<Option<Vec<u8>>>,
+    /// RouteId of the broadcast route (used as MPC route for keepalive reuse).
+    broadcast_route_id: Mutex<Option<RouteId>>,
     /// MPC signals received before the listing was watched (no route manager yet).
     buffered_mpc_signals: Mutex<HashMap<RecordKey, Vec<BufferedMpcSignal>>>,
     /// Token used to signal graceful shutdown of background tasks.
@@ -205,8 +212,10 @@ impl AuctionCoordinator {
             owned_listings: Arc::new(Mutex::new(HashMap::new())),
             mpc,
             pending_seller_registrations: Arc::new(Mutex::new(Vec::new())),
+            bid_registry_lock: Mutex::new(()),
             pending_bid_announcements: Mutex::new(Vec::new()),
             my_route_blob: Mutex::new(None),
+            broadcast_route_id: Mutex::new(None),
             buffered_mpc_signals: Mutex::new(HashMap::new()),
             shutdown,
             monitor_handle: std::sync::Mutex::new(None),
@@ -235,6 +244,13 @@ impl AuctionCoordinator {
         let proxy = self.mpc.active_tunnel_proxy().lock().await.clone();
         if let Some(proxy) = proxy.as_ref() {
             proxy.process_message(payload, signer).await?;
+        } else {
+            // Tunnel proxy not ready yet — buffer the message so it's
+            // delivered once the proxy is activated.  This handles the
+            // case where faster parties send Opens/Data before this
+            // node has started its MPC execution.
+            debug!("MPC message buffered (tunnel proxy not ready)");
+            self.mpc.buffer_mpc_message(payload, signer).await;
         }
         Ok(())
     }
@@ -297,9 +313,10 @@ impl AuctionCoordinator {
             AuctionMessage::MpcReady {
                 listing_key,
                 party_pubkey,
-                timestamp: _,
+                num_parties,
+                timestamp,
             } => {
-                self.handle_mpc_ready(listing_key, party_pubkey, signer)
+                self.handle_mpc_ready(listing_key, party_pubkey, num_parties, timestamp, signer)
                     .await
             }
             AuctionMessage::WinnerBidReveal {
@@ -494,29 +511,24 @@ impl AuctionCoordinator {
         if let Some(record) = record {
             info!("We own this listing, updating DHT bid registry");
 
-            let current_data = self
-                .dht
-                .get_value_at_subkey(&listing_key, subkeys::BID_ANNOUNCEMENTS, true)
-                .await?;
-            let mut registry = if let Some(data) = current_data {
-                BidAnnouncementRegistry::from_bytes(&data)?
-            } else {
-                warn!("No existing registry found, creating new one");
-                BidAnnouncementRegistry::new()
-            };
+            // Serialise read-modify-write to prevent concurrent announcements
+            // from overwriting each other (classic lost-update race).
+            let _guard = self.bid_registry_lock.lock().await;
 
-            registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
-
-            let data = registry.to_bytes()?;
             self.dht
-                .set_value_at_subkey(&record, subkeys::BID_ANNOUNCEMENTS, data)
+                .read_modify_write_subkey(&record, subkeys::BID_ANNOUNCEMENTS, |existing| {
+                    let mut registry = existing
+                        .and_then(|d| BidAnnouncementRegistry::from_bytes(&d).ok())
+                        .unwrap_or_else(BidAnnouncementRegistry::new);
+                    registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
+                    info!(
+                        "Updated DHT bid registry for listing {}, now has {} announcements",
+                        listing_key,
+                        registry.announcements.len()
+                    );
+                    registry.to_bytes()
+                })
                 .await?;
-
-            info!(
-                "Updated DHT bid registry for listing {}, now has {} announcements",
-                listing_key,
-                registry.announcements.len()
-            );
         }
         Ok(())
     }
@@ -610,6 +622,7 @@ impl AuctionCoordinator {
             self.my_node_id.clone(),
             bid_value,
             nonce,
+            now_unix(),
         );
 
         let data = message.to_signed_bytes(&self.signing_key)?;
@@ -774,6 +787,8 @@ impl AuctionCoordinator {
         &self,
         listing_key: RecordKey,
         party_pubkey: PublicKey,
+        num_parties: u32,
+        timestamp: u64,
         signer: [u8; 32],
     ) -> MarketResult<()> {
         info!(
@@ -803,13 +818,19 @@ impl AuctionCoordinator {
         };
 
         if let Some(manager) = manager {
-            manager.lock().await.register_ready(party_pubkey).await;
+            manager
+                .lock()
+                .await
+                .register_ready(party_pubkey, num_parties, timestamp)
+                .await;
         } else {
             debug!("Buffering MpcReady for unwatched auction {}", listing_key);
             self.buffer_mpc_signal(
                 listing_key,
                 BufferedMpcSignal::Ready {
                     party_pubkey,
+                    num_parties,
+                    timestamp,
                     received_at: now_unix(),
                 },
             )
@@ -1048,10 +1069,16 @@ impl AuctionCoordinator {
                         }
                         BufferedMpcSignal::Ready {
                             party_pubkey,
+                            num_parties,
+                            timestamp,
                             received_at,
                         } => {
                             if now.saturating_sub(received_at) <= MPC_SIGNAL_BUFFER_TTL {
-                                manager.lock().await.register_ready(party_pubkey).await;
+                                manager
+                                    .lock()
+                                    .await
+                                    .register_ready(party_pubkey, num_parties, timestamp)
+                                    .await;
                                 replayed += 1;
                             }
                         }
@@ -1109,29 +1136,32 @@ impl AuctionCoordinator {
         if let Some(record) = record {
             info!("We own this listing and bid on it, adding our bid to DHT registry");
 
-            let current_data = self
-                .dht
-                .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
-                .await?;
-            let mut registry = if let Some(data) = current_data {
-                BidAnnouncementRegistry::from_bytes(&data)?
-            } else {
-                warn!("No existing registry found for owned listing, creating new one");
-                BidAnnouncementRegistry::new()
-            };
+            // Serialise read-modify-write (same lock as handle_bid_announcement).
+            let _guard = self.bid_registry_lock.lock().await;
 
-            registry.add(bidder.clone(), bid_record_key.clone(), timestamp);
-
-            let data = registry.to_bytes()?;
+            let lk = listing_key.clone();
             self.dht
-                .set_value_at_subkey(&record, subkeys::BID_ANNOUNCEMENTS, data)
+                .read_modify_write_subkey(
+                    &record,
+                    subkeys::BID_ANNOUNCEMENTS,
+                    |existing| {
+                        let mut registry = existing
+                            .and_then(|d| BidAnnouncementRegistry::from_bytes(&d).ok())
+                            .unwrap_or_else(BidAnnouncementRegistry::new);
+                        registry.add(
+                            bidder.clone(),
+                            bid_record_key.clone(),
+                            timestamp,
+                        );
+                        info!(
+                            "Added our own bid to DHT registry for listing {}, now has {} announcements",
+                            lk,
+                            registry.announcements.len()
+                        );
+                        registry.to_bytes()
+                    },
+                )
                 .await?;
-
-            info!(
-                "Added our own bid to DHT registry for listing {}, now has {} announcements",
-                listing_key,
-                registry.announcements.len()
-            );
         }
 
         Ok(())
@@ -1220,6 +1250,7 @@ impl AuctionCoordinator {
             listing_key.clone(),
             self.my_node_id.clone(),
             bid_record_key.clone(),
+            now_unix(),
         );
 
         let data = announcement.to_signed_bytes(&self.signing_key)?;
@@ -1255,6 +1286,7 @@ impl AuctionCoordinator {
                 listing_key.clone(),
                 self.my_node_id.clone(),
                 bid_record_key.clone(),
+                now_unix(),
             );
 
             match announcement.to_signed_bytes(&self.signing_key) {
@@ -1358,7 +1390,11 @@ impl AuctionCoordinator {
             "Broadcasting SellerRegistration with catalog {}",
             catalog_key
         );
-        let msg = AuctionMessage::seller_registration(self.my_node_id.clone(), catalog_key.clone());
+        let msg = AuctionMessage::seller_registration(
+            self.my_node_id.clone(),
+            catalog_key.clone(),
+            now_unix(),
+        );
         let data = msg.to_signed_bytes(&self.signing_key)?;
         let sent = self.broadcast_message(&data).await?;
         info!("Sent SellerRegistration to {} peers", sent);
@@ -1381,7 +1417,7 @@ impl AuctionCoordinator {
             "Broadcasting RegistryAnnouncement with key {}",
             registry_key
         );
-        let msg = AuctionMessage::registry_announcement(registry_key);
+        let msg = AuctionMessage::registry_announcement(registry_key, now_unix());
         let data = msg.to_signed_bytes(&self.signing_key)?;
         let sent = self.broadcast_message(&data).await?;
         info!("Sent RegistryAnnouncement to {} peers", sent);
@@ -1414,9 +1450,105 @@ impl AuctionCoordinator {
         ops.fetch_all_listings().await
     }
 
-    /// Return a clone of the shutdown token.
-    pub fn shutdown_token(&self) -> CancellationToken {
-        self.shutdown.clone()
+    /// Get a reference to the Veilid API (needed for `app_call_reply` in main).
+    pub const fn api(&self) -> &VeilidAPI {
+        &self.api
+    }
+
+    /// Process an incoming `AppCall` (request/response pattern).
+    ///
+    /// Both MPC messages and AuctionMessages share the `SignedEnvelope` wire
+    /// format.  We first try the MPC tunnel proxy (if active).  If the tunnel
+    /// can't handle it — either because the payload isn't an `MpcMessage` or
+    /// because the tunnel was already shut down — we try parsing as an
+    /// `AuctionMessage` (covers `WinnerDecryptionRequest`, etc.).
+    /// Returns NACK `[0x00]` only for genuine MPC messages when no tunnel
+    /// exists (sender should retry).
+    pub async fn process_app_call(&self, message: Vec<u8>) -> MarketResult<Vec<u8>> {
+        debug!("process_app_call: {} bytes received", message.len());
+
+        if let Ok((payload, signer)) =
+            super::bid_announcement::SignedEnvelope::verify_and_unwrap(&message)
+        {
+            // Try AuctionMessage first (WinnerDecryptionRequest, etc.)
+            if let Ok(auction_msg) = AuctionMessage::from_bytes(&payload) {
+                self.handle_auction_message(auction_msg, signer).await?;
+                return Ok(vec![0x01]);
+            }
+
+            // Not an AuctionMessage — must be an MPC tunnel message.
+            let tunnel = self.mpc.active_tunnel_proxy().lock().await.clone();
+            if let Some(tunnel) = tunnel {
+                return tunnel.process_call(payload, signer).await;
+            }
+
+            // MPC message but tunnel not ready — NACK so sender retries.
+            debug!("MPC message received but tunnel proxy not ready — sending NACK");
+            return Ok(vec![0x00]);
+        }
+
+        // Not a signed envelope — fall back to normal processing.
+        self.process_app_message(message).await?;
+        Ok(vec![0x01])
+    }
+
+    /// Handle `VeilidUpdate::RouteChange` — re-import dead remote routes and
+    /// recreate dead own routes for all active MPC route managers.
+    pub async fn handle_route_change(
+        &self,
+        dead_routes: Vec<veilid_core::RouteId>,
+        dead_remote_routes: Vec<veilid_core::RouteId>,
+    ) {
+        if dead_routes.is_empty() && dead_remote_routes.is_empty() {
+            return;
+        }
+
+        if !dead_routes.is_empty() {
+            debug!("RouteChange: {} dead own routes", dead_routes.len());
+        }
+        if !dead_remote_routes.is_empty() {
+            debug!(
+                "RouteChange: {} dead remote routes",
+                dead_remote_routes.len()
+            );
+        }
+
+        // Refresh route managers (MPC coordination routes)
+        let mut new_route_blob: Option<Vec<u8>> = None;
+        let managers = self.mpc.route_managers().lock().await;
+        for (_key, manager) in managers.iter() {
+            let mut mgr = manager.lock().await;
+            if !dead_remote_routes.is_empty() {
+                mgr.handle_dead_remote_routes(&dead_remote_routes).await;
+            }
+            if !dead_routes.is_empty() || !dead_remote_routes.is_empty() {
+                if let Some(blob) = mgr
+                    .handle_dead_own_route(&dead_routes, &dead_remote_routes)
+                    .await
+                {
+                    new_route_blob = Some(blob.blob);
+                }
+            }
+            drop(mgr);
+        }
+        drop(managers);
+
+        // Refresh active MPC tunnel proxy routes.
+        // app_message to a dead route silently succeeds (fire-and-forget),
+        // so we proactively reimport all party blobs on any route death.
+        let all_dead: Vec<_> = dead_routes
+            .iter()
+            .chain(dead_remote_routes.iter())
+            .cloned()
+            .collect();
+        if let Some(tunnel) = self.mpc.active_tunnel_proxy().lock().await.as_ref() {
+            tunnel.handle_dead_routes(&all_dead).await;
+            // If our own receiving route was recreated, broadcast the new
+            // blob to all peers so they update their sending table.
+            if let Some(blob) = new_route_blob {
+                tunnel.broadcast_route_update(blob).await;
+            }
+        }
     }
 
     /// Create a private route for this node and register it in the master registry
@@ -1433,13 +1565,25 @@ impl AuctionCoordinator {
             .map_err(|e| MarketError::Network(format!("Failed to create broadcast route: {e}")))?;
 
         let blob_bytes = route_blob.blob.clone();
+
+        // Self-import the route blob so Veilid marks it as deliverable.
+        // Without this, only one of N created routes actually works.
+        // See: https://gitlab.com/nicator/veilid — confirmed by Veilid core team.
+        let _self_route = self
+            .api
+            .import_remote_private_route(blob_bytes.clone())
+            .map_err(|e| {
+                MarketError::Network(format!("Failed to self-import broadcast route: {e}"))
+            })?;
+
         info!(
             "Created broadcast private route: {} ({} bytes)",
             route_blob.route_id,
             blob_bytes.len()
         );
 
-        // Store locally
+        // Store locally (blob + route ID for MPC reuse)
+        *self.broadcast_route_id.lock().await = Some(route_blob.route_id.clone());
         *self.my_route_blob.lock().await = Some(blob_bytes.clone());
 
         // Publish to master registry
@@ -1625,6 +1769,14 @@ impl AuctionCoordinator {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         };
 
+        // Pass our broadcast route (kept alive by keepalive task) for MPC reuse.
+        // Freshly created MPC routes die within seconds without keepalive.
+        let broadcast_route = {
+            let rid = self.broadcast_route_id.lock().await.clone();
+            let blob = self.my_route_blob.lock().await.clone();
+            rid.zip(blob)
+        };
+
         self.mpc
             .handle_auction_end(
                 listing_key,
@@ -1632,6 +1784,7 @@ impl AuctionCoordinator {
                 &listing.title,
                 &peer_route_blobs,
                 &listing.seller,
+                broadcast_route.as_ref(),
             )
             .await
     }

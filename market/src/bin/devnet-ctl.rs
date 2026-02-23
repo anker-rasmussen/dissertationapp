@@ -194,12 +194,12 @@ fn check_status() -> Result<(), String> {
     let healthy_count = stdout.lines().filter(|l| l.contains("healthy")).count();
 
     eprintln!();
-    if healthy_count == 9 {
-        eprintln!("[devnet-ctl] All 9 nodes healthy - ready for tests!");
+    if healthy_count == 20 {
+        eprintln!("[devnet-ctl] All 20 nodes healthy - ready for tests!");
         eprintln!();
         eprintln!("Run tests with: cargo integration-fast");
     } else {
-        eprintln!("[devnet-ctl] {}/9 nodes healthy", healthy_count);
+        eprintln!("[devnet-ctl] {}/20 nodes healthy", healthy_count);
     }
 
     // Check libipspoof
@@ -244,17 +244,17 @@ fn wait_for_health(timeout_secs: u64) -> Result<(), String> {
         let healthy_count = stdout.lines().filter(|l| l.contains("healthy")).count();
 
         eprintln!(
-            "[devnet-ctl] Health check: {}/9 nodes healthy",
+            "[devnet-ctl] Health check: {}/20 nodes healthy",
             healthy_count
         );
 
-        if healthy_count >= 9 {
+        if healthy_count >= 20 {
             return Ok(());
         }
 
         if start.elapsed().as_secs() > timeout_secs {
             return Err(format!(
-                "Devnet not healthy within {}s ({}/9 nodes)",
+                "Devnet not healthy within {}s ({}/20 nodes)",
                 timeout_secs, healthy_count
             ));
         }

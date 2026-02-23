@@ -73,17 +73,6 @@ impl MockTransport {
             .collect()
     }
 
-    /// Get messages sent to routes.
-    pub async fn get_messages_to_routes(&self) -> Vec<RecordedMessage> {
-        self.sent_messages
-            .read()
-            .await
-            .iter()
-            .filter(|m| matches!(m.target, TransportTarget::Route(_)))
-            .cloned()
-            .collect()
-    }
-
     /// Clear all recorded messages.
     pub async fn clear_messages(&self) {
         self.sent_messages.write().await.clear();
@@ -105,6 +94,7 @@ impl MockTransport {
 
         let encoded = data_encoding::BASE64URL_NOPAD.encode(&bytes);
         let key_str = format!("VLD0:{encoded}");
+        #[allow(clippy::expect_used)]
         RouteId::try_from(key_str.as_str()).expect("Should create valid RouteId")
     }
 }
@@ -300,37 +290,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(transport.message_count().await, 1);
-    }
-
-    #[tokio::test]
-    async fn test_mock_transport_get_messages_to_routes() {
-        use crate::mocks::make_test_public_key;
-
-        let transport = MockTransport::new();
-        let route_id = MockTransport::make_route_id(1);
-        let node_id = make_test_public_key(1);
-
-        // Send message to route
-        transport
-            .send(TransportTarget::Route(route_id), b"route_msg".to_vec())
-            .await
-            .unwrap();
-
-        // Send message to node
-        transport
-            .send(TransportTarget::Node(node_id), b"node_msg".to_vec())
-            .await
-            .unwrap();
-
-        // Get messages to routes
-        let route_messages = transport.get_messages_to_routes().await;
-        assert_eq!(route_messages.len(), 1);
-        assert_eq!(route_messages[0].data, b"route_msg".to_vec());
-
-        // Get messages to nodes
-        let node_messages = transport.get_messages_to_nodes().await;
-        assert_eq!(node_messages.len(), 1);
-        assert_eq!(node_messages[0].data, b"node_msg".to_vec());
     }
 
     #[tokio::test]
