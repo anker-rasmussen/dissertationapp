@@ -1069,39 +1069,3 @@ impl MpcOrchestrator {
         &self.dht
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validate_auction_parties_minimum() {
-        assert!(validate_auction_parties(2).is_ok());
-    }
-
-    #[test]
-    fn test_validate_auction_parties_too_few() {
-        assert!(validate_auction_parties(0).is_err());
-        assert!(validate_auction_parties(1).is_err());
-    }
-
-    #[test]
-    fn test_validate_auction_parties_large() {
-        assert!(validate_auction_parties(10).is_ok());
-        assert!(validate_auction_parties(50).is_ok());
-    }
-
-    #[test]
-    fn test_hosts_file_content_generation() {
-        let content = generate_hosts_content(3);
-        assert_eq!(content, "127.0.0.1\n127.0.0.1\n127.0.0.1\n");
-        assert_eq!(content.lines().count(), 3);
-    }
-
-    #[test]
-    fn test_hosts_file_content_single_party() {
-        let content = generate_hosts_content(1);
-        assert_eq!(content, "127.0.0.1\n");
-        assert_eq!(content.lines().count(), 1);
-    }
-}

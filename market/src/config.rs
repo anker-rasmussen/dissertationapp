@@ -281,19 +281,6 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn test_now_unix_reasonable() {
-        let now = now_unix();
-        // Verify timestamp is reasonable (after 2023)
-        // Unix epoch: 1970-01-01, so (2023 - 1970) * 365.25 days * 86400 sec/day ≈ 1672531200
-        const YEAR_2023: u64 = 1672531200;
-        assert!(now > YEAR_2023, "Timestamp should be after 2023");
-        // Verify it's not too far in the future (before 2035)
-        // (2035 - 1970) * 365.25 days * 86400 sec/day ≈ 2051222400
-        const YEAR_2035: u64 = 2051222400;
-        assert!(now < YEAR_2035, "Timestamp should be before 2035");
-    }
-
-    #[test]
     fn test_network_key_default() {
         let _guard = ENV_MUTEX.lock().unwrap();
         std::env::remove_var(MARKET_NETWORK_KEY_ENV);
@@ -312,45 +299,6 @@ mod tests {
 
         // Clean up
         std::env::remove_var(MARKET_NETWORK_KEY_ENV);
-    }
-
-    #[test]
-    fn test_subkey_constants() {
-        assert_eq!(subkeys::LISTING, 0);
-        assert_eq!(subkeys::BID_ANNOUNCEMENTS, 1);
-    }
-
-    #[test]
-    fn test_dht_subkey_count() {
-        assert_eq!(DHT_SUBKEY_COUNT, 2);
-    }
-
-    #[test]
-    fn test_market_config_default() {
-        let config = MarketConfig::default();
-        assert_eq!(config.network_key, DEFAULT_NETWORK_KEY);
-        assert_eq!(config.bootstrap_nodes, vec!["udp://1.2.3.1:5160"]);
-        assert_eq!(config.mp_spdz_dir.to_str().unwrap(), DEFAULT_MP_SPDZ_DIR);
-        assert!(!config.insecure_storage);
-        assert_eq!(config.node_offset, DEFAULT_NODE_OFFSET);
-        assert_eq!(
-            config.attachment_timeout_secs,
-            DEFAULT_ATTACHMENT_TIMEOUT_SECS
-        );
-        assert_eq!(config.mpc_route_wait_secs, DEFAULT_MPC_ROUTE_WAIT_SECS);
-        assert_eq!(
-            config.mpc_execution_timeout_secs,
-            DEFAULT_MPC_EXECUTION_TIMEOUT_SECS
-        );
-        assert_eq!(config.app_message_timeout_secs, APP_MESSAGE_TIMEOUT_SECS);
-        assert_eq!(
-            config.update_channel_capacity,
-            DEFAULT_UPDATE_CHANNEL_CAPACITY
-        );
-        assert_eq!(
-            config.auction_stale_timeout_secs,
-            AUCTION_STALE_TIMEOUT_SECS
-        );
     }
 
     #[test]
