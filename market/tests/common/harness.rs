@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use market::mocks::{
-    make_test_public_key, make_test_record_key, MockMpcRunner, MockTime, MockTransport,
-    SharedBidRegistry, SharedDhtHandle, SharedMockDht,
+    make_test_public_key, make_test_record_key, MockTime, SharedBidRegistry, SharedDhtHandle,
+    SharedMockDht,
 };
 use market::veilid::auction_logic::AuctionLogic;
 use market::veilid::bid_storage::BidStorage;
@@ -19,9 +19,8 @@ use veilid_core::PublicKey;
 pub struct PartyContext {
     pub party_id: usize,
     pub node_id: PublicKey,
-    pub auction_logic: AuctionLogic<SharedMockDht, MockTransport, MockMpcRunner, MockTime>,
+    pub auction_logic: AuctionLogic<SharedMockDht, MockTime>,
     pub bid_storage: BidStorage,
-    pub transport: MockTransport,
     pub dht: SharedMockDht,
 }
 
@@ -46,22 +45,10 @@ impl MultiPartyHarness {
         for i in 0..num_parties {
             let node_id = make_test_public_key(i as u8 + 1);
             let dht = dht_handle.create_party_view(node_id.clone());
-            let transport = MockTransport::new();
-            let mpc = MockMpcRunner::with_shared_registry(bid_registry.clone());
             let bid_storage = BidStorage::new();
-
-            // Add all other parties as peers
-            for j in 0..num_parties {
-                if i != j {
-                    let peer_id = make_test_public_key(j as u8 + 1);
-                    transport.add_peer(peer_id).await;
-                }
-            }
 
             let logic = AuctionLogic::new(
                 dht.clone(),
-                transport.clone(),
-                mpc,
                 time.clone(),
                 node_id.clone(),
                 bid_storage.clone(),
@@ -72,7 +59,6 @@ impl MultiPartyHarness {
                 node_id,
                 auction_logic: logic,
                 bid_storage,
-                transport,
                 dht,
             });
         }
@@ -225,26 +211,13 @@ impl MultiPartyHarness {
         self.time.set(deadline + 1);
     }
 
-    /// Execute the auction MPC for all participating parties.
+    /// Execute the auction for all participating parties.
     ///
+    /// Uses the shared bid registry to determine the winner (same logic
+    /// as the real MPC, just without the cryptographic protocol).
     /// Returns the winning party ID.
-    pub async fn execute_auction(&self, listing: &Listing) -> Option<usize> {
-        let num_parties = self.parties.len();
-        let mut results = Vec::new();
-
-        for (i, party) in self.parties.iter().enumerate() {
-            if let Some((bid_value, _)) = party.bid_storage.get_bid(&listing.key).await {
-                let result = party
-                    .auction_logic
-                    .execute_mpc(i, num_parties, bid_value)
-                    .await
-                    .expect("MPC execution failed");
-                results.push((i, result));
-            }
-        }
-
-        // Find the winner
-        results.iter().find(|(_, r)| r.is_winner).map(|(i, _)| *i)
+    pub async fn execute_auction(&self, _listing: &Listing) -> Option<usize> {
+        self.bid_registry.calculate_winner().await
     }
 
     /// Check if a party received the decryption key.
