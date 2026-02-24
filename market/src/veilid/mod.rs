@@ -1,3 +1,10 @@
+//! Veilid integration layer: P2P networking, DHT storage, MPC tunnel, and route management.
+//!
+//! This module bridges the generic auction logic with the Veilid network. Key types:
+//! [`AuctionCoordinator`] (real network coordinator), [`MpcTunnelProxy`] (TCP-over-Veilid
+//! tunnel for MP-SPDZ), [`MpcRouteManager`] (MPC party route lifecycle), and
+//! [`DHTOperations`] (atomic DHT read-modify-write).
+
 pub mod auction_coordinator;
 pub mod auction_logic;
 pub mod bid_announcement;

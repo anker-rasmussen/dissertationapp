@@ -12,7 +12,12 @@ use super::bid_announcement::AuctionMessage;
 use crate::config::now_unix;
 use crate::error::{MarketError, MarketResult};
 
-/// Manages Veilid route exchange for MPC parties
+/// Manages Veilid private route lifecycle for MPC parties.
+///
+/// Each auction participant creates a private route for receiving MPC tunnel traffic,
+/// exchanges route blobs with peers, and tracks readiness signals. Routes are
+/// self-imported after creation (required by Veilid for deliverability) and
+/// re-imported before tunnel proxy use to refresh the 5-minute expiry timer.
 pub struct MpcRouteManager {
     api: VeilidAPI,
     party_id: usize,
@@ -27,6 +32,7 @@ pub struct MpcRouteManager {
 }
 
 impl MpcRouteManager {
+    /// Create a new route manager for the given party.
     pub fn new(api: VeilidAPI, party_id: usize) -> Self {
         Self {
             api,
@@ -167,7 +173,7 @@ impl MpcRouteManager {
     ///
     /// Always re-imports the route blob so Veilid refreshes its internal
     /// relay state — this recovers from transient `dead_remote_routes` events
-    /// that would otherwise leave a stale handle in [`received_routes`].
+    /// that would otherwise leave a stale handle in `received_routes`.
     /// Returns `true` if this is a new or changed route, `false` if the same
     /// route was already registered (re-import only refreshed Veilid state).
     pub async fn register_route_announcement(
@@ -389,7 +395,7 @@ impl MpcRouteManager {
     /// Send MpcReady directly via already-imported MPC routes using `app_call`
     /// for confirmed delivery.
     ///
-    /// Unlike [`broadcast_mpc_ready`] which imports broadcast route blobs
+    /// Unlike `broadcast_mpc_ready` which imports broadcast route blobs
     /// (potentially stale), this sends through the MPC routes collected
     /// during Phase 1 — these are known-good since route collection
     /// succeeded.
@@ -553,7 +559,7 @@ impl MpcRouteManager {
     /// than `dead_routes` (confirmed by core team on Discord).
     ///
     /// If `my_route_id` is in either dead list, clears it so that
-    /// [`create_route`] will allocate a fresh one.  Returns the new
+    /// `create_route` will allocate a fresh one.  Returns the new
     /// `RouteBlob` if a route was recreated (caller should re-broadcast).
     pub async fn handle_dead_own_route(
         &mut self,

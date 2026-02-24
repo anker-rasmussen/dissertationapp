@@ -1,3 +1,8 @@
+//! Bid types: plaintext [`Bid`], [`SealedBid`] (SHA256 commitment), and [`BidCollection`].
+//!
+//! Bids use a commit-reveal scheme: `commitment = SHA256(amount || 32-byte nonce)`.
+//! The nonce is stored locally and revealed after the auction ends for MPC input verification.
+
 use serde::{Deserialize, Serialize};
 use veilid_core::{PublicKey, RecordKey};
 

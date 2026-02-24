@@ -1,3 +1,9 @@
+//! Listing types and status lifecycle for the auction marketplace.
+//!
+//! A [`Listing`] represents a sealed-bid auction item stored in the Veilid DHT.
+//! Status transitions: `Active` (accepting bids) → `Closed` (deadline passed) →
+//! `Completed` (winner determined) or `Cancelled` (seller withdrew).
+
 use serde::{Deserialize, Serialize};
 use veilid_core::{PublicKey, RecordKey};
 

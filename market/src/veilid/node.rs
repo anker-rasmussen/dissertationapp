@@ -1,3 +1,9 @@
+//! Veilid node lifecycle: configuration, startup, network attachment, and shutdown.
+//!
+//! [`VeilidNode`] wraps the Veilid API with market-specific configuration (devnet
+//! bootstrap, port offsets, capability flags). [`DevNetConfig`] holds devnet parameters
+//! (network key, bootstrap IPs, port offset).
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,6 +18,7 @@ use veilid_core::{
     VeilidConfigWS, VeilidUpdate, VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
+/// Snapshot of Veilid node connectivity: attachment status, peer count, and node IDs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeState {
     pub is_attached: bool,
@@ -19,6 +26,10 @@ pub struct NodeState {
     pub node_ids: Vec<String>,
 }
 
+/// Configuration for connecting to the local Docker devnet.
+///
+/// Default: 20-node devnet (1 bootstrap + 19 regular), market nodes start at offset 20.
+/// Port formula: `5160 + offset`, IP formula: `1.2.3.(offset + 1)`.
 #[derive(Debug, Clone)]
 pub struct DevNetConfig {
     pub network_key: String,
@@ -53,6 +64,10 @@ impl Default for DevNetConfig {
     }
 }
 
+/// Manages the Veilid node lifecycle: startup, network attachment, update polling, and shutdown.
+///
+/// Wraps `VeilidAPI` and exposes a channel of `VeilidUpdate` events for the
+/// coordinator to consume. Supports both public network and devnet configurations.
 pub struct VeilidNode {
     api: Option<VeilidAPI>,
     state: Arc<RwLock<NodeState>>,
@@ -68,6 +83,7 @@ pub struct VeilidNode {
 }
 
 impl VeilidNode {
+    /// Create a new node with the given data directory and market configuration.
     pub fn new(data_dir: PathBuf, config: &crate::config::MarketConfig) -> Self {
         let (update_tx, update_rx) = mpsc::channel(config.update_channel_capacity);
         Self {
@@ -107,6 +123,7 @@ impl VeilidNode {
         self
     }
 
+    /// Start the Veilid node: initialise the API, configure networking, and attach.
     #[allow(clippy::too_many_lines)]
     pub async fn start(&mut self) -> MarketResult<()> {
         info!("Starting Veilid node...");
@@ -332,6 +349,7 @@ impl VeilidNode {
         Ok(())
     }
 
+    /// Detach from the network and shut down the Veilid API.
     pub async fn shutdown(&mut self) -> MarketResult<()> {
         if let Some(api) = self.api.take() {
             info!("Shutting down Veilid node...");
