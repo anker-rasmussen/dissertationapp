@@ -357,10 +357,6 @@ async fn test_e2e_smoke_appmessage_bid_announcements() {
                 bid_key: seller_bid_record_dht.key.clone(),
                 signing_pubkey: seller_signing,
             };
-            let seller_bid_ops = BidOperations::new(seller_dht.clone());
-            seller_bid_ops
-                .register_bid(&listing_record, seller_bid.clone())
-                .await?;
             seller_dht
                 .set_dht_value(&seller_bid_record_dht, seller_bid.to_cbor()?)
                 .await?;
@@ -539,10 +535,6 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 bid_key: seller_bid_record_dht.key.clone(),
                 signing_pubkey: seller_signing,
             };
-            let seller_bid_ops = BidOperations::new(seller_dht.clone());
-            seller_bid_ops
-                .register_bid(&listing_record, seller_bid.clone())
-                .await?;
             seller_dht
                 .set_dht_value(&seller_bid_record_dht, seller_bid.to_cbor()?)
                 .await?;
@@ -580,9 +572,6 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 bid_key: bid1_record_dht.key.clone(),
                 signing_pubkey: bidder1_signing,
             };
-            seller_bid_ops
-                .register_bid(&listing_record, bid1.clone())
-                .await?;
             bidder1
                 .bid_storage
                 .store_bid_key(&listing_record.key, &bid1_record_dht.key)
@@ -610,9 +599,6 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 bid_key: bid2_record_dht.key.clone(),
                 signing_pubkey: bidder2_signing,
             };
-            seller_bid_ops
-                .register_bid(&listing_record, bid2.clone())
-                .await?;
             bidder2
                 .bid_storage
                 .store_bid_key(&listing_record.key, &bid2_record_dht.key)
@@ -621,7 +607,7 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 .set_dht_value(&bid2_record_dht, bid2.to_cbor()?)
                 .await?;
 
-            // Broadcast announcements
+            // Broadcast announcements — seller handles them and writes to BID_ANNOUNCEMENTS
             tokio::time::sleep(Duration::from_secs(5)).await;
             bidder1
                 .coordinator
@@ -633,7 +619,28 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 .await?;
             tokio::time::sleep(Duration::from_secs(2)).await;
 
+            // Also register bidder bids directly (seller writes to own BID_ANNOUNCEMENTS)
+            seller
+                .coordinator
+                .add_own_bid_to_registry(
+                    &listing_record.key,
+                    bidder1_id.clone(),
+                    bid1_record_dht.key.clone(),
+                    now + 1,
+                )
+                .await?;
+            seller
+                .coordinator
+                .add_own_bid_to_registry(
+                    &listing_record.key,
+                    bidder2_id.clone(),
+                    bid2_record_dht.key.clone(),
+                    now + 2,
+                )
+                .await?;
+
             // Verify party ordering
+            let seller_bid_ops = BidOperations::new(seller_dht.clone());
             let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
             assert_eq!(bid_index.bids.len(), 3, "Should have 3 bids");
 
@@ -947,8 +954,14 @@ async fn test_e2e_full_concurrent_auctions() {
             poll_decryption_key(&mut node_c, &listing_b_key, 600),
         );
 
-        assert!(key_a.is_some(), "Auction A: winner should have decryption key");
-        assert!(key_b.is_some(), "Auction B: winner should have decryption key");
+        assert!(
+            key_a.is_some(),
+            "Auction A: winner should have decryption key"
+        );
+        assert!(
+            key_b.is_some(),
+            "Auction B: winner should have decryption key"
+        );
 
         eprintln!("[E2E] Both concurrent auctions completed successfully!");
 

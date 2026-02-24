@@ -50,27 +50,6 @@ pub trait DhtStore: Send + Sync + Clone {
         value: Vec<u8>,
     ) -> MarketResult<()>;
 
-    /// Get a value from a specific subkey along with its sequence number.
-    ///
-    /// Returns `(None, None)` if the value hasn't been set, or `(Some(data), Some(seq))`.
-    async fn get_subkey_with_seq(
-        &self,
-        key: &RecordKey,
-        subkey: u32,
-    ) -> MarketResult<(Option<Vec<u8>>, Option<u32>)>;
-
-    /// Set a value at a specific subkey with compare-and-swap.
-    ///
-    /// If `expected_seq` is `Some(n)`, the write only succeeds if the current
-    /// sequence number matches `n`. Returns error on CAS failure (stale sequence).
-    async fn set_subkey_cas(
-        &self,
-        record: &Self::OwnedRecord,
-        subkey: u32,
-        value: Vec<u8>,
-        expected_seq: Option<u32>,
-    ) -> MarketResult<()>;
-
     /// Delete a DHT record.
     async fn delete_record(&self, key: &RecordKey) -> MarketResult<()>;
 

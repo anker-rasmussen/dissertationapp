@@ -57,6 +57,7 @@ pub use veilid::bid_storage::BidStorage;
 pub use veilid::dht::{DHTOperations, OwnedDHTRecord};
 pub use veilid::listing_ops::ListingOperations;
 pub use veilid::node::{DevNetConfig, VeilidNode};
-pub use veilid::registry::{
-    CatalogEntry, MarketRegistry, RegistryEntry, RegistryOperations, SellerCatalog, SellerEntry,
+pub use veilid::registry::RegistryOperations;
+pub use veilid::registry_types::{
+    CatalogEntry, MarketRegistry, RegistryEntry, SellerCatalog, SellerEntry,
 };

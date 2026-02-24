@@ -111,15 +111,15 @@ async fn main() {
     std::fs::create_dir_all(&dir).expect("Failed to create data dir");
 
     // Create + start Veilid node
-    let devnet_config = DevNetConfig {
-        network_key: "development-network-2025".to_string(),
-        bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
-        port_offset: offset,
-        limit_over_attached: 24,
-    };
     let market_config = config::MarketConfig {
         insecure_storage: true,
-        ..config::MarketConfig::default()
+        ..config::MarketConfig::from_env()
+    };
+    let devnet_config = DevNetConfig {
+        network_key: market_config.network_key.clone(),
+        bootstrap_nodes: market_config.bootstrap_nodes.clone(),
+        port_offset: offset,
+        limit_over_attached: market_config.limit_over_attached,
     };
     let mut node = VeilidNode::new(dir.clone(), &market_config).with_devnet(devnet_config);
 

@@ -175,7 +175,12 @@ pub(crate) async fn spawn_mpc_party(
         Err(_) => {
             let _ = child.kill().await;
             // Reap the zombie process to prevent resource leak
-            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(crate::config::MPC_ZOMBIE_REAP_TIMEOUT_SECS),
+                child.wait(),
+            )
+            .await
+            {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => tracing::error!("Failed to reap MPC process: {}", e),
                 Err(_) => tracing::error!("Timeout waiting for MPC process to exit after kill"),

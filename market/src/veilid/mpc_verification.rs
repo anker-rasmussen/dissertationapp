@@ -27,7 +27,7 @@ pub fn verify_commitment(bid_value: u64, nonce: &[u8; 32], stored_commitment: &[
 
 /// Named struct replacing the tuple `(PublicKey, u64, Option<bool>)` for pending verifications.
 #[derive(Debug, Clone)]
-pub struct VerificationState {
+pub(crate) struct VerificationState {
     pub winner_pubkey: PublicKey,
     pub mpc_winning_bid: u64,
     pub verified: Option<bool>,
@@ -194,7 +194,7 @@ impl MpcOrchestrator {
         };
 
         let start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(20);
+        let max_wait = std::time::Duration::from_secs(crate::config::WINNER_REVEAL_TIMEOUT_SECS);
 
         loop {
             // Look up the winner's route while holding locks, then release before async work
@@ -215,7 +215,10 @@ impl MpcOrchestrator {
                         "Route manager not found for listing {}, retrying",
                         listing_key
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
                     continue;
                 };
 
@@ -238,7 +241,10 @@ impl MpcOrchestrator {
                         "Winner route not found yet for listing {}, retrying challenge",
                         listing_key
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
                     continue;
                 }
             };
@@ -268,7 +274,10 @@ impl MpcOrchestrator {
                         return;
                     }
                     warn!("Failed to send challenge to winner, retrying: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
                 }
             }
         }

@@ -3,29 +3,17 @@
 //! This module centralizes magic numbers and configuration values
 //! to improve maintainability and enable easier tuning.
 
-/// Maximum retries for DHT bid registration with optimistic concurrency.
-pub const BID_REGISTER_MAX_RETRIES: u32 = 10;
-
-/// Initial delay for bid registration retry (doubles on each retry).
-pub const BID_REGISTER_INITIAL_DELAY_MS: u64 = 50;
-
 /// Number of DHT subkeys per record.
 /// - Subkey 0: Primary data (listing)
-/// - Subkey 1: Bid index
-/// - Subkey 2: Bid announcement registry
-/// - Subkey 3: Bidder registry
-pub const DHT_SUBKEY_COUNT: u16 = 4;
+/// - Subkey 1: Bid announcement registry (G-Set CRDT, seller-owned)
+pub const DHT_SUBKEY_COUNT: u16 = 2;
 
 /// Subkey indices for DHT record data.
 pub mod subkeys {
     /// Primary listing data.
     pub const LISTING: u32 = 0;
-    /// Bid index for the listing.
-    pub const BID_INDEX: u32 = 1;
-    /// Bid announcement registry.
-    pub const BID_ANNOUNCEMENTS: u32 = 2;
-    /// Bidder registry for MPC coordination.
-    pub const BIDDER_REGISTRY: u32 = 3;
+    /// Bid announcement registry (state-based G-Set, merged at read time).
+    pub const BID_ANNOUNCEMENTS: u32 = 1;
 }
 
 /// Default network key for shared-keypair registry derivation.
@@ -96,6 +84,73 @@ pub const DEFAULT_RPC_TIMEOUT_MS: u32 = 5_000;
 /// MASCOT: dishonest majority, malicious security, N >= 2 parties.
 /// Override via `MPC_PROTOCOL` env var for alternative protocols.
 pub const DEFAULT_MPC_PROTOCOL: &str = "mascot-party.x";
+
+// --- MPC Orchestrator ---
+
+/// Delay before first route collection check (allows late parties to publish).
+pub const MPC_ROUTE_ANNOUNCE_DELAY_SECS: u64 = 2;
+
+/// Maximum wait for all parties to publish MPC routes.
+pub const MPC_ROUTE_COLLECTION_TIMEOUT_SECS: u64 = 45;
+
+/// Maximum wait for all parties to signal `MpcReady`.
+pub const MPC_READINESS_BARRIER_TIMEOUT_SECS: u64 = 120;
+
+/// Pause after barrier passes to let slower parties also pass.
+pub const MPC_POST_BARRIER_SETTLE_SECS: u64 = 5;
+
+/// Poll interval inside the readiness barrier loop.
+pub const MPC_BARRIER_POLL_SECS: u64 = 1;
+
+/// Wait for peer route refresh announcements after barrier.
+pub const MPC_ROUTE_PROPAGATION_WAIT_SECS: u64 = 8;
+
+/// Timeout for MPC tunnel warmup (Ping round-trip to all peers).
+pub const MPC_TUNNEL_WARMUP_TIMEOUT_SECS: u64 = 300;
+
+// --- MPC Tunnel ---
+
+/// Interval between Ping messages during MPC tunnel warmup.
+pub const MPC_PING_INTERVAL_SECS: u64 = 3;
+
+/// Interval for Open re-send retries to handle route-death.
+pub const MPC_OPEN_RESEND_INTERVAL_SECS: u64 = 5;
+
+/// Post-accept delay while holding the local connect mutex (ms).
+pub const MPC_POST_ACCEPT_DELAY_MS: u64 = 20;
+
+/// Delay between releasing an imported route (ms).
+pub const MPC_ROUTE_RELEASE_DELAY_MS: u64 = 100;
+
+/// Interval for MPC data flow progress logging.
+pub const MPC_PROGRESS_LOG_INTERVAL_SECS: u64 = 30;
+
+/// Retry interval for local MP-SPDZ TCP connect on Open.
+pub const MPC_ACCEPT_RETRY_SECS: u64 = 1;
+
+// --- MPC Execution ---
+
+/// Timeout for reaping a killed MP-SPDZ zombie process.
+pub const MPC_ZOMBIE_REAP_TIMEOUT_SECS: u64 = 5;
+
+// --- Auction Coordinator ---
+
+/// Timeout for sending WinnerDecryptionRequest / WinnerBidReveal.
+pub const WINNER_REVEAL_TIMEOUT_SECS: u64 = 20;
+
+/// Retry interval when sending challenges / reveals.
+pub const WINNER_REVEAL_RETRY_SECS: u64 = 1;
+
+/// Monitoring loop poll interval (seconds).
+pub const MONITOR_POLL_INTERVAL_SECS: u64 = 5;
+
+/// Maximum wait for peer route blobs before MPC.
+pub const PEER_ROUTE_WAIT_SECS: u64 = 15;
+
+// --- DHT Retry ---
+
+/// Initial delay for DHT retry with exponential backoff (ms).
+pub const DHT_RETRY_INITIAL_DELAY_MS: u64 = 50;
 
 /// Environment variable to override the MPC protocol binary.
 pub const MPC_PROTOCOL_ENV: &str = "MPC_PROTOCOL";
@@ -261,17 +316,13 @@ mod tests {
 
     #[test]
     fn test_subkey_constants() {
-        // Verify the expected subkey values
         assert_eq!(subkeys::LISTING, 0);
-        assert_eq!(subkeys::BID_INDEX, 1);
-        assert_eq!(subkeys::BID_ANNOUNCEMENTS, 2);
-        assert_eq!(subkeys::BIDDER_REGISTRY, 3);
+        assert_eq!(subkeys::BID_ANNOUNCEMENTS, 1);
     }
 
     #[test]
     fn test_dht_subkey_count() {
-        // Verify subkey count matches the number of defined subkeys
-        assert_eq!(DHT_SUBKEY_COUNT, 4);
+        assert_eq!(DHT_SUBKEY_COUNT, 2);
     }
 
     #[test]
