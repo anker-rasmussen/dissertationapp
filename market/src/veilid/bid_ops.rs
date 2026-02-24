@@ -20,13 +20,9 @@ impl<D: DhtStore> BidOperations<D> {
 
     /// Publish a bid to the DHT
     pub async fn publish_bid(&self, bid: BidRecord) -> MarketResult<D::OwnedRecord> {
-        // Create a new DHT record for this bid
         let record = self.dht.create_record().await?;
-
-        // Serialize and store the bid
         let data = bid.to_cbor()?;
         self.dht.set_value(&record, data).await?;
-
         let key = D::record_key(&record);
         info!("Published bid to DHT at {}", key);
         Ok(record)
@@ -171,11 +167,9 @@ mod tests {
     async fn test_fetch_bid_index_from_announcements() {
         let dht = MockDht::new();
         let ops = BidOperations::new(dht.clone());
-        let listing_key = make_test_record_key(100);
 
-        // Create a listing record with BID_ANNOUNCEMENTS
+        // Create a listing record
         let listing_record = dht.create_record().await.unwrap();
-        // Override listing_key to use listing_record's key
         let listing_key = MockDht::record_key(&listing_record);
 
         // Publish two bids to their own DHT records
@@ -184,7 +178,7 @@ mod tests {
             bidder: make_test_public_key(1),
             commitment: [1; 32],
             timestamp: 1000,
-            bid_key: make_test_record_key(10), // placeholder, overwritten below
+            bid_key: make_test_record_key(10),
             signing_pubkey: [1; 32],
         };
         let bid1_record = ops.publish_bid(bid1.clone()).await.unwrap();
