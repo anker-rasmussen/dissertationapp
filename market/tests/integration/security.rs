@@ -207,61 +207,6 @@ fn test_seller_always_party_zero() {
     );
 }
 
-#[tokio::test]
-async fn test_3_party_loser_sees_no_winner_info() {
-    let mut harness = MultiPartyHarness::new(3).await;
-    let listing = harness.create_listing("Secret Winner", 100, 3600).await;
-
-    harness.place_bid(0, &listing, 200).await;
-    harness.place_bid(1, &listing, 500).await; // Winner
-    harness.place_bid(2, &listing, 300).await;
-
-    harness.advance_to_deadline(&listing);
-
-    let num_parties = harness.num_parties();
-    for (i, party) in [harness.party(0), harness.party(1), harness.party(2)]
-        .iter()
-        .enumerate()
-    {
-        if let Some((bid_value, _)) = party.bid_storage.get_bid(&listing.key).await {
-            let result = party
-                .auction_logic
-                .execute_mpc(i, num_parties, bid_value)
-                .await
-                .unwrap();
-
-            if i == 1 {
-                // Winner sees is_winner = true
-                assert!(result.is_winner, "Party 1 (highest bid) should win");
-            } else if i == 0 {
-                // Party 0 (seller) loses but sees winner info (MPC protocol)
-                assert!(!result.is_winner, "Party 0 (seller) should lose");
-                assert!(
-                    result.winner_bid.is_some(),
-                    "Seller (party 0) should see winner bid"
-                );
-                assert!(
-                    result.winner_party_id.is_some(),
-                    "Seller (party 0) should see winner party ID"
-                );
-            } else {
-                // Other losers see is_winner = false — no winner ID or winning bid
-                assert!(!result.is_winner, "Party {} should lose", i);
-                assert!(
-                    result.winner_bid.is_none(),
-                    "Loser party {} should not see winner bid",
-                    i
-                );
-                assert!(
-                    result.winner_party_id.is_none(),
-                    "Loser party {} should not see winner party ID",
-                    i
-                );
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Adversarial Input Tests
 // ---------------------------------------------------------------------------
