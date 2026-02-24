@@ -1,3 +1,10 @@
+//! Real Veilid coordinator wrapping [`AuctionLogic`] with actual network I/O.
+//!
+//! [`AuctionCoordinator`] manages the Veilid API lifecycle, DHT operations,
+//! broadcast routing, MPC orchestration, and message dispatch. It instantiates
+//! [`AuctionLogic`] with real implementations and delegates pure auction logic
+//! to that layer.
+
 use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
@@ -137,7 +144,7 @@ pub struct AuctionCoordinator {
     signing_key: SigningKey,
     /// Core auction state machine — the tested generic layer.
     logic: CoordinatorLogic,
-    /// Per-seller registry operations (shared via Arc<Mutex>)
+    /// Per-seller registry operations (shared via `Arc<Mutex>`).
     registry_ops: Arc<Mutex<RegistryOperations>>,
     /// Listings we own (as seller): Map<listing_key, OwnedDHTRecord>
     owned_listings: Arc<Mutex<HashMap<RecordKey, OwnedDHTRecord>>>,
@@ -164,6 +171,11 @@ pub struct AuctionCoordinator {
 }
 
 impl AuctionCoordinator {
+    /// Create a new coordinator bound to a Veilid node.
+    ///
+    /// Generates an Ed25519 signing key for message authentication, initialises
+    /// the embedded [`MpcOrchestrator`] and [`AuctionLogic`], and sets up DHT
+    /// registry operations scoped to the given `network_key`.
     pub fn new(
         api: VeilidAPI,
         dht: DHTOperations,
@@ -224,7 +236,7 @@ impl AuctionCoordinator {
 
     /// Process an incoming AppMessage.
     ///
-    /// All messages must be wrapped in a [`SignedEnvelope`]. The signature is
+    /// All messages must be wrapped in a `SignedEnvelope`. The signature is
     /// verified first; then the payload is dispatched as either an
     /// `AuctionMessage` or an MPC tunnel message.
     pub async fn process_app_message(&self, message: Vec<u8>) -> MarketResult<()> {

@@ -1,3 +1,10 @@
+//! TCP tunnel proxy: bridges MP-SPDZ localhost TCP connections over Veilid `app_call` routes.
+//!
+//! Each party runs a local TCP listener that MP-SPDZ connects to. Outgoing data is chunked,
+//! signed, and sent via pipelined `app_call` (depth 8) to the remote party's private route.
+//! Incoming data is reorder-buffered per stream to handle out-of-order delivery. Supports
+//! mid-execution route updates (`RouteUpdate`) and pre-MPC warmup pings.
+
 use bincode::Options;
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -209,6 +216,11 @@ impl MpcTunnelProxy {
         }
     }
 
+    /// Start the tunnel proxy: spawn one outgoing TCP listener per peer party.
+    ///
+    /// Each listener accepts connections from the local MP-SPDZ process, chunks
+    /// outgoing data into signed `MpcMessage::Data` frames, and sends them via
+    /// pipelined `app_call` to the peer's private route.
     pub fn run(&self) -> MarketResult<()> {
         info!("Starting MPC TunnelProxy for Party {}", self.inner.party_id);
 

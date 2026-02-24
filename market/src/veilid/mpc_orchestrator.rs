@@ -1,3 +1,9 @@
+//! MPC session lifecycle: route exchange, readiness barrier, execution, and post-MPC verification.
+//!
+//! [`MpcOrchestrator`] is extracted from `AuctionCoordinator` to separate MPC concerns
+//! (tunnel proxy, route management, MP-SPDZ process spawning) from auction coordination
+//! (bid announcements, listing management, DHT updates).
+
 use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -74,6 +80,11 @@ pub struct MpcOrchestrator {
 }
 
 impl MpcOrchestrator {
+    /// Create a new orchestrator bound to a Veilid node.
+    ///
+    /// The orchestrator shares the same `DHTOperations` and `BidStorage` as
+    /// the parent `AuctionCoordinator`, and generates its own MPC route
+    /// managers per auction.
     pub fn new(
         api: VeilidAPI,
         dht: DHTOperations,
@@ -198,7 +209,12 @@ impl MpcOrchestrator {
         }
     }
 
-    /// Handle auction end: coordinate MPC execution
+    /// Handle auction end: the full MPC lifecycle from route exchange to verification.
+    ///
+    /// Steps: validate party count, assign party IDs from `bid_index`, exchange MPC
+    /// routes, run readiness barrier, compile MP-SPDZ program, spawn tunnel proxy,
+    /// execute `mascot-party.x`, parse output, and (for seller) initiate winner
+    /// verification. Sets `needs_route_refresh` on completion.
     pub async fn handle_auction_end(
         &self,
         listing_key: &RecordKey,
