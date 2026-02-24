@@ -494,37 +494,6 @@ impl MpcRouteManager {
         self.ready_parties.lock().await.len()
     }
 
-    /// Count parties that signalled readiness within the last `window_secs`
-    /// seconds.  Signals from previous (failed) rounds are ignored.
-    pub async fn ready_count_since(&self, cutoff: u64) -> usize {
-        let map = self.ready_parties.lock().await;
-        let total = map.len();
-        let within_window: Vec<_> = map
-            .iter()
-            .filter(|(_, (_, ts))| *ts >= cutoff)
-            .map(|(pk, (_, ts))| (pk.clone(), *ts))
-            .collect();
-        let count = within_window.len();
-        if count < total {
-            debug!(
-                "ready_count_since: cutoff={} total={} within_window={} (filtered out {})",
-                cutoff,
-                total,
-                count,
-                total - count,
-            );
-            for (pk, ts) in &within_window {
-                debug!("  ready party: {} ts={}", pk, ts);
-            }
-            for (pk, (_, ts)) in map.iter() {
-                if *ts < cutoff {
-                    debug!("  FILTERED OUT: {} ts={} (cutoff={})", pk, ts, cutoff);
-                }
-            }
-        }
-        count
-    }
-
     /// Handle dead remote routes reported by `VeilidUpdate::RouteChange`.
     ///
     /// For each dead `RouteId`, finds which party pubkey maps to it in

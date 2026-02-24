@@ -128,21 +128,6 @@ impl BidIndex {
     pub fn from_cbor(data: &[u8]) -> Result<Self, MarketError> {
         crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
-
-    /// Merge another index into this one
-    pub fn merge(&mut self, other: &Self) {
-        for bid in &other.bids {
-            // Use the production add_bid which stamps with now_unix()
-            self.add_bid(bid.clone());
-        }
-    }
-
-    /// Merge with custom time provider
-    pub fn merge_with_time<T: TimeProvider>(&mut self, other: &Self, time: &T) {
-        for bid in &other.bids {
-            self.add_bid_with_time(bid.clone(), time);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -380,41 +365,6 @@ mod tests {
         // Seller (bidder 1) should always be party 0, regardless of timestamp
         assert_eq!(index1.get_party_id(&bidder1, &seller), Some(0));
         assert_eq!(index1.get_party_id(&bidder2, &seller), Some(1));
-    }
-
-    #[test]
-    fn test_bid_index_merge() {
-        let time = MockTime::new(2000);
-        let listing_key = make_test_key();
-
-        let mut index1 = BidIndex::new(listing_key.clone());
-        index1.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
-
-        let mut index2 = BidIndex::new(listing_key.clone());
-        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
-        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
-
-        index1.merge_with_time(&index2, &time);
-
-        assert_eq!(index1.bids.len(), 3);
-    }
-
-    #[test]
-    fn test_bid_index_merge_no_duplicates() {
-        let time = MockTime::new(2000);
-        let listing_key = make_test_key();
-
-        let mut index1 = BidIndex::new(listing_key.clone());
-        index1.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
-        index1.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
-
-        let mut index2 = BidIndex::new(listing_key.clone());
-        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time); // Duplicate
-        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
-
-        index1.merge_with_time(&index2, &time);
-
-        assert_eq!(index1.bids.len(), 3);
     }
 
     #[test]
