@@ -18,8 +18,7 @@ use super::bid_storage::BidStorage;
 use super::dht::DHTOperations;
 use super::mpc::MpcTunnelProxy;
 use super::mpc_execution::{
-    compile_mpc_program, read_result_contract, spawn_mpc_party, write_result_contract,
-    MpcCleanupGuard, MpcResultContract,
+    compile_mpc_program, spawn_mpc_party, MpcCleanupGuard, MpcResultContract,
 };
 use super::mpc_routes::MpcRouteManager;
 pub(crate) use super::mpc_verification::VerificationState;
@@ -547,14 +546,8 @@ impl MpcOrchestrator {
             }
         };
 
-        self.process_mpc_result(
-            party_id,
-            &process_output,
-            listing_key,
-            all_parties,
-            &hosts_file_path,
-        )
-        .await?;
+        self.process_mpc_result(party_id, &process_output, listing_key, all_parties)
+            .await?;
 
         // Clear active tunnel proxy reference before guard drops
         *self.active_tunnel_proxy.lock().await = None;
@@ -889,7 +882,6 @@ impl MpcOrchestrator {
         process_output: &std::process::Output,
         listing_key: &RecordKey,
         all_parties: &[PublicKey],
-        hosts_file_path: &std::path::Path,
     ) -> MarketResult<()> {
         let stdout = String::from_utf8_lossy(&process_output.stdout);
         let stderr = String::from_utf8_lossy(&process_output.stderr);
@@ -904,16 +896,12 @@ impl MpcOrchestrator {
             warn!("STDERR:\n{}", stderr);
         }
 
-        // Build and persist a machine-readable MPC result contract.
+        // Parse a machine-readable MPC result contract from stdout.
         let result_contract = if party_id == 0 {
             MpcResultContract::from_seller_stdout(&stdout)?
         } else {
             MpcResultContract::from_bidder_stdout(&stdout)?
         };
-        let contract_path = hosts_file_path.with_extension(format!("party-{party_id}.json"));
-        write_result_contract(&contract_path, &result_contract).await?;
-        let result_contract = read_result_contract(&contract_path).await?;
-        let _ = tokio::fs::remove_file(&contract_path).await;
 
         if party_id == 0 {
             self.handle_seller_mpc_result(&result_contract, listing_key, all_parties)

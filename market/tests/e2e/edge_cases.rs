@@ -8,6 +8,7 @@ use std::time::Duration;
 use market::error::MarketError;
 use market::marketplace::bid_record::BidRecord;
 use market::veilid::bid_ops::BidOperations;
+use market::DhtStore;
 use serial_test::serial;
 use veilid_core::PublicKey;
 
@@ -72,7 +73,7 @@ async fn test_e2e_edge_tampered_appmessage_rejected() {
                 signing_pubkey: sender_signing,
             };
             sender_dht
-                .set_dht_value(&bid_record_dht, bid.to_cbor()?)
+                .set_value(&bid_record_dht, bid.to_cbor()?)
                 .await?;
 
             // Wait for DHT propagation
@@ -184,7 +185,7 @@ async fn test_e2e_edge_bid_announcement_wrong_signer_rejected() {
                 signing_pubkey: bidder1_signing,
             };
             bidder1_dht
-                .set_dht_value(&bid1_record_dht, bid1.to_cbor()?)
+                .set_value(&bid1_record_dht, bid1.to_cbor()?)
                 .await?;
 
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -294,7 +295,7 @@ async fn test_e2e_edge_duplicate_bid_announcements_deduped() {
                 signing_pubkey: bidder_signing,
             };
             bidder_dht
-                .set_dht_value(&bid_record_dht, bid.to_cbor()?)
+                .set_value(&bid_record_dht, bid.to_cbor()?)
                 .await?;
 
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -604,7 +605,7 @@ async fn test_e2e_edge_dht_bid_registry_cross_node_consistency() {
                 signing_pubkey: seller_signing,
             };
             seller_dht
-                .set_dht_value(&seller_bid_rec, seller_bid.to_cbor()?)
+                .set_value(&seller_bid_rec, seller_bid.to_cbor()?)
                 .await?;
             seller
                 .coordinator
@@ -640,9 +641,7 @@ async fn test_e2e_edge_dht_bid_registry_cross_node_consistency() {
                     bid_key: bid_rec_dht.key.clone(),
                     signing_pubkey: fake_signing,
                 };
-                seller_dht
-                    .set_dht_value(&bid_rec_dht, bid.to_cbor()?)
-                    .await?;
+                seller_dht.set_value(&bid_rec_dht, bid.to_cbor()?).await?;
                 // Seller writes bidder's announcement to its own BID_ANNOUNCEMENTS (G-Set)
                 seller
                     .coordinator
@@ -747,7 +746,7 @@ async fn test_e2e_edge_seller_only_no_sale() {
             bid_key: bid_rec.key.clone(),
             signing_pubkey: seller_signing,
         };
-        seller_dht.set_dht_value(&bid_rec, bid.to_cbor()?).await?;
+        seller_dht.set_value(&bid_rec, bid.to_cbor()?).await?;
         seller
             .bid_storage
             .store_bid_key(&listing_record.key, &bid_rec.key)

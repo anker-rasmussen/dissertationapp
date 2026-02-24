@@ -82,23 +82,6 @@ impl<D: DhtStore> ListingOperations<D> {
             None => Ok(None),
         }
     }
-
-    /// Delete a listing from the DHT
-    pub async fn delete_listing(&self, key: &RecordKey) -> MarketResult<()> {
-        self.dht.delete_record(key).await?;
-        info!("Deleted listing from DHT at key: {}", key);
-        Ok(())
-    }
-
-    /// Watch a listing for updates (e.g., bid count changes)
-    pub async fn watch_listing(&self, key: &RecordKey) -> MarketResult<bool> {
-        self.dht.watch_record(key).await
-    }
-
-    /// Cancel watching a listing
-    pub async fn cancel_watch_listing(&self, key: &RecordKey) -> MarketResult<bool> {
-        self.dht.cancel_watch(key).await
-    }
 }
 
 #[cfg(test)]
@@ -178,59 +161,6 @@ mod tests {
         // Verify the update
         let retrieved = ops.get_listing(&key).await.unwrap().unwrap();
         assert_eq!(retrieved.status, ListingStatus::Closed);
-    }
-
-    #[tokio::test]
-    async fn test_delete_listing() {
-        let dht = MockDht::new();
-        let ops = ListingOperations::new(dht.clone());
-        let time = MockTime::new(1000);
-        let listing = make_test_listing(&time);
-
-        let record = ops.publish_listing(&listing).await.unwrap();
-        let key = MockDht::record_key(&record);
-
-        assert!(dht.has_record(&key).await);
-
-        ops.delete_listing(&key).await.unwrap();
-
-        assert!(!dht.has_record(&key).await);
-    }
-
-    #[tokio::test]
-    async fn test_watch_listing() {
-        let dht = MockDht::new();
-        let ops = ListingOperations::new(dht.clone());
-        let time = MockTime::new(1000);
-        let listing = make_test_listing(&time);
-
-        let record = ops.publish_listing(&listing).await.unwrap();
-        let key = MockDht::record_key(&record);
-
-        // First watch should succeed
-        assert!(ops.watch_listing(&key).await.unwrap());
-
-        // Second watch should return false (already watching)
-        assert!(!ops.watch_listing(&key).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_cancel_watch_listing() {
-        let dht = MockDht::new();
-        let ops = ListingOperations::new(dht.clone());
-        let time = MockTime::new(1000);
-        let listing = make_test_listing(&time);
-
-        let record = ops.publish_listing(&listing).await.unwrap();
-        let key = MockDht::record_key(&record);
-
-        ops.watch_listing(&key).await.unwrap();
-
-        // Cancel should succeed
-        assert!(ops.cancel_watch_listing(&key).await.unwrap());
-
-        // Cancel again should return false
-        assert!(!ops.cancel_watch_listing(&key).await.unwrap());
     }
 
     #[tokio::test]
