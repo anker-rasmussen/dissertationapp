@@ -10,31 +10,24 @@ use tracing::{debug, info, warn};
 use veilid_core::{PublicKey, RecordKey};
 
 use crate::config::subkeys;
-use crate::error::{MarketError, MarketResult};
+use crate::error::MarketResult;
 use crate::marketplace::{BidIndex, PublicListing};
-use crate::traits::{
-    DhtStore, MessageTransport, MpcResult, MpcRunner, TimeProvider, TransportTarget,
-};
-use crate::veilid::bid_announcement::{
-    AuctionMessage, BidAnnouncementRegistry, BidAnnouncementTracker,
-};
+use crate::traits::{DhtStore, TimeProvider};
+use crate::veilid::bid_announcement::{BidAnnouncementRegistry, BidAnnouncementTracker};
 use crate::veilid::bid_ops::BidOperations;
 use crate::veilid::bid_storage::BidStorage;
 
 /// Testable auction coordination logic.
 ///
 /// This struct contains the business logic for auction coordination,
-/// abstracted over the DHT, transport, MPC, and time dependencies.
-pub struct AuctionLogic<D, T, M, C>
+/// abstracted over the DHT and time dependencies. Transport and MPC
+/// execution are handled by the `AuctionCoordinator` layer.
+pub struct AuctionLogic<D, C>
 where
     D: DhtStore,
-    T: MessageTransport,
-    M: MpcRunner,
     C: TimeProvider,
 {
     dht: D,
-    transport: T,
-    mpc: M,
     time: C,
     my_node_id: PublicKey,
     bid_storage: BidStorage,
@@ -46,26 +39,15 @@ where
     decryption_keys: Arc<Mutex<HashMap<RecordKey, String>>>,
 }
 
-impl<D, T, M, C> AuctionLogic<D, T, M, C>
+impl<D, C> AuctionLogic<D, C>
 where
     D: DhtStore,
-    T: MessageTransport,
-    M: MpcRunner,
     C: TimeProvider,
 {
     /// Create a new auction logic instance.
-    pub fn new(
-        dht: D,
-        transport: T,
-        mpc: M,
-        time: C,
-        my_node_id: PublicKey,
-        bid_storage: BidStorage,
-    ) -> Self {
+    pub fn new(dht: D, time: C, my_node_id: PublicKey, bid_storage: BidStorage) -> Self {
         Self {
             dht,
-            transport,
-            mpc,
             time,
             my_node_id,
             bid_storage,
@@ -147,25 +129,6 @@ where
         keys.get(listing_key).cloned()
     }
 
-    /// Broadcast a bid announcement to all peers.
-    pub async fn broadcast_bid_announcement(
-        &self,
-        listing_key: &RecordKey,
-        bid_record_key: &RecordKey,
-    ) -> MarketResult<usize> {
-        let announcement = AuctionMessage::BidAnnouncement {
-            listing_key: listing_key.clone(),
-            bidder: self.my_node_id.clone(),
-            bid_record_key: bid_record_key.clone(),
-            timestamp: self.time.now_unix(),
-        };
-
-        let data = announcement.to_bytes()?;
-        let count = self.transport.broadcast(data).await?;
-        info!("Broadcast bid announcement to {} peers", count);
-        Ok(count)
-    }
-
     /// Discover bids from DHT registry.
     pub async fn discover_bids(&self, listing_key: &RecordKey) -> MarketResult<BidIndex> {
         info!("Discovering bids from DHT bid registry");
@@ -236,37 +199,6 @@ where
         self.bid_storage.get_bid(listing_key).await
     }
 
-    /// Execute MPC auction.
-    ///
-    /// Returns the MPC result indicating whether we won.
-    pub async fn execute_mpc(
-        &self,
-        party_id: usize,
-        num_parties: usize,
-        bid_value: u64,
-    ) -> MarketResult<MpcResult> {
-        // Write input
-        self.mpc.write_input(party_id, bid_value).await?;
-
-        // Write hosts file
-        let hosts_name = format!("HOSTS-{party_id}");
-        self.mpc.write_hosts(&hosts_name, num_parties).await?;
-
-        // Compile program
-        self.mpc.compile("auction_n", num_parties).await?;
-
-        // Execute
-        let result = self.mpc.execute(party_id, num_parties, bid_value).await?;
-
-        info!(
-            "MPC result: party {} {} the auction",
-            party_id,
-            if result.is_winner { "won" } else { "lost" }
-        );
-
-        Ok(result)
-    }
-
     /// Process a bid announcement message.
     pub async fn process_bid_announcement(
         &self,
@@ -300,67 +232,21 @@ where
         }
         Ok(())
     }
-
-    /// Send a winner decryption request.
-    pub async fn send_decryption_request(&self, listing_key: &RecordKey) -> MarketResult<usize> {
-        let message = AuctionMessage::WinnerDecryptionRequest {
-            listing_key: listing_key.clone(),
-            winner: self.my_node_id.clone(),
-            timestamp: self.time.now_unix(),
-        };
-
-        let data = message.to_bytes()?;
-        let count = self.transport.broadcast(data).await?;
-        info!("Sent decryption request to {} peers", count);
-        Ok(count)
-    }
-
-    /// Send decryption hash to winner.
-    pub async fn send_decryption_hash(
-        &self,
-        listing_key: &RecordKey,
-        winner: &PublicKey,
-        decryption_hash: &str,
-    ) -> MarketResult<usize> {
-        let message = AuctionMessage::DecryptionHashTransfer {
-            listing_key: listing_key.clone(),
-            winner: winner.clone(),
-            decryption_hash: decryption_hash.to_string(),
-            timestamp: self.time.now_unix(),
-        };
-
-        let data = message.to_bytes()?;
-
-        // Send to winner's node directly
-        self.transport
-            .send(TransportTarget::Node(winner.clone()), data)
-            .await
-            .map_err(|e| {
-                MarketError::Network(format!("Failed to send decryption hash to winner: {e}"))
-            })?;
-
-        info!("Sent decryption hash directly to winner");
-        Ok(1)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::marketplace::{BidRecord, Listing};
-    use crate::mocks::{
-        make_test_public_key, make_test_record_key, MockDht, MockMpcRunner, MockTime, MockTransport,
-    };
+    use crate::mocks::{make_test_public_key, make_test_record_key, MockDht, MockTime};
 
-    fn create_test_logic() -> AuctionLogic<MockDht, MockTransport, MockMpcRunner, MockTime> {
+    fn create_test_logic() -> AuctionLogic<MockDht, MockTime> {
         let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
         let time = MockTime::new(1000);
         let my_node_id = make_test_public_key(1);
         let bid_storage = BidStorage::new();
 
-        AuctionLogic::new(dht, transport, mpc, time, my_node_id, bid_storage)
+        AuctionLogic::new(dht, time, my_node_id, bid_storage)
     }
 
     fn make_test_listing(time: &MockTime) -> Listing {
@@ -543,78 +429,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_mpc() {
-        let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
-        let time = MockTime::new(1000);
-        let my_node_id = make_test_public_key(1);
-        let bid_storage = BidStorage::new();
-
-        // Set party 0 as winner
-        mpc.set_winner(0).await;
-
-        let logic = AuctionLogic::new(dht, transport, mpc.clone(), time, my_node_id, bid_storage);
-
-        let result = logic.execute_mpc(0, 3, 100).await.unwrap();
-
-        assert!(result.is_winner);
-        assert_eq!(result.party_id, 0);
-        assert_eq!(result.num_parties, 3);
-
-        // Verify MPC runner was called correctly
-        assert!(mpc.was_compiled("auction_n").await);
-        let inputs = mpc.get_inputs().await;
-        assert_eq!(inputs.get(&0), Some(&100));
-    }
-
-    #[tokio::test]
-    async fn test_execute_mpc_loser() {
-        let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
-        let time = MockTime::new(1000);
-        let my_node_id = make_test_public_key(1);
-        let bid_storage = BidStorage::new();
-
-        // Set party 2 as winner (not us)
-        mpc.set_winner(2).await;
-
-        let logic = AuctionLogic::new(dht, transport, mpc, time, my_node_id, bid_storage);
-
-        let result = logic.execute_mpc(0, 3, 100).await.unwrap();
-
-        assert!(!result.is_winner);
-    }
-
-    #[tokio::test]
-    async fn test_broadcast_bid_announcement() {
-        let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
-        let time = MockTime::new(1000);
-        let my_node_id = make_test_public_key(1);
-        let bid_storage = BidStorage::new();
-
-        // Add peers
-        transport.add_peer(make_test_public_key(2)).await;
-        transport.add_peer(make_test_public_key(3)).await;
-
-        let logic = AuctionLogic::new(dht, transport.clone(), mpc, time, my_node_id, bid_storage);
-
-        let listing_key = make_test_record_key(1);
-        let bid_key = make_test_record_key(10);
-
-        let count = logic
-            .broadcast_bid_announcement(&listing_key, &bid_key)
-            .await
-            .unwrap();
-
-        assert_eq!(count, 2);
-        assert_eq!(transport.message_count().await, 2);
-    }
-
-    #[tokio::test]
     async fn test_unwatch_listing() {
         let logic = create_test_logic();
         let time = MockTime::new(1000);
@@ -661,13 +475,11 @@ mod tests {
     #[tokio::test]
     async fn test_expired_listing_detection() {
         let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
         let time = MockTime::new(1000);
         let my_node_id = make_test_public_key(1);
         let bid_storage = BidStorage::new();
 
-        let logic = AuctionLogic::new(dht, transport, mpc, time.clone(), my_node_id, bid_storage);
+        let logic = AuctionLogic::new(dht, time.clone(), my_node_id, bid_storage);
 
         // Create a listing that ends at time 4600 (1000 + 3600)
         let listing = make_test_listing(&time);
@@ -688,68 +500,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_decryption_request() {
-        let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
-        let time = MockTime::new(1000);
-        let my_node_id = make_test_public_key(1);
-        let bid_storage = BidStorage::new();
-
-        // Add peers
-        transport.add_peer(make_test_public_key(2)).await;
-        transport.add_peer(make_test_public_key(3)).await;
-
-        let logic = AuctionLogic::new(dht, transport.clone(), mpc, time, my_node_id, bid_storage);
-
-        let listing_key = make_test_record_key(1);
-        let count = logic.send_decryption_request(&listing_key).await.unwrap();
-
-        assert_eq!(count, 2);
-
-        // Verify messages were sent
-        let messages = transport.get_sent_messages().await;
-        assert_eq!(messages.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_send_decryption_hash() {
-        let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
-        let time = MockTime::new(1000);
-        let my_node_id = make_test_public_key(1);
-        let bid_storage = BidStorage::new();
-
-        // Add winner as peer
-        transport.add_peer(make_test_public_key(5)).await;
-
-        let logic = AuctionLogic::new(dht, transport.clone(), mpc, time, my_node_id, bid_storage);
-
-        let listing_key = make_test_record_key(1);
-        let winner = make_test_public_key(5);
-        let count = logic
-            .send_decryption_hash(&listing_key, &winner, "secret_key_123")
-            .await
-            .unwrap();
-
-        assert_eq!(count, 1);
-
-        // Verify message content
-        let messages = transport.get_messages_to_nodes().await;
-        assert_eq!(messages.len(), 1);
-    }
-
-    #[tokio::test]
     async fn test_discover_bids_from_local_announcements() {
         let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
         let time = MockTime::new(1000);
         let my_node_id = make_test_public_key(1);
         let bid_storage = BidStorage::new();
 
-        let logic = AuctionLogic::new(dht.clone(), transport, mpc, time, my_node_id, bid_storage);
+        let logic = AuctionLogic::new(dht, time, my_node_id, bid_storage);
 
         let listing_key = make_test_record_key(1);
 
@@ -776,24 +533,6 @@ mod tests {
         // The bids won't be in the index because the bid records aren't in the DHT
         // but the function should not fail
         assert!(bid_index.bids.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_mpc_failure_handling() {
-        let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
-        let time = MockTime::new(1000);
-        let my_node_id = make_test_public_key(1);
-        let bid_storage = BidStorage::new();
-
-        // Set MPC to fail
-        mpc.set_fail_mode(true).await;
-
-        let logic = AuctionLogic::new(dht, transport, mpc, time, my_node_id, bid_storage);
-
-        let result = logic.execute_mpc(0, 3, 100).await;
-        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -830,13 +569,11 @@ mod tests {
     #[tokio::test]
     async fn test_watch_listing_already_expired() {
         let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
         let time = MockTime::new(10000); // Current time far past any deadline
         let my_node_id = make_test_public_key(1);
         let bid_storage = BidStorage::new();
 
-        let logic = AuctionLogic::new(dht, transport, mpc, time.clone(), my_node_id, bid_storage);
+        let logic = AuctionLogic::new(dht, time.clone(), my_node_id, bid_storage);
 
         // Create a listing that was created at time=100 with 1s duration (expired at 101)
         let early_time = MockTime::new(100);
@@ -860,13 +597,11 @@ mod tests {
     #[tokio::test]
     async fn test_get_expired_listings_none_expired() {
         let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
         let time = MockTime::new(1000);
         let my_node_id = make_test_public_key(1);
         let bid_storage = BidStorage::new();
 
-        let logic = AuctionLogic::new(dht, transport, mpc, time.clone(), my_node_id, bid_storage);
+        let logic = AuctionLogic::new(dht, time.clone(), my_node_id, bid_storage);
 
         // Add two listings, both with long durations
         let listing1 = Listing::builder_with_time(time.clone())
@@ -898,13 +633,11 @@ mod tests {
     #[tokio::test]
     async fn test_get_expired_listings_mixed() {
         let dht = MockDht::new();
-        let transport = MockTransport::new();
-        let mpc = MockMpcRunner::new();
         let time = MockTime::new(1000);
         let my_node_id = make_test_public_key(1);
         let bid_storage = BidStorage::new();
 
-        let logic = AuctionLogic::new(dht, transport, mpc, time.clone(), my_node_id, bid_storage);
+        let logic = AuctionLogic::new(dht, time.clone(), my_node_id, bid_storage);
 
         // Short auction: expires at 1000 + 60 = 1060
         let short = Listing::builder_with_time(time.clone())
