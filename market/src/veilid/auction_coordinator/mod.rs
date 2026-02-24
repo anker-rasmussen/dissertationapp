@@ -5,7 +5,6 @@
 //! [`AuctionLogic`] with real implementations and delegates pure auction logic
 //! to that layer.
 
-use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,9 +24,7 @@ use super::registry_types::RegistryEntry;
 use crate::config::{now_unix, subkeys};
 use crate::error::{MarketError, MarketResult};
 use crate::marketplace::PublicListing;
-use crate::traits::{
-    DhtStore, MessageTransport, MpcResult, MpcRunner, SystemTimeProvider, TransportTarget,
-};
+use crate::traits::{DhtStore, SystemTimeProvider};
 
 mod broadcast;
 mod handlers;
@@ -54,71 +51,8 @@ const MPC_SIGNAL_BUFFER_CAP: usize = 50;
 /// Buffered signals older than this (seconds) are discarded on replay.
 const MPC_SIGNAL_BUFFER_TTL: u64 = 60;
 
-// ---------------------------------------------------------------------------
-// Stub transport and MPC runner for the embedded AuctionLogic.
-//
-// AuctionCoordinator delegates **state management** (watched_listings,
-// bid_announcements, decryption_keys) to AuctionLogic so that the same code
-// tested with mocks runs in production.  Transport and MPC execution stay in
-// AuctionCoordinator (via VeilidAPI / MpcOrchestrator), so these stubs exist
-// solely to satisfy the generic type parameters.
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-pub(super) struct CoordinatorTransport;
-
-#[async_trait]
-impl MessageTransport for CoordinatorTransport {
-    async fn send(&self, _: TransportTarget, _: Vec<u8>) -> MarketResult<()> {
-        Err(MarketError::InvalidState(
-            "Use AuctionCoordinator broadcast methods".into(),
-        ))
-    }
-    async fn create_private_route(&self) -> MarketResult<(RouteId, RouteBlob)> {
-        Err(MarketError::InvalidState(
-            "Use MpcOrchestrator for routes".into(),
-        ))
-    }
-    fn import_remote_route(&self, _: RouteBlob) -> MarketResult<RouteId> {
-        Err(MarketError::InvalidState(
-            "Use MpcOrchestrator for routes".into(),
-        ))
-    }
-    async fn get_peers(&self) -> MarketResult<Vec<PublicKey>> {
-        Ok(Vec::new())
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct CoordinatorMpcRunner;
-
-#[async_trait]
-impl MpcRunner for CoordinatorMpcRunner {
-    async fn compile(&self, _: &str, _: usize) -> MarketResult<()> {
-        Err(MarketError::InvalidState(
-            "Use MpcOrchestrator for MPC".into(),
-        ))
-    }
-    async fn execute(&self, _: usize, _: usize, _: u64) -> MarketResult<MpcResult> {
-        Err(MarketError::InvalidState(
-            "Use MpcOrchestrator for MPC".into(),
-        ))
-    }
-    async fn write_input(&self, _: usize, _: u64) -> MarketResult<()> {
-        Err(MarketError::InvalidState(
-            "Use MpcOrchestrator for MPC".into(),
-        ))
-    }
-    async fn write_hosts(&self, _: &str, _: usize) -> MarketResult<()> {
-        Err(MarketError::InvalidState(
-            "Use MpcOrchestrator for MPC".into(),
-        ))
-    }
-}
-
 /// Type alias for the embedded AuctionLogic with production implementations.
-type CoordinatorLogic =
-    AuctionLogic<DHTOperations, CoordinatorTransport, CoordinatorMpcRunner, SystemTimeProvider>;
+type CoordinatorLogic = AuctionLogic<DHTOperations, SystemTimeProvider>;
 
 /// Coordinates auction execution: monitors deadlines, triggers MPC.
 ///
@@ -163,6 +97,14 @@ pub struct AuctionCoordinator {
     pub(super) broadcast_route_id: Mutex<Option<RouteId>>,
     /// MPC signals received before the listing was watched (no route manager yet).
     pub(super) buffered_mpc_signals: Mutex<HashMap<RecordKey, Vec<BufferedMpcSignal>>>,
+    /// Serialises writes to BID_ANNOUNCEMENTS for any listing we own.
+    ///
+    /// `read_modify_write_subkey` is atomic per-call, but two concurrent
+    /// calls for the **same** record can both read the same initial state
+    /// and one write overwrites the other (lost update).  This lock ensures
+    /// only one `handle_bid_announcement` / `add_own_bid_to_registry` write
+    /// is in-flight at a time.
+    pub(super) bid_registry_lock: Mutex<()>,
     /// Token used to signal graceful shutdown of background tasks.
     pub(super) shutdown: CancellationToken,
     /// Handle for the background monitoring task.
@@ -206,8 +148,6 @@ impl AuctionCoordinator {
 
         let logic = AuctionLogic::new(
             dht.clone(),
-            CoordinatorTransport,
-            CoordinatorMpcRunner,
             SystemTimeProvider,
             my_node_id.clone(),
             bid_storage,
@@ -224,6 +164,7 @@ impl AuctionCoordinator {
             mpc,
             pending_seller_registrations: Arc::new(Mutex::new(Vec::new())),
             pending_bid_announcements: Mutex::new(Vec::new()),
+            bid_registry_lock: Mutex::new(()),
             my_route_blob: Mutex::new(None),
             broadcast_route_id: Mutex::new(None),
             buffered_mpc_signals: Mutex::new(HashMap::new()),
@@ -477,6 +418,7 @@ impl AuctionCoordinator {
 
         if let Some(record) = record {
             info!("We own this listing and bid on it, adding our bid to DHT registry");
+            let _guard = self.bid_registry_lock.lock().await;
 
             let lk = listing_key.clone();
             self.dht

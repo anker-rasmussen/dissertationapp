@@ -562,7 +562,7 @@ mod tests {
     }
 
     fn test_route_blob() -> RouteBlob {
-        // Create a test RouteBlob similar to MockTransport::make_route_id
+        // Create a test RouteBlob
         let counter: u64 = 99;
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&counter.to_le_bytes());

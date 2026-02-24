@@ -45,10 +45,6 @@ pub mod mocks;
 pub use crypto::{decrypt_content, encrypt_content, generate_key, ContentKey, ContentNonce};
 pub use marketplace::{Bid, BidIndex, BidRecord, Listing, ListingStatus, PublicListing};
 pub use traits::{DhtStore, TimeProvider};
-// MessageTransport, MpcRunner, and RandomSource are only needed by
-// AuctionLogic (test simulator) and mock infrastructure.
-#[cfg(any(test, feature = "test"))]
-pub use traits::{MessageTransport, MpcRunner, RandomSource};
 pub use veilid::auction_coordinator::AuctionCoordinator;
 pub use veilid::bid_ops::BidOperations;
 pub use veilid::bid_storage::BidStorage;

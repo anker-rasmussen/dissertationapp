@@ -7,13 +7,11 @@ pub mod dht;
 pub mod process;
 pub mod random;
 pub mod time;
-pub mod transport;
 
 pub use dht::{
     make_test_public_key, make_test_record_key, MockDht, MockDhtFailure, SharedDhtHandle,
     SharedMockDht,
 };
-pub use process::{MockMpcRunner, SharedBidRegistry};
+pub use process::SharedBidRegistry;
 pub use random::MockRandom;
 pub use time::MockTime;
-pub use transport::MockTransport;
