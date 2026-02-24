@@ -1,3 +1,11 @@
+//! P2P sealed-bid auction marketplace over Veilid with MASCOT MPC.
+//!
+//! Provides a two-tier coordination architecture: [`veilid::AuctionLogic`] for
+//! testable auction state machines, and [`veilid::AuctionCoordinator`] for the
+//! real Veilid network integration. Bids are committed via SHA256, resolved by
+//! multi-party computation (MP-SPDZ MASCOT protocol), and listing content is
+//! encrypted with AES-256-GCM until the winner is verified.
+
 #![recursion_limit = "256"]
 // ── Clippy lint configuration (strict, like Airbnb for Rust) ──
 #![warn(clippy::pedantic)]
@@ -19,10 +27,12 @@
 #![allow(clippy::redundant_pub_crate)]
 #![allow(clippy::option_if_let_else)]
 
+pub mod actions;
 pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod marketplace;
+pub mod shared_state;
 pub mod traits;
 pub mod util;
 pub mod veilid;
