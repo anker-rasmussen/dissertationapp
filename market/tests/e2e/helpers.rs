@@ -583,10 +583,14 @@ pub fn check_mp_spdz_available() -> bool {
 
 /// Setup helper — starts devnet and validates LD_PRELOAD/libipspoof prerequisites.
 pub fn setup_e2e_environment() -> MarketResult<DevnetManager> {
-    // Kill any orphaned MP-SPDZ processes from previous runs.
-    // When a test process is killed (e.g. timeout, Ctrl-C), the child
-    // MP-SPDZ process becomes an orphan and holds TCP ports
-    // indefinitely, causing "address already in use" on the next run.
+    // Kill any orphaned processes from previous runs.
+    // When a test process is killed (e.g. timeout, Ctrl-C), child
+    // processes become orphans and hold TCP/UDP ports indefinitely,
+    // causing "address already in use" on the next run.
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg("market-headless")
+        .status();
     let _ = std::process::Command::new("pkill")
         .arg("-f")
         .arg("mascot-party.x")
@@ -982,5 +986,13 @@ impl HeadlessParticipant {
         let _ = self.child.kill().await;
 
         Ok(())
+    }
+}
+
+impl Drop for HeadlessParticipant {
+    fn drop(&mut self) {
+        // start_kill() is synchronous — sends SIGKILL without awaiting exit.
+        // Prevents orphaned market-headless processes when a test panics.
+        let _ = self.child.start_kill();
     }
 }

@@ -42,6 +42,7 @@ impl AuctionCoordinator {
         };
         if let Some(record) = record {
             info!("We own this listing, updating DHT bid registry");
+            let _guard = self.bid_registry_lock.lock().await;
 
             self.dht
                 .read_modify_write_subkey(&record, subkeys::BID_ANNOUNCEMENTS, |existing| {
