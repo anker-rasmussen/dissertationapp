@@ -6,7 +6,7 @@ This guide explains how to run 3 market app instances simultaneously for your di
 
 ### Prerequisites
 
-1. **Devnet must be running** (9 nodes: bootstrap + nodes 1-8):
+1. **Devnet must be running** (20 nodes: 1 bootstrap + 19 regular):
    ```bash
    cd /home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/compose
    docker compose -f docker-compose.dev.yml up -d
@@ -14,38 +14,38 @@ This guide explains how to run 3 market app instances simultaneously for your di
    docker compose -f docker-compose.dev.yml ps
    ```
 
-2. **Verify devnet is healthy** - all 9 nodes should show "healthy" status
+2. **Verify devnet is healthy** - all 20 nodes should show "healthy" status
 
 ### Running 3 Market Instances
 
 Open **3 separate terminals** and run one instance in each:
 
-#### Terminal 1 - Bidder 1 (Node 9)
+#### Terminal 1 - Bidder 1 (Node 20)
 ```bash
 cd /home/broadcom/Repos/Dissertation/Repos/dissertationapp/market
-./run-demo-instance.sh 9
+./run-demo-instance.sh 20
 ```
-- Port: 5169
-- IP: 1.2.3.10
-- Data: ~/.local/share/smpc-auction-node-9
+- Port: 5180
+- IP: 1.2.3.21
+- Data: ~/.local/share/smpc-auction-node-20
 
-#### Terminal 2 - Bidder 2 (Node 10)
+#### Terminal 2 - Bidder 2 (Node 21)
 ```bash
 cd /home/broadcom/Repos/Dissertation/Repos/dissertationapp/market
-./run-demo-instance.sh 10
+./run-demo-instance.sh 21
 ```
-- Port: 5170
-- IP: 1.2.3.11
-- Data: ~/.local/share/smpc-auction-node-10
+- Port: 5181
+- IP: 1.2.3.22
+- Data: ~/.local/share/smpc-auction-node-21
 
-#### Terminal 3 - Auctioneer (Node 11)
+#### Terminal 3 - Auctioneer (Node 22)
 ```bash
 cd /home/broadcom/Repos/Dissertation/Repos/dissertationapp/market
-./run-demo-instance.sh 11
+./run-demo-instance.sh 22
 ```
-- Port: 5171
-- IP: 1.2.3.12
-- Data: ~/.local/share/smpc-auction-node-11
+- Port: 5182
+- IP: 1.2.3.23
+- Data: ~/.local/share/smpc-auction-node-22
 
 ### Cluster Mode (Recommended)
 
@@ -62,13 +62,13 @@ If you prefer to run manually with more control:
 
 ```bash
 # Instance 1
-MARKET_NODE_OFFSET=9 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
+MARKET_NODE_OFFSET=20 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
 
 # Instance 2
-MARKET_NODE_OFFSET=10 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
+MARKET_NODE_OFFSET=21 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
 
 # Instance 3
-MARKET_NODE_OFFSET=11 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
+MARKET_NODE_OFFSET=22 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
 ```
 
 ### Verification
@@ -96,22 +96,18 @@ This will:
 ### Network Topology
 
 ```
-Devnet Nodes (Docker):
-├── Bootstrap: 1.2.3.1:5160 (port 5160)
-├── Node 1:    1.2.3.2:5161 (port 5161)
-├── Node 2:    1.2.3.3:5162 (port 5162)
-├── Node 3:    1.2.3.4:5163 (port 5163)
-├── Node 4:    1.2.3.5:5164 (port 5164)
-├── Node 5:    1.2.3.6:5165 (port 5165)
-├── Node 6:    1.2.3.7:5166 (port 5166)
-├── Node 7:    1.2.3.8:5167 (port 5167)
-└── Node 8:    1.2.3.9:5168 (port 5168)
+Devnet Nodes (Docker, offsets 0-19):
+├── Bootstrap: 1.2.3.1:5160 (offset 0)
+├── Node 1:    1.2.3.2:5161 (offset 1)
+├── ...
+├── Node 18:   1.2.3.19:5178 (offset 18)
+└── Node 19:   1.2.3.20:5179 (offset 19)
 
-Market Instances (Local):
-├── Party 0:     1.2.3.10:5169 (port 5169)
-├── Party 1:     1.2.3.11:5170 (port 5170)
-├── Party 2:     1.2.3.12:5171 (port 5171)
-└── Party n:     1.2.3.(n+1):(5160+n) (port 5160+n) - note. cap of 35 nodes (LD_PRELOAD only translates 40 IPs.)
+Market Instances (Local, offsets 20+):
+├── Party 0:   1.2.3.21:5180 (offset 20)
+├── Party 1:   1.2.3.22:5181 (offset 21)
+├── Party 2:   1.2.3.23:5182 (offset 22)
+└── Party n:   1.2.3.(n+1):(5160+n) — max ~20 market nodes (LD_PRELOAD translates 40 IPs, devnet uses 20)
 ```
 
 All nodes use the same network key: `development-network-2025`
@@ -151,7 +147,7 @@ docker compose -f docker-compose.dev.yml down
 
 - **LD_PRELOAD**: Translates fake global IPs (1.2.3.x) to localhost (127.0.0.1)
 - **Port-based routing**: Each node identified by its port number
-- **Capabilities**: All nodes have TUNL, SGNL, DIAL disabled (devnet mode)
+- **Capabilities**: Market nodes disable SGNL and DIAL; RELAY and TUNNEL left enabled for route construction
 - **Bootstrap**: All nodes connect to 1.2.3.1:5160 for initial peer discovery
 - **Protocol**: Uses UDP for BOOT protocol (TCP requires VL framing)
-- **9-node devnet**: Provides sufficient relay diversity for private route allocation (required for broadcast messaging)
+- **20-node devnet**: Provides sufficient relay diversity for private route allocation (required for broadcast messaging and MPC routes)
