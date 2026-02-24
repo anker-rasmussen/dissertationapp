@@ -1625,9 +1625,16 @@ impl AuctionCoordinator {
                 }
                 tick_count = tick_count.wrapping_add(1);
 
+                // The MPC orchestrator sets this flag after MPC execution
+                // finishes (active_auctions.remove).  Routes go stale during
+                // MPC (keepalive is suppressed) and peers in a subsequent
+                // auction need fresh blobs immediately.
+                let mpc_just_finished = monitor_self.mpc.take_needs_route_refresh();
+
                 // Create broadcast route on first tick, then refresh every 12 ticks
                 // (~60s) to prevent relay nodes from dropping stale routes.
-                let should_refresh_route = !broadcast_route_ready || tick_count.is_multiple_of(12);
+                let should_refresh_route =
+                    !broadcast_route_ready || tick_count.is_multiple_of(12) || mpc_just_finished;
                 if should_refresh_route {
                     if monitor_self.mpc.has_active_auctions().await {
                         debug!(
@@ -1635,6 +1642,9 @@ impl AuctionCoordinator {
                             tick_count
                         );
                     } else {
+                        if mpc_just_finished {
+                            info!("MPC finished — forcing immediate broadcast route refresh");
+                        }
                         match monitor_self.create_and_register_broadcast_route().await {
                             Ok(()) => {
                                 if broadcast_route_ready {

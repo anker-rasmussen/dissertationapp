@@ -67,6 +67,10 @@ pub struct MpcOrchestrator {
     /// Flushed to the proxy once it's activated.
     #[allow(clippy::type_complexity)]
     pub(crate) pending_mpc_messages: Arc<Mutex<Vec<(Vec<u8>, [u8; 32])>>>,
+    /// Set after MPC completes so the monitoring loop can refresh broadcast
+    /// routes immediately.  Routes go stale during MPC (keepalive suppressed)
+    /// and peers in a subsequent auction need fresh blobs.
+    needs_route_refresh: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MpcOrchestrator {
@@ -91,6 +95,7 @@ impl MpcOrchestrator {
             expected_winner_listings: Arc::new(Mutex::new(HashSet::new())),
             active_auctions: Arc::new(Mutex::new(HashSet::new())),
             pending_mpc_messages: Arc::new(Mutex::new(Vec::new())),
+            needs_route_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -164,6 +169,13 @@ impl MpcOrchestrator {
     /// Returns true when at least one auction is actively running MPC flow.
     pub async fn has_active_auctions(&self) -> bool {
         !self.active_auctions.lock().await.is_empty()
+    }
+
+    /// Check and clear the "needs route refresh" flag.  Returns true once
+    /// after each MPC completion, then resets to false.
+    pub fn take_needs_route_refresh(&self) -> bool {
+        self.needs_route_refresh
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Pre-create a route manager for an auction so we can receive route announcements
@@ -271,6 +283,10 @@ impl MpcOrchestrator {
                 .await;
 
                 self.active_auctions.lock().await.remove(&active_key);
+                // Signal the monitoring loop to refresh broadcast routes
+                // immediately — they went stale during MPC execution.
+                self.needs_route_refresh
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 result?;
             }
             None => {
