@@ -1,4 +1,4 @@
-//! Bid types: plaintext [`Bid`], [`SealedBid`] (SHA256 commitment), and [`BidCollection`].
+//! Bid types: plaintext [`Bid`] with SHA256 commitment.
 //!
 //! Bids use a commit-reveal scheme: `commitment = SHA256(amount || 32-byte nonce)`.
 //! The nonce is stored locally and revealed after the auction ends for MPC input verification.
@@ -88,17 +88,6 @@ impl Bid {
         }
     }
 
-    /// Create a bid with only the commitment visible (for sending to others)
-    /// The amount is hidden until reveal
-    pub fn sealed(&self) -> SealedBid {
-        SealedBid {
-            listing_key: self.listing_key.clone(),
-            bidder: self.bidder.clone(),
-            timestamp: self.timestamp,
-            commitment: self.commitment,
-        }
-    }
-
     /// Verify that a revealed bid matches its commitment
     pub fn verify_commitment(&self) -> bool {
         use sha2::{Digest, Sha256};
@@ -123,75 +112,6 @@ impl Bid {
     }
 
     /// Deserialize a bid from CBOR bytes
-    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
-        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
-    }
-}
-
-/// A sealed bid with hidden amount (only commitment visible)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SealedBid {
-    /// The listing this bid is for
-    pub listing_key: RecordKey,
-
-    /// Public key of the bidder
-    pub bidder: PublicKey,
-
-    /// Unix timestamp when bid was submitted
-    pub timestamp: u64,
-
-    /// Hash commitment (amount hidden until reveal)
-    pub commitment: [u8; 32],
-}
-
-impl SealedBid {
-    /// Serialize to CBOR bytes
-    pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
-        let mut buffer = Vec::new();
-        ciborium::into_writer(self, &mut buffer)?;
-        Ok(buffer)
-    }
-
-    /// Deserialize from CBOR bytes
-    pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
-        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
-    }
-}
-
-/// Collection of bids for a listing (stored in DHT)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BidCollection {
-    /// The listing these bids are for
-    pub listing_key: RecordKey,
-
-    /// All sealed bids received
-    pub bids: Vec<SealedBid>,
-}
-
-impl BidCollection {
-    pub const fn new(listing_key: RecordKey) -> Self {
-        Self {
-            listing_key,
-            bids: Vec::new(),
-        }
-    }
-
-    pub fn add_bid(&mut self, bid: SealedBid) {
-        self.bids.push(bid);
-    }
-
-    pub const fn bid_count(&self) -> usize {
-        self.bids.len()
-    }
-
-    /// Serialize to CBOR bytes
-    pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
-        let mut buffer = Vec::new();
-        ciborium::into_writer(self, &mut buffer)?;
-        Ok(buffer)
-    }
-
-    /// Deserialize from CBOR bytes
     pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
         crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
@@ -273,22 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bid_sealed_hides_amount() {
-        let rng = MockRandom::new(42);
-        let time = MockTime::new(1000);
-
-        let bid = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
-
-        let sealed = bid.sealed();
-
-        assert_eq!(sealed.listing_key, bid.listing_key);
-        assert_eq!(sealed.bidder, bid.bidder);
-        assert_eq!(sealed.timestamp, bid.timestamp);
-        assert_eq!(sealed.commitment, bid.commitment);
-        // SealedBid has no amount or nonce field - that's the point!
-    }
-
-    #[test]
     fn test_bid_deterministic_with_same_random() {
         let rng1 = MockRandom::new(42);
         let rng2 = MockRandom::new(42);
@@ -333,71 +237,6 @@ mod tests {
         assert_eq!(original.timestamp, restored.timestamp);
         assert_eq!(original.commitment, restored.commitment);
         assert_eq!(original.reveal_nonce, restored.reveal_nonce);
-    }
-
-    #[test]
-    fn test_sealed_bid_serialization_roundtrip() {
-        let rng = MockRandom::new(42);
-        let time = MockTime::new(1000);
-
-        let bid = Bid::new_with_providers(make_test_key(), make_test_pubkey(), 100, &rng, &time);
-        let original = bid.sealed();
-
-        let cbor = original.to_cbor().unwrap();
-        let restored = SealedBid::from_cbor(&cbor).unwrap();
-
-        assert_eq!(original.listing_key, restored.listing_key);
-        assert_eq!(original.bidder, restored.bidder);
-        assert_eq!(original.timestamp, restored.timestamp);
-        assert_eq!(original.commitment, restored.commitment);
-    }
-
-    #[test]
-    fn test_bid_collection() {
-        let rng = MockRandom::new(42);
-        let time = MockTime::new(1000);
-        let listing_key = make_test_key();
-
-        let mut collection = BidCollection::new(listing_key.clone());
-        assert_eq!(collection.bid_count(), 0);
-
-        let bid1 = Bid::new_with_providers(
-            listing_key.clone(),
-            make_test_public_key(1),
-            100,
-            &rng,
-            &time,
-        );
-        collection.add_bid(bid1.sealed());
-        assert_eq!(collection.bid_count(), 1);
-
-        let bid2 = Bid::new_with_providers(
-            listing_key.clone(),
-            make_test_public_key(2),
-            200,
-            &rng,
-            &time,
-        );
-        collection.add_bid(bid2.sealed());
-        assert_eq!(collection.bid_count(), 2);
-    }
-
-    #[test]
-    fn test_bid_collection_serialization() {
-        let rng = MockRandom::new(42);
-        let time = MockTime::new(1000);
-        let listing_key = make_test_key();
-
-        let mut original = BidCollection::new(listing_key.clone());
-        let bid =
-            Bid::new_with_providers(listing_key.clone(), make_test_pubkey(), 100, &rng, &time);
-        original.add_bid(bid.sealed());
-
-        let cbor = original.to_cbor().unwrap();
-        let restored = BidCollection::from_cbor(&cbor).unwrap();
-
-        assert_eq!(original.listing_key, restored.listing_key);
-        assert_eq!(original.bid_count(), restored.bid_count());
     }
 
     #[test]

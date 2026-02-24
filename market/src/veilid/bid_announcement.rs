@@ -98,19 +98,12 @@ pub(crate) const fn validate_timestamp(message_timestamp: u64, current_time: u64
 pub struct BidAnnouncementRegistry {
     /// List of (bidder_pubkey, bid_record_key, timestamp) tuples
     pub announcements: Vec<(PublicKey, RecordKey, u64)>,
-    /// Authoritative bid count set by the seller when finalizing the auction.
-    /// Parties must agree on this count before entering MPC execution.
-    /// `None` during the auction (still accepting bids); `Some(n)` after
-    /// the seller has finalized.
-    #[serde(default)]
-    pub total_expected: Option<u32>,
 }
 
 impl BidAnnouncementRegistry {
     pub const fn new() -> Self {
         Self {
             announcements: Vec::new(),
-            total_expected: None,
         }
     }
 
@@ -143,9 +136,6 @@ impl BidAnnouncementRegistry {
     pub fn merge(&mut self, other: &Self) {
         for (bidder, bid_key, ts) in &other.announcements {
             self.add(bidder.clone(), bid_key.clone(), *ts);
-        }
-        if self.total_expected.is_none() {
-            self.total_expected = other.total_expected;
         }
     }
 }
@@ -864,23 +854,6 @@ mod tests {
         let before = a.announcements.len();
         a.merge(&a.clone());
         assert_eq!(a.announcements.len(), before);
-    }
-
-    #[test]
-    fn test_bid_announcement_merge_total_expected() {
-        let mut a = BidAnnouncementRegistry::new();
-        let mut b = BidAnnouncementRegistry::new();
-        b.total_expected = Some(3);
-
-        // a has no total_expected, merge from b should pick it up
-        a.merge(&b);
-        assert_eq!(a.total_expected, Some(3));
-
-        // If a already has total_expected, merge should not overwrite
-        let mut c = BidAnnouncementRegistry::new();
-        c.total_expected = Some(5);
-        a.merge(&c);
-        assert_eq!(a.total_expected, Some(3)); // Unchanged
     }
 
     #[test]

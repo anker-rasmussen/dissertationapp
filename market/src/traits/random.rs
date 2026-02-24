@@ -16,13 +16,6 @@ pub trait RandomSource: Send + Sync {
         self.fill_bytes(&mut bytes);
         bytes
     }
-
-    /// Generate a random 12-byte array (useful for GCM nonces).
-    fn random_bytes_12(&self) -> [u8; 12] {
-        let mut bytes = [0u8; 12];
-        self.fill_bytes(&mut bytes);
-        bytes
-    }
 }
 
 /// Production implementation using the thread-local RNG.
@@ -68,14 +61,5 @@ mod tests {
 
         // Extremely unlikely to be equal
         assert_ne!(a, b, "Two random values should differ");
-    }
-
-    #[test]
-    fn test_random_bytes_12() {
-        let rng = ThreadRng::new();
-        let bytes = rng.random_bytes_12();
-
-        assert_eq!(bytes.len(), 12);
-        assert!(bytes.iter().any(|&b| b != 0), "Should have non-zero bytes");
     }
 }
