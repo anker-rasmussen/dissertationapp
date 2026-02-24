@@ -53,16 +53,11 @@ fn validate_runtime_security() -> MarketResult<()> {
     Ok(())
 }
 
-/// Preflight check: ensure MP-SPDZ is ready before starting the node.
-///
-/// Verifies that the MP-SPDZ directory, binary, and compiler exist.
-/// If anything is missing, attempts to run `setup-mpspdz.sh` automatically.
+/// Preflight check: ensure MP-SPDZ directory, binary, and compiler exist.
 fn ensure_mpspdz_ready() -> MarketResult<()> {
     let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
         .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
     let dir = Path::new(&mp_spdz_dir);
-
-    info!("MP-SPDZ preflight: checking {}", mp_spdz_dir);
 
     let checks = [
         (dir.to_path_buf(), "MP-SPDZ directory"),
@@ -73,72 +68,25 @@ fn ensure_mpspdz_ready() -> MarketResult<()> {
         (dir.join("compile.py"), "compile.py"),
     ];
 
-    let all_ok = checks.iter().all(|(path, label)| {
-        let exists = path.exists();
-        if exists {
-            info!("  [OK] {}", label);
+    let mut missing = Vec::new();
+    for (path, label) in &checks {
+        if path.exists() {
+            info!("MP-SPDZ preflight: [OK] {label}");
         } else {
-            warn!("  [MISSING] {} ({})", label, path.display());
+            missing.push(format!("{label} ({})", path.display()));
         }
-        exists
-    });
+    }
 
-    if all_ok {
-        info!("MP-SPDZ preflight: all checks passed");
+    if missing.is_empty() {
         return Ok(());
     }
 
-    // Try to auto-run setup-mpspdz.sh
-    // Look for the script relative to MP-SPDZ dir (one level up) or next to it
-    let candidates = [
-        dir.join("../setup-mpspdz.sh"),
-        dir.join("../../setup-mpspdz.sh"),
-    ];
-
-    let script = candidates.iter().find(|p| p.exists());
-
-    match script {
-        Some(script_path) => {
-            info!(
-                "Running setup script: {} --mp-spdz-dir {}",
-                script_path.display(),
-                mp_spdz_dir
-            );
-            let status = std::process::Command::new("bash")
-                .arg(script_path)
-                .arg("--mp-spdz-dir")
-                .arg(&mp_spdz_dir)
-                .status();
-
-            match status {
-                Ok(s) if s.success() => {
-                    info!("MP-SPDZ setup completed successfully");
-                    Ok(())
-                }
-                Ok(s) => Err(MarketError::Process(format!(
-                    "MP-SPDZ setup script failed (exit code: {:?}).\n\
-                     Run manually: {} --mp-spdz-dir {}",
-                    s.code(),
-                    script_path.display(),
-                    mp_spdz_dir
-                ))),
-                Err(e) => Err(MarketError::Process(format!(
-                    "Failed to execute MP-SPDZ setup script: {}\n\
-                     Run manually: {} --mp-spdz-dir {}",
-                    e,
-                    script_path.display(),
-                    mp_spdz_dir
-                ))),
-            }
-        }
-        None => Err(MarketError::Config(format!(
-            "MP-SPDZ is not ready and setup-mpspdz.sh was not found.\n\
-             Please run the setup script manually:\n\
-               ./setup-mpspdz.sh --mp-spdz-dir {}\n\
-             Or ensure the MPC binary and compile.py exist in {}",
-            mp_spdz_dir, mp_spdz_dir
-        ))),
-    }
+    Err(MarketError::Config(format!(
+        "MP-SPDZ is not ready. Missing:\n  {}\n\
+         Run: ./setup-mpspdz.sh --mp-spdz-dir {}",
+        missing.join("\n  "),
+        mp_spdz_dir
+    )))
 }
 
 fn main() -> MarketResult<()> {
@@ -178,7 +126,7 @@ fn main() -> MarketResult<()> {
             // Create node based on network mode
             let mut node = if std::env::var("MARKET_MODE").as_deref() == Ok("public") {
                 info!("Connecting to PUBLIC Veilid network");
-                VeilidNode::new(data_dir, &config).with_public_network()
+                VeilidNode::new(data_dir, &config)
             } else {
                 info!("Connecting to LOCAL devnet");
                 VeilidNode::new(data_dir, &config).with_devnet(DevNetConfig::default())

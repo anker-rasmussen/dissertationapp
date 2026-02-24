@@ -60,7 +60,6 @@ pub fn make_test_public_key(id: u8) -> veilid_core::PublicKey {
 #[derive(Debug, Clone, Default)]
 struct RecordStorage {
     subkeys: HashMap<u32, Vec<u8>>,
-    is_watched: bool,
 }
 
 /// Types of failures that can be simulated.
@@ -333,39 +332,5 @@ impl DhtStore for MockDht {
 
         self.inner.storage.write().await.remove(&key_str);
         Ok(())
-    }
-
-    async fn watch_record(&self, key: &RecordKey) -> MarketResult<bool> {
-        let key_str = key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
-            return Err(MarketError::Dht("MockDht: simulated watch failure".into()));
-        }
-
-        let mut storage = self.inner.storage.write().await;
-        if let Some(record) = storage.get_mut(&key_str) {
-            let was_watched = record.is_watched;
-            record.is_watched = true;
-            Ok(!was_watched)
-        } else {
-            Ok(false)
-        }
-    }
-
-    async fn cancel_watch(&self, key: &RecordKey) -> MarketResult<bool> {
-        let key_str = key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
-            return Err(MarketError::Dht(
-                "MockDht: simulated cancel_watch failure".into(),
-            ));
-        }
-
-        let mut storage = self.inner.storage.write().await;
-        if let Some(record) = storage.get_mut(&key_str) {
-            let was_watched = record.is_watched;
-            record.is_watched = false;
-            Ok(was_watched)
-        } else {
-            Ok(false)
-        }
     }
 }

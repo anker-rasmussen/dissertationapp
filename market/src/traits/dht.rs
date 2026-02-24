@@ -52,14 +52,4 @@ pub trait DhtStore: Send + Sync + Clone {
 
     /// Delete a DHT record.
     async fn delete_record(&self, key: &RecordKey) -> MarketResult<()>;
-
-    /// Watch a DHT record for changes.
-    ///
-    /// Returns `true` if watch was successfully established.
-    async fn watch_record(&self, key: &RecordKey) -> MarketResult<bool>;
-
-    /// Cancel watching a DHT record.
-    ///
-    /// Returns `true` if watch was successfully cancelled.
-    async fn cancel_watch(&self, key: &RecordKey) -> MarketResult<bool>;
 }

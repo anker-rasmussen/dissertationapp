@@ -115,14 +115,6 @@ impl VeilidNode {
         self
     }
 
-    /// Configure this node to connect to the public Veilid network
-    /// For production use - connects to real bootstrap nodes on the internet
-    #[must_use]
-    pub const fn with_public_network(self) -> Self {
-        // Leave devnet_config as None - will use default public network config
-        self
-    }
-
     /// Start the Veilid node: initialise the API, configure networking, and attach.
     #[allow(clippy::too_many_lines)]
     pub async fn start(&mut self) -> MarketResult<()> {

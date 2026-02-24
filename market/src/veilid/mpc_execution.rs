@@ -1,7 +1,5 @@
 //! MP-SPDZ program compilation, process spawning, and output parsing.
 
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{error, info};
@@ -264,10 +262,9 @@ pub(crate) fn parse_attestation(stdout: &str) -> Option<String> {
     None
 }
 
-/// Structured machine-readable MPC result contract written after process execution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Structured machine-readable MPC result contract parsed from process output.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MpcResultContract {
-    pub schema_version: u8,
     pub role: String,
     pub winner_party_id: Option<usize>,
     pub winning_bid: Option<u64>,
@@ -276,8 +273,6 @@ pub(crate) struct MpcResultContract {
 }
 
 impl MpcResultContract {
-    const SCHEMA_VERSION: u8 = 2;
-
     pub(crate) fn from_seller_stdout(stdout: &str) -> MarketResult<Self> {
         let (winner_party_id, winning_bid) = parse_seller_mpc_output(stdout).ok_or_else(|| {
             MarketError::Process(
@@ -287,7 +282,6 @@ impl MpcResultContract {
         let result_attestation = parse_attestation(stdout);
 
         Ok(Self {
-            schema_version: Self::SCHEMA_VERSION,
             role: "seller".to_string(),
             winner_party_id: Some(winner_party_id),
             winning_bid: Some(winning_bid),
@@ -305,7 +299,6 @@ impl MpcResultContract {
         let result_attestation = parse_attestation(stdout);
 
         Ok(Self {
-            schema_version: Self::SCHEMA_VERSION,
             role: "bidder".to_string(),
             winner_party_id: None,
             winning_bid: None,
@@ -313,45 +306,6 @@ impl MpcResultContract {
             result_attestation,
         })
     }
-}
-
-/// Persist the machine-readable MPC result contract to JSON.
-pub(crate) async fn write_result_contract(
-    path: &Path,
-    result: &MpcResultContract,
-) -> MarketResult<()> {
-    let bytes = serde_json::to_vec_pretty(result).map_err(|e| {
-        MarketError::Serialization(format!("Failed to serialize MPC result contract: {e}"))
-    })?;
-    tokio::fs::write(path, bytes).await.map_err(|e| {
-        MarketError::Process(format!(
-            "Failed to write MPC result contract {}: {e}",
-            path.display()
-        ))
-    })
-}
-
-/// Read and validate the machine-readable MPC result contract from JSON.
-pub(crate) async fn read_result_contract(path: &Path) -> MarketResult<MpcResultContract> {
-    let data = tokio::fs::read(path).await.map_err(|e| {
-        MarketError::Process(format!(
-            "Failed to read MPC result contract {}: {e}",
-            path.display()
-        ))
-    })?;
-    let result: MpcResultContract = serde_json::from_slice(&data).map_err(|e| {
-        MarketError::Serialization(format!(
-            "Failed to deserialize MPC result contract {}: {e}",
-            path.display()
-        ))
-    })?;
-    if result.schema_version != MpcResultContract::SCHEMA_VERSION {
-        return Err(MarketError::Serialization(format!(
-            "Unsupported MPC result contract schema version {}",
-            result.schema_version
-        )));
-    }
-    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -537,5 +491,4 @@ MPC execution completed
             Some("55340232221128778".to_string())
         );
     }
-
 }

@@ -19,6 +19,7 @@ use market::error::MarketError;
 use market::marketplace::bid_record::BidRecord;
 use market::veilid::bid_ops::BidOperations;
 use market::veilid::bid_storage::BidStorage;
+use market::DhtStore;
 use serial_test::serial;
 
 use super::helpers::{
@@ -98,11 +99,11 @@ async fn test_e2e_smoke_dht_operations() {
         let key = record.key.clone();
 
         let test_data = b"Hello from E2E test!".to_vec();
-        dht1.set_dht_value(&record, test_data.clone()).await?;
+        dht1.set_value(&record, test_data.clone()).await?;
 
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let read_data = dht2.get_dht_value(&key).await?;
+        let read_data = dht2.get_value(&key).await?;
 
         match read_data {
             Some(data) => {
@@ -358,7 +359,7 @@ async fn test_e2e_smoke_appmessage_bid_announcements() {
                 signing_pubkey: seller_signing,
             };
             seller_dht
-                .set_dht_value(&seller_bid_record_dht, seller_bid.to_cbor()?)
+                .set_value(&seller_bid_record_dht, seller_bid.to_cbor()?)
                 .await?;
             seller
                 .bid_storage
@@ -395,7 +396,7 @@ async fn test_e2e_smoke_appmessage_bid_announcements() {
                 signing_pubkey: bidder1_signing,
             };
             bidder1_dht
-                .set_dht_value(&bid1_record_dht, bid1.to_cbor()?)
+                .set_value(&bid1_record_dht, bid1.to_cbor()?)
                 .await?;
             bidder1
                 .bid_storage
@@ -420,7 +421,7 @@ async fn test_e2e_smoke_appmessage_bid_announcements() {
                 signing_pubkey: bidder2_signing,
             };
             bidder2_dht
-                .set_dht_value(&bid2_record_dht, bid2.to_cbor()?)
+                .set_value(&bid2_record_dht, bid2.to_cbor()?)
                 .await?;
             bidder2
                 .bid_storage
@@ -536,7 +537,7 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 signing_pubkey: seller_signing,
             };
             seller_dht
-                .set_dht_value(&seller_bid_record_dht, seller_bid.to_cbor()?)
+                .set_value(&seller_bid_record_dht, seller_bid.to_cbor()?)
                 .await?;
             seller
                 .bid_storage
@@ -577,7 +578,7 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 .store_bid_key(&listing_record.key, &bid1_record_dht.key)
                 .await;
             bidder1_dht
-                .set_dht_value(&bid1_record_dht, bid1.to_cbor()?)
+                .set_value(&bid1_record_dht, bid1.to_cbor()?)
                 .await?;
 
             // Bidder 2
@@ -604,7 +605,7 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 .store_bid_key(&listing_record.key, &bid2_record_dht.key)
                 .await;
             bidder2_dht
-                .set_dht_value(&bid2_record_dht, bid2.to_cbor()?)
+                .set_value(&bid2_record_dht, bid2.to_cbor()?)
                 .await?;
 
             // Broadcast announcements — seller handles them and writes to BID_ANNOUNCEMENTS
@@ -756,9 +757,9 @@ async fn test_e2e_full_happy_path() {
     }
 
     run_e2e_test("test_e2e_full_happy_path", 900, || async {
-        let mut seller = HeadlessParticipant::new(36).await?;
-        let mut bidder1 = HeadlessParticipant::new(37).await?;
-        let mut bidder2 = HeadlessParticipant::new(38).await?;
+        let mut seller = HeadlessParticipant::new(20).await?;
+        let mut bidder1 = HeadlessParticipant::new(21).await?;
+        let mut bidder2 = HeadlessParticipant::new(22).await?;
 
         // Seller creates listing (encryption, DHT, registry, auto-bid at reserve)
         eprintln!("[E2E] Seller creating listing...");

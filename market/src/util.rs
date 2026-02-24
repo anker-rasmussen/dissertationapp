@@ -50,5 +50,4 @@ mod tests {
         assert_eq!(restored.value, 42);
         assert_eq!(restored.message, "Hello");
     }
-
 }
