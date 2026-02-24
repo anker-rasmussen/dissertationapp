@@ -593,4 +593,41 @@ impl AuctionCoordinator {
         self.process_app_message(message).await?;
         Ok(vec![0x01])
     }
+
+    /// Dispatch a single Veilid update (AppMessage, AppCall, RouteChange).
+    ///
+    /// Handles the full lifecycle including `app_call_reply` for AppCall.
+    /// Both `main.rs` and `market-headless` call this to avoid duplicating
+    /// the dispatch switch.
+    pub async fn dispatch_veilid_update(&self, update: veilid_core::VeilidUpdate) {
+        match update {
+            veilid_core::VeilidUpdate::AppMessage(msg) => {
+                if let Err(e) = self.process_app_message(msg.message().to_vec()).await {
+                    tracing::error!("AppMessage error: {}", e);
+                }
+            }
+            veilid_core::VeilidUpdate::AppCall(call) => {
+                let call_id = call.id();
+                match self.process_app_call(call.message().to_vec()).await {
+                    Ok(response) => {
+                        if let Err(e) = self.api.app_call_reply(call_id, response).await {
+                            tracing::error!("app_call_reply error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("AppCall error: {}", e);
+                        let _ = self.api.app_call_reply(call_id, vec![0x00]).await;
+                    }
+                }
+            }
+            veilid_core::VeilidUpdate::RouteChange(change) => {
+                self.handle_route_change(
+                    change.dead_routes.clone(),
+                    change.dead_remote_routes.clone(),
+                )
+                .await;
+            }
+            _ => {}
+        }
+    }
 }
