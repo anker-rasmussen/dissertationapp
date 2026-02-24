@@ -204,43 +204,7 @@ async fn main() {
     tokio::spawn(async move {
         if let Some(mut rx) = update_rx {
             while let Some(update) = rx.recv().await {
-                match update {
-                    veilid_core::VeilidUpdate::AppMessage(msg) => {
-                        if let Err(e) = coord_for_loop
-                            .process_app_message(msg.message().to_vec())
-                            .await
-                        {
-                            error!("AppMessage error: {}", e);
-                        }
-                    }
-                    veilid_core::VeilidUpdate::AppCall(call) => {
-                        let api = coord_for_loop.api().clone();
-                        let call_id = call.id();
-                        match coord_for_loop
-                            .process_app_call(call.message().to_vec())
-                            .await
-                        {
-                            Ok(response) => {
-                                if let Err(e) = api.app_call_reply(call_id, response).await {
-                                    error!("app_call_reply error: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                error!("AppCall error: {}", e);
-                                let _ = api.app_call_reply(call_id, vec![0x00]).await;
-                            }
-                        }
-                    }
-                    veilid_core::VeilidUpdate::RouteChange(change) => {
-                        coord_for_loop
-                            .handle_route_change(
-                                change.dead_routes.clone(),
-                                change.dead_remote_routes.clone(),
-                            )
-                            .await;
-                    }
-                    _ => {}
-                }
+                coord_for_loop.dispatch_veilid_update(update).await;
             }
         }
     });

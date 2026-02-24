@@ -236,54 +236,12 @@ fn main() -> MarketResult<()> {
                         }
                         maybe_update = rx.recv() => {
                             match maybe_update {
-                                Some(veilid_core::VeilidUpdate::AppMessage(msg)) => {
+                                Some(update) => {
                                     let coordinator = coordinator_holder.read().clone();
                                     if let Some(coordinator) = coordinator {
-                                        if let Err(e) = coordinator
-                                            .process_app_message(msg.message().to_vec())
-                                            .await
-                                        {
-                                            error!("Failed to process MPC message: {}", e);
-                                        }
+                                        coordinator.dispatch_veilid_update(update).await;
                                     }
                                 }
-                                Some(veilid_core::VeilidUpdate::AppCall(call)) => {
-                                    let coordinator = coordinator_holder.read().clone();
-                                    if let Some(coordinator) = coordinator {
-                                        let api = coordinator.api().clone();
-                                        let call_id = call.id();
-                                        match coordinator
-                                            .process_app_call(call.message().to_vec())
-                                            .await
-                                        {
-                                            Ok(response) => {
-                                                if let Err(e) =
-                                                    api.app_call_reply(call_id, response).await
-                                                {
-                                                    error!("Failed to send app_call reply: {}", e);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to process AppCall: {}", e);
-                                                let _ = api
-                                                    .app_call_reply(call_id, vec![0x00])
-                                                    .await;
-                                            }
-                                        }
-                                    }
-                                }
-                                Some(veilid_core::VeilidUpdate::RouteChange(change)) => {
-                                    let coordinator = coordinator_holder.read().clone();
-                                    if let Some(coordinator) = coordinator {
-                                        coordinator
-                                            .handle_route_change(
-                                                change.dead_routes.clone(),
-                                                change.dead_remote_routes.clone(),
-                                            )
-                                            .await;
-                                    }
-                                }
-                                Some(_) => {}
                                 None => {
                                     warn!("Update channel closed");
                                     break;

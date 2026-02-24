@@ -117,6 +117,52 @@ impl MpcRouteManager {
         self.my_route_blob = Some(RouteBlob { route_id, blob });
     }
 
+    /// Import each peer's route blob, send `data` via `app_message`, then
+    /// release the imported route.  Returns the number of successful sends.
+    async fn broadcast_via_peer_routes(
+        &self,
+        data: &[u8],
+        peer_route_blobs: &[(String, Vec<u8>)],
+        label: &str,
+    ) -> MarketResult<usize> {
+        let routing_context = self
+            .api
+            .routing_context()?
+            .with_safety(SafetySelection::Safe(SafetySpec {
+                preferred_route: None,
+                hop_count: 1,
+                stability: Stability::LowLatency,
+                sequencing: Sequencing::PreferOrdered,
+            }))?;
+
+        let mut sent_count = 0;
+        for (node_id, blob) in peer_route_blobs {
+            match self.api.import_remote_private_route(blob.clone()) {
+                Ok(imported_route) => {
+                    match routing_context
+                        .app_message(Target::RouteId(imported_route.clone()), data.to_vec())
+                        .await
+                    {
+                        Ok(()) => {
+                            debug!("Sent {} to peer {}", label, node_id);
+                            sent_count += 1;
+                        }
+                        Err(e) => warn!("Failed to send {} to {}: {}", label, node_id, e),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        crate::config::MPC_ROUTE_RELEASE_DELAY_MS,
+                    ))
+                    .await;
+                    let _ = self.api.release_private_route(imported_route);
+                }
+                Err(e) => {
+                    debug!("Failed to import route for {}: {}", node_id, e);
+                }
+            }
+        }
+        Ok(sent_count)
+    }
+
     /// Broadcast this party's route announcement to peers using their
     /// private route blobs (`Target::NodeId` requires unsafe routing, which
     /// bypasses Veilid's privacy guarantees).
@@ -149,45 +195,10 @@ impl MpcRouteManager {
         );
 
         let data = announcement.to_signed_bytes(signing_key)?;
-
-        let routing_context = self
-            .api
-            .routing_context()?
-            .with_safety(SafetySelection::Safe(SafetySpec {
-                preferred_route: None,
-                hop_count: 1,
-                stability: Stability::LowLatency,
-                sequencing: Sequencing::PreferOrdered,
-            }))?;
-
-        let mut sent_count = 0;
-        for (node_id, blob) in peer_route_blobs {
-            match self.api.import_remote_private_route(blob.clone()) {
-                Ok(imported_route) => {
-                    match routing_context
-                        .app_message(Target::RouteId(imported_route.clone()), data.clone())
-                        .await
-                    {
-                        Ok(()) => {
-                            debug!("Sent route announcement to peer {}", node_id);
-                            sent_count += 1;
-                        }
-                        Err(e) => warn!("Failed to send route announcement to {}: {}", node_id, e),
-                    }
-                    // Brief pause for Veilid to flush before releasing the imported route
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        crate::config::MPC_ROUTE_RELEASE_DELAY_MS,
-                    ))
-                    .await;
-                    let _ = self.api.release_private_route(imported_route);
-                }
-                Err(e) => {
-                    debug!("Failed to import route for {}: {}", node_id, e);
-                }
-            }
-        }
-
-        info!("Broadcasted route to {} peers", sent_count);
+        let sent = self
+            .broadcast_via_peer_routes(&data, peer_route_blobs, "route announcement")
+            .await?;
+        info!("Broadcasted route to {} peers", sent);
         Ok(())
     }
 
@@ -220,7 +231,6 @@ impl MpcRouteManager {
                 "Replacing route for party {} (old: {}, new: {})",
                 party_pubkey, existing, imported_route
             );
-            let _ = self.api.release_private_route(existing.clone());
         } else {
             info!(
                 "Registered route for party {}: {}",
@@ -375,45 +385,10 @@ impl MpcRouteManager {
             now_unix(),
         );
         let data = ready_msg.to_signed_bytes(signing_key)?;
-
-        let routing_context = self
-            .api
-            .routing_context()?
-            .with_safety(SafetySelection::Safe(SafetySpec {
-                preferred_route: None,
-                hop_count: 1,
-                stability: Stability::LowLatency,
-                sequencing: Sequencing::PreferOrdered,
-            }))?;
-
-        let mut sent_count = 0;
-        for (node_id, blob) in peer_route_blobs {
-            match self.api.import_remote_private_route(blob.clone()) {
-                Ok(imported_route) => {
-                    match routing_context
-                        .app_message(Target::RouteId(imported_route.clone()), data.clone())
-                        .await
-                    {
-                        Ok(()) => {
-                            debug!("Sent MpcReady to peer {}", node_id);
-                            sent_count += 1;
-                        }
-                        Err(e) => warn!("Failed to send MpcReady to {}: {}", node_id, e),
-                    }
-                    // Brief pause for Veilid to flush before releasing the imported route
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        crate::config::MPC_ROUTE_RELEASE_DELAY_MS,
-                    ))
-                    .await;
-                    let _ = self.api.release_private_route(imported_route);
-                }
-                Err(e) => {
-                    debug!("Failed to import route for {}: {}", node_id, e);
-                }
-            }
-        }
-
-        info!("Broadcasted MpcReady to {} peers", sent_count);
+        let sent = self
+            .broadcast_via_peer_routes(&data, peer_route_blobs, "MpcReady")
+            .await?;
+        info!("Broadcasted MpcReady to {} peers", sent);
         Ok(())
     }
 
