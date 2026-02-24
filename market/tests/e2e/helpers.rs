@@ -13,6 +13,7 @@ use market::veilid::auction_coordinator::AuctionCoordinator;
 use market::veilid::bid_storage::BidStorage;
 use market::veilid::node::{DevNetConfig, VeilidNode};
 use market::Listing;
+
 use tokio_util::sync::CancellationToken;
 use veilid_core::PublicKey;
 
@@ -644,6 +645,7 @@ pub fn print_error_chain(e: &MarketError) {
 /// Wait until at least `expected_peers` broadcast routes are visible from a
 /// node's perspective.  Returns `true` if the routes were found, `false` on
 /// timeout.
+#[allow(dead_code)]
 pub async fn wait_for_broadcast_routes(
     coordinator: &AuctionCoordinator,
     my_node_id: &str,
@@ -728,5 +730,257 @@ where
             panic!("{} failed: {}", name, e);
         }
         Err(_) => panic!("{} timed out after {}s", name, timeout_secs),
+    }
+}
+
+// ── HeadlessParticipant ─────────────────────────────────────────────
+
+/// IPC-based test participant that runs `market-headless` in a child process.
+///
+/// Each participant gets its own OS process with its own tokio runtime,
+/// eliminating the in-process runtime contention that causes 40x MPC slowdown.
+#[allow(dead_code)]
+pub struct HeadlessParticipant {
+    child: tokio::process::Child,
+    stdin: tokio::io::BufWriter<tokio::process::ChildStdin>,
+    stdout: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    pub node_id: String,
+    pub signing_pubkey: String,
+    pub offset: u16,
+}
+
+impl HeadlessParticipant {
+    /// Spawn a `market-headless` child process and wait for the `Ready` event.
+    pub async fn new(offset: u16) -> MarketResult<Self> {
+        use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
+        use tokio::process::Command;
+
+        // Locate the binary relative to CARGO_MANIFEST_DIR
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let binary = manifest_dir
+            .join("target")
+            .join("debug")
+            .join("market-headless");
+
+        if !binary.exists() {
+            // Try standard cargo target dir (workspace root)
+            let workspace_binary = manifest_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("target").join("debug").join("market-headless"));
+            if let Some(ref wb) = workspace_binary {
+                if !wb.exists() {
+                    return Err(MarketError::Config(format!(
+                        "market-headless binary not found at {} or {}. \
+                         Build it first: cargo build --bin market-headless",
+                        binary.display(),
+                        wb.display()
+                    )));
+                }
+            }
+        }
+
+        // Determine which binary path exists
+        let binary_path = if binary.exists() {
+            binary
+        } else {
+            manifest_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("target").join("debug").join("market-headless"))
+                .unwrap_or(binary)
+        };
+
+        eprintln!(
+            "[E2E] Spawning headless node (offset={}) from {}",
+            offset,
+            binary_path.display()
+        );
+
+        let mut child = Command::new(&binary_path)
+            .arg("--offset")
+            .arg(offset.to_string())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit()) // pass through logs
+            .spawn()
+            .map_err(|e| {
+                MarketError::Process(format!(
+                    "Failed to spawn market-headless (offset {}): {}",
+                    offset, e
+                ))
+            })?;
+
+        let child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| MarketError::Process("No stdin on child".into()))?;
+        let child_stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| MarketError::Process("No stdout on child".into()))?;
+
+        let stdin = BufWriter::new(child_stdin);
+        let mut stdout = BufReader::new(child_stdout).lines();
+
+        // Wait for Ready event (with timeout)
+        let ready_line = tokio::time::timeout(Duration::from_secs(300), stdout.next_line())
+            .await
+            .map_err(|_| {
+                MarketError::Timeout(format!(
+                    "Headless node {} did not emit Ready within 300s",
+                    offset
+                ))
+            })?
+            .map_err(|e| MarketError::Process(format!("Failed to read Ready line: {}", e)))?
+            .ok_or_else(|| {
+                MarketError::Process(format!(
+                    "Headless node {} stdout closed before Ready",
+                    offset
+                ))
+            })?;
+
+        let ready: serde_json::Value = serde_json::from_str(&ready_line).map_err(|e| {
+            MarketError::Process(format!("Invalid Ready JSON '{}': {}", ready_line, e))
+        })?;
+
+        let node_id = ready["node_id"]
+            .as_str()
+            .ok_or_else(|| MarketError::Process("Ready event missing node_id".into()))?
+            .to_string();
+        let signing_pubkey = ready["signing_pubkey"]
+            .as_str()
+            .ok_or_else(|| MarketError::Process("Ready event missing signing_pubkey".into()))?
+            .to_string();
+
+        eprintln!(
+            "[E2E] Headless node {} ready: node_id={}...",
+            offset,
+            &node_id[..16.min(node_id.len())]
+        );
+
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+            node_id,
+            signing_pubkey,
+            offset,
+        })
+    }
+
+    /// Send a command and read the response.
+    async fn send(&mut self, cmd: &serde_json::Value) -> MarketResult<serde_json::Value> {
+        use tokio::io::AsyncWriteExt;
+
+        let line = serde_json::to_string(cmd).expect("JSON serialization failed");
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| MarketError::Process(format!("stdin write failed: {}", e)))?;
+        self.stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|e| MarketError::Process(format!("stdin newline failed: {}", e)))?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|e| MarketError::Process(format!("stdin flush failed: {}", e)))?;
+
+        let resp_line = tokio::time::timeout(
+            Duration::from_secs(600), // actions can take a while (DHT ops)
+            self.stdout.next_line(),
+        )
+        .await
+        .map_err(|_| MarketError::Timeout("Command response timed out (600s)".into()))?
+        .map_err(|e| MarketError::Process(format!("stdout read error: {}", e)))?
+        .ok_or_else(|| MarketError::Process("stdout closed unexpectedly".into()))?;
+
+        let resp: serde_json::Value = serde_json::from_str(&resp_line)
+            .map_err(|e| MarketError::Process(format!("Invalid response JSON: {}", e)))?;
+
+        if resp["status"] == "Err" {
+            return Err(MarketError::Process(
+                resp["message"].as_str().unwrap_or("unknown error").into(),
+            ));
+        }
+
+        Ok(resp)
+    }
+
+    /// Create a listing. Returns (listing_key, decryption_key).
+    pub async fn create_listing(
+        &mut self,
+        title: &str,
+        content: &str,
+        reserve_price: u64,
+        duration_secs: u64,
+    ) -> MarketResult<(String, String)> {
+        let resp = self
+            .send(&serde_json::json!({
+                "cmd": "CreateListing",
+                "title": title,
+                "content": content,
+                "reserve_price": reserve_price,
+                "duration_secs": duration_secs,
+            }))
+            .await?;
+
+        let data = &resp["data"];
+        let listing_key = data["listing_key"]
+            .as_str()
+            .ok_or_else(|| MarketError::Process("Missing listing_key in response".into()))?
+            .to_string();
+        let decryption_key = data["decryption_key"]
+            .as_str()
+            .ok_or_else(|| MarketError::Process("Missing decryption_key in response".into()))?
+            .to_string();
+
+        Ok((listing_key, decryption_key))
+    }
+
+    /// Place a bid. Returns the bid_key.
+    pub async fn place_bid(
+        &mut self,
+        listing_key: &str,
+        amount: u64,
+    ) -> MarketResult<Option<String>> {
+        let resp = self
+            .send(&serde_json::json!({
+                "cmd": "PlaceBid",
+                "listing_key": listing_key,
+                "amount": amount,
+            }))
+            .await?;
+
+        let bid_key = resp["data"]["bid_key"].as_str().map(String::from);
+        Ok(bid_key)
+    }
+
+    /// Poll for the decryption key (returns None if not yet available).
+    pub async fn get_decryption_key(&mut self, listing_key: &str) -> MarketResult<Option<String>> {
+        let resp = self
+            .send(&serde_json::json!({
+                "cmd": "GetDecryptionKey",
+                "listing_key": listing_key,
+            }))
+            .await?;
+
+        let key = resp["data"]["key"].as_str().map(String::from);
+        Ok(key)
+    }
+
+    /// Request graceful shutdown.
+    pub async fn shutdown(&mut self) -> MarketResult<()> {
+        // Send shutdown command (ignore errors if process already died)
+        let _ = self.send(&serde_json::json!({ "cmd": "Shutdown" })).await;
+
+        // Wait for process to exit
+        let _ = tokio::time::timeout(Duration::from_secs(30), self.child.wait()).await;
+
+        // Force kill if still alive
+        let _ = self.child.kill().await;
+
+        Ok(())
     }
 }
