@@ -631,7 +631,7 @@ async fn test_e2e_smoke_real_bid_flow_with_commitments() {
                 .coordinator
                 .broadcast_bid_announcement(&listing_record.key, &bid2_record_dht.key)
                 .await?;
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
 
             // Verify party ordering
             let bid_index = seller_bid_ops.fetch_bid_index(&listing_record.key).await?;
@@ -734,7 +734,7 @@ async fn test_e2e_full_mpc_execution_happy_path() {
             listing_record.key.clone(),
             seller_id.clone(),
             100,
-            120, // DHT ops take 5-10s each; 120s ensures all 3 bids register before deadline
+            50, // DHT ops take 5-10s each; 50s is enough for 3 bids before deadline
             plaintext,
         );
 
@@ -922,7 +922,7 @@ async fn test_e2e_full_mpc_execution_happy_path() {
             .coordinator
             .broadcast_bid_announcement(&listing_record.key, &b2_rec.key)
             .await?;
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         eprintln!("[E2E] All bids placed, announcements broadcast. Starting monitoring...");
 
@@ -1028,7 +1028,7 @@ async fn test_e2e_full_winner_verification_and_decryption() {
                 listing_record.key.clone(),
                 seller_id.clone(),
                 50,
-                120,
+                50, // 50s is enough for 3 bids before deadline
                 plaintext_content,
             );
             let expected_decryption_key = listing.decryption_key.clone();
@@ -1218,7 +1218,7 @@ async fn test_e2e_full_winner_verification_and_decryption() {
                 .coordinator
                 .broadcast_bid_announcement(&listing_record.key, &b2_rec.key)
                 .await?;
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
 
             eprintln!("[E2E] Polling for MPC + post-MPC flow (max 2400s)...");
 
@@ -1353,7 +1353,7 @@ async fn test_e2e_full_sequential_auctions() {
             listing1_record.key.clone(),
             seller1_id.clone(),
             100,
-            120,
+            50, // 50s is enough for bids before deadline
             "Auction 1 secret content: first sale",
         );
 
@@ -1464,6 +1464,78 @@ async fn test_e2e_full_sequential_auctions() {
             .set_dht_value(&b2_rec1, bid2_a1.to_cbor()?)
             .await?;
 
+        // Add bidder bids to seller's DHT registry so the registry is
+        // complete before the deadline fires (simulates broadcast receipt).
+        seller1
+            .coordinator
+            .add_own_bid_to_registry(
+                &listing1_record.key,
+                bidder1_id.clone(),
+                b1_rec1.key.clone(),
+                now + 1,
+            )
+            .await?;
+        seller1
+            .coordinator
+            .add_own_bid_to_registry(
+                &listing1_record.key,
+                bidder2_id.clone(),
+                b2_rec1.key.clone(),
+                now + 2,
+            )
+            .await?;
+
+        // Register local bid announcements so each party knows about all
+        // other bids (simulates broadcast receipt).
+        seller1
+            .coordinator
+            .register_local_bid(
+                &listing1_record.key,
+                bidder1_id.clone(),
+                b1_rec1.key.clone(),
+            )
+            .await;
+        seller1
+            .coordinator
+            .register_local_bid(
+                &listing1_record.key,
+                bidder2_id.clone(),
+                b2_rec1.key.clone(),
+            )
+            .await;
+        bidder1
+            .coordinator
+            .register_local_bid(
+                &listing1_record.key,
+                seller1_id.clone(),
+                s1_bid_rec.key.clone(),
+            )
+            .await;
+        bidder1
+            .coordinator
+            .register_local_bid(
+                &listing1_record.key,
+                bidder2_id.clone(),
+                b2_rec1.key.clone(),
+            )
+            .await;
+        bidder2
+            .coordinator
+            .register_local_bid(
+                &listing1_record.key,
+                seller1_id.clone(),
+                s1_bid_rec.key.clone(),
+            )
+            .await;
+        bidder2
+            .coordinator
+            .register_local_bid(
+                &listing1_record.key,
+                bidder1_id.clone(),
+                b1_rec1.key.clone(),
+            )
+            .await;
+
         listing1_ops
             .update_listing(&listing1_record, &listing1)
             .await?;
@@ -1492,7 +1564,7 @@ async fn test_e2e_full_sequential_auctions() {
             .coordinator
             .broadcast_bid_announcement(&listing1_record.key, &b2_rec1.key)
             .await?;
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         eprintln!("[E2E] Auction 1: polling for MPC completion (max 2400s)...");
         let mpc1_start = tokio::time::Instant::now();
@@ -1543,7 +1615,7 @@ async fn test_e2e_full_sequential_auctions() {
             listing2_record.key.clone(),
             seller2_id.clone(),
             200,
-            120,
+            50, // 50s is enough for bids before deadline
             "Auction 2 secret content: second sale from new seller",
         );
 
@@ -1653,6 +1725,76 @@ async fn test_e2e_full_sequential_auctions() {
             .set_dht_value(&b2_rec2, bid2_a2.to_cbor()?)
             .await?;
 
+        // Add bidder bids to seller2's DHT registry (simulates broadcast receipt).
+        seller2
+            .coordinator
+            .add_own_bid_to_registry(
+                &listing2_record.key,
+                bidder1_id.clone(),
+                b1_rec2.key.clone(),
+                now2 + 1,
+            )
+            .await?;
+        seller2
+            .coordinator
+            .add_own_bid_to_registry(
+                &listing2_record.key,
+                bidder2_id.clone(),
+                b2_rec2.key.clone(),
+                now2 + 2,
+            )
+            .await?;
+
+        // Register local bid announcements for auction 2.
+        seller2
+            .coordinator
+            .register_local_bid(
+                &listing2_record.key,
+                bidder1_id.clone(),
+                b1_rec2.key.clone(),
+            )
+            .await;
+        seller2
+            .coordinator
+            .register_local_bid(
+                &listing2_record.key,
+                bidder2_id.clone(),
+                b2_rec2.key.clone(),
+            )
+            .await;
+        bidder1
+            .coordinator
+            .register_local_bid(
+                &listing2_record.key,
+                seller2_id.clone(),
+                s2_bid_rec.key.clone(),
+            )
+            .await;
+        bidder1
+            .coordinator
+            .register_local_bid(
+                &listing2_record.key,
+                bidder2_id.clone(),
+                b2_rec2.key.clone(),
+            )
+            .await;
+        bidder2
+            .coordinator
+            .register_local_bid(
+                &listing2_record.key,
+                seller2_id.clone(),
+                s2_bid_rec.key.clone(),
+            )
+            .await;
+        bidder2
+            .coordinator
+            .register_local_bid(
+                &listing2_record.key,
+                bidder1_id.clone(),
+                b1_rec2.key.clone(),
+            )
+            .await;
+
         listing2_ops
             .update_listing(&listing2_record, &listing2)
             .await?;
@@ -1681,7 +1823,7 @@ async fn test_e2e_full_sequential_auctions() {
             .coordinator
             .broadcast_bid_announcement(&listing2_record.key, &b2_rec2.key)
             .await?;
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         eprintln!("[E2E] Auction 2: polling for MPC completion (max 2400s)...");
         let mpc2_start = tokio::time::Instant::now();
