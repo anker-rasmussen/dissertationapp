@@ -946,7 +946,7 @@ async fn test_e2e_full_mpc_execution_happy_path() {
                 eprintln!("[E2E] MPC did not complete within 2400s, checking results anyway...");
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
 
         let b1_key = bidder1
@@ -1240,7 +1240,7 @@ async fn test_e2e_full_winner_verification_and_decryption() {
                     eprintln!("[E2E] MPC + post-MPC did not complete within 2400s");
                     break;
                 }
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
 
             let winner_key = bidder1
@@ -1586,7 +1586,7 @@ async fn test_e2e_full_sequential_auctions() {
                     "Auction 1 MPC did not complete within 2400s".into(),
                 ));
             }
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
 
         let a1_b1_key = bidder1
@@ -1845,7 +1845,7 @@ async fn test_e2e_full_sequential_auctions() {
                     "Auction 2 MPC did not complete within 2400s".into(),
                 ));
             }
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
 
         let a2_b1_key = bidder1
@@ -2130,7 +2130,7 @@ async fn run_n_party_mpc_test(
             );
             break;
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     // Verify winner got key, non-winners didn't
