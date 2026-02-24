@@ -1,6 +1,5 @@
 //! Application modules for the SMPC Auction Marketplace UI.
 
-pub mod actions;
 pub mod components;
 pub mod state;
 

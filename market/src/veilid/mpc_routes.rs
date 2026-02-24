@@ -85,6 +85,25 @@ impl MpcRouteManager {
         Ok(route_id)
     }
 
+    /// Reset route state for a retry attempt.
+    ///
+    /// Clears stale route IDs, blobs, and own route so that the next
+    /// `exchange_mpc_routes` call starts with fresh routes.  Ready signals
+    /// are preserved to avoid losing signals from parties that already
+    /// passed the barrier (see race condition comment in Phase 2).
+    pub async fn reset_routes(&mut self) {
+        if let Some(route_id) = self.my_route_id.take() {
+            let _ = self.api.release_private_route(route_id);
+        }
+        self.my_route_blob = None;
+        self.received_routes.lock().await.clear();
+        self.received_blobs.lock().await.clear();
+        info!(
+            "Route manager reset for retry (ready signals preserved: {})",
+            self.ready_parties.lock().await.len()
+        );
+    }
+
     /// Reuse an existing route (e.g., the broadcast route) for MPC traffic.
     ///
     /// The broadcast route is maintained by the coordinator's keepalive task,
@@ -156,7 +175,10 @@ impl MpcRouteManager {
                         Err(e) => warn!("Failed to send route announcement to {}: {}", node_id, e),
                     }
                     // Brief pause for Veilid to flush before releasing the imported route
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        crate::config::MPC_ROUTE_RELEASE_DELAY_MS,
+                    ))
+                    .await;
                     let _ = self.api.release_private_route(imported_route);
                 }
                 Err(e) => {
@@ -379,7 +401,10 @@ impl MpcRouteManager {
                         Err(e) => warn!("Failed to send MpcReady to {}: {}", node_id, e),
                     }
                     // Brief pause for Veilid to flush before releasing the imported route
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        crate::config::MPC_ROUTE_RELEASE_DELAY_MS,
+                    ))
+                    .await;
                     let _ = self.api.release_private_route(imported_route);
                 }
                 Err(e) => {

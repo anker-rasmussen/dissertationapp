@@ -28,7 +28,7 @@ pub(crate) fn bincode_deserialize_limited<T: serde::de::DeserializeOwned>(
 /// the payload with their Ed25519 key; the receiver verifies the signature
 /// before deserializing.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SignedEnvelope {
+pub(crate) struct SignedEnvelope {
     /// Bincode-serialized inner message.
     pub payload: Vec<u8>,
     /// Ed25519 verifying key bytes (the signer's identity).
@@ -39,14 +39,14 @@ pub struct SignedEnvelope {
 
 impl SignedEnvelope {
     /// Sign a payload and wrap it in an envelope.
-    pub fn sign(payload: Vec<u8>, signing_key: &ed25519_dalek::SigningKey) -> MarketResult<Self> {
+    pub fn sign(payload: Vec<u8>, signing_key: &ed25519_dalek::SigningKey) -> Self {
         let signature = signing_key.sign(&payload);
         let signer = signing_key.verifying_key().to_bytes();
-        Ok(Self {
+        Self {
             payload,
             signer,
             signature: signature.to_bytes().to_vec(),
-        })
+        }
     }
 
     /// Verify the signature and return the payload + signer pubkey bytes.
@@ -83,14 +83,17 @@ impl SignedEnvelope {
 }
 
 /// Maximum allowed clock drift for message timestamps (5 minutes).
-pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300;
+pub(crate) const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300;
 
 /// Validate that a message timestamp is within acceptable drift of the current time.
-pub const fn validate_timestamp(message_timestamp: u64, current_time: u64) -> bool {
+pub(crate) const fn validate_timestamp(message_timestamp: u64, current_time: u64) -> bool {
     message_timestamp.abs_diff(current_time) <= MAX_TIMESTAMP_DRIFT_SECS
 }
 
-/// Registry of bid announcements stored in DHT (listing subkey 2)
+/// Registry of bid announcements stored in DHT (state-based G-Set CRDT).
+///
+/// Entries are deduped by bidder pubkey on add; `merge()` provides
+/// commutative, associative, idempotent union for convergence.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BidAnnouncementRegistry {
     /// List of (bidder_pubkey, bid_record_key, timestamp) tuples
@@ -132,6 +135,19 @@ impl BidAnnouncementRegistry {
     pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
         crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
+
+    /// Merge another registry into this one (G-Set union).
+    ///
+    /// Commutative, associative, and idempotent — suitable for
+    /// state-based CRDT convergence.
+    pub fn merge(&mut self, other: &Self) {
+        for (bidder, bid_key, ts) in &other.announcements {
+            self.add(bidder.clone(), bid_key.clone(), *ts);
+        }
+        if self.total_expected.is_none() {
+            self.total_expected = other.total_expected;
+        }
+    }
 }
 
 /// In-memory tracker for bid announcements, shared by both
@@ -139,7 +155,7 @@ impl BidAnnouncementRegistry {
 ///
 /// Provides dedup-on-insert and per-listing lookup without exposing
 /// the internal `Mutex<HashMap<…>>` to callers.
-pub struct BidAnnouncementTracker {
+pub(crate) struct BidAnnouncementTracker {
     announcements: Mutex<HashMap<RecordKey, Vec<(PublicKey, RecordKey)>>>,
 }
 
@@ -414,7 +430,7 @@ impl AuctionMessage {
         signing_key: &ed25519_dalek::SigningKey,
     ) -> MarketResult<Vec<u8>> {
         let payload = self.to_bytes()?;
-        let envelope = SignedEnvelope::sign(payload, signing_key)?;
+        let envelope = SignedEnvelope::sign(payload, signing_key);
         envelope.to_bytes()
     }
 
@@ -771,6 +787,100 @@ mod tests {
         let bytes = registry.to_bytes().unwrap();
         let restored = BidAnnouncementRegistry::from_bytes(&bytes).unwrap();
         assert!(restored.announcements.is_empty());
+    }
+
+    // ── G-Set CRDT merge property tests ──
+
+    #[test]
+    fn test_bid_announcement_merge_commutativity() {
+        let bidder1 = crate::mocks::dht::make_test_public_key(1);
+        let bidder2 = crate::mocks::dht::make_test_public_key(2);
+        let key1 = crate::mocks::dht::make_test_record_key(10);
+        let key2 = crate::mocks::dht::make_test_record_key(20);
+
+        let mut a = BidAnnouncementRegistry::new();
+        a.add(bidder1.clone(), key1.clone(), 100);
+
+        let mut b = BidAnnouncementRegistry::new();
+        b.add(bidder2.clone(), key2.clone(), 200);
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+
+        let mut ba = b.clone();
+        ba.merge(&a);
+
+        assert_eq!(ab.announcements.len(), 2);
+        assert_eq!(ba.announcements.len(), 2);
+        // Both contain the same bidders
+        assert!(ab.announcements.iter().any(|(b, _, _)| b == &bidder1));
+        assert!(ab.announcements.iter().any(|(b, _, _)| b == &bidder2));
+        assert!(ba.announcements.iter().any(|(b, _, _)| b == &bidder1));
+        assert!(ba.announcements.iter().any(|(b, _, _)| b == &bidder2));
+    }
+
+    #[test]
+    fn test_bid_announcement_merge_associativity() {
+        let bidder1 = crate::mocks::dht::make_test_public_key(1);
+        let bidder2 = crate::mocks::dht::make_test_public_key(2);
+        let bidder3 = crate::mocks::dht::make_test_public_key(3);
+        let key1 = crate::mocks::dht::make_test_record_key(10);
+        let key2 = crate::mocks::dht::make_test_record_key(20);
+        let key3 = crate::mocks::dht::make_test_record_key(30);
+
+        let mut a = BidAnnouncementRegistry::new();
+        a.add(bidder1, key1, 100);
+        let mut b = BidAnnouncementRegistry::new();
+        b.add(bidder2, key2, 200);
+        let mut c = BidAnnouncementRegistry::new();
+        c.add(bidder3, key3, 300);
+
+        // (a ∪ b) ∪ c
+        let mut ab_c = a.clone();
+        ab_c.merge(&b);
+        ab_c.merge(&c);
+
+        // a ∪ (b ∪ c)
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        assert_eq!(ab_c.announcements.len(), 3);
+        assert_eq!(a_bc.announcements.len(), 3);
+    }
+
+    #[test]
+    fn test_bid_announcement_merge_idempotency() {
+        let bidder1 = crate::mocks::dht::make_test_public_key(1);
+        let bidder2 = crate::mocks::dht::make_test_public_key(2);
+        let key1 = crate::mocks::dht::make_test_record_key(10);
+        let key2 = crate::mocks::dht::make_test_record_key(20);
+
+        let mut a = BidAnnouncementRegistry::new();
+        a.add(bidder1, key1, 100);
+        a.add(bidder2, key2, 200);
+
+        let before = a.announcements.len();
+        a.merge(&a.clone());
+        assert_eq!(a.announcements.len(), before);
+    }
+
+    #[test]
+    fn test_bid_announcement_merge_total_expected() {
+        let mut a = BidAnnouncementRegistry::new();
+        let mut b = BidAnnouncementRegistry::new();
+        b.total_expected = Some(3);
+
+        // a has no total_expected, merge from b should pick it up
+        a.merge(&b);
+        assert_eq!(a.total_expected, Some(3));
+
+        // If a already has total_expected, merge should not overwrite
+        let mut c = BidAnnouncementRegistry::new();
+        c.total_expected = Some(5);
+        a.merge(&c);
+        assert_eq!(a.total_expected, Some(3)); // Unchanged
     }
 
     #[test]

@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
 use veilid_core::{PublicKey, RecordKey};
 
-use super::dht::DHTOperations;
 use crate::config::now_unix;
 use crate::error::{MarketError, MarketResult};
 use crate::traits::TimeProvider;
@@ -18,8 +16,10 @@ pub struct BidderEntry {
     pub timestamp: u64,
 }
 
-/// Registry of all bidders for a specific listing
-/// Stored in the listing's DHT record at subkey 3
+/// Registry of all bidders for a specific listing (state-based G-Set CRDT).
+///
+/// Entries are deduped by bidder pubkey on add; `merge()` provides
+/// commutative, associative, idempotent union for convergence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BidderRegistry {
     /// Listing this registry is for
@@ -78,143 +78,14 @@ impl BidderRegistry {
             MarketError::Serialization(format!("Failed to deserialize bidder registry: {e}"))
         })
     }
-}
 
-/// Operations for managing the bidder registry
-pub struct BidderRegistryOps {
-    dht: DHTOperations,
-}
-
-impl BidderRegistryOps {
-    pub const fn new(dht: DHTOperations) -> Self {
-        Self { dht }
-    }
-
-    const BIDDER_REGISTRY_SUBKEY: u32 = 3;
-
-    /// Register as a bidder for a listing
-    pub async fn register_bidder(
-        &self,
-        listing_key: &RecordKey,
-        bidder: PublicKey,
-        bid_record_key: RecordKey,
-    ) -> MarketResult<()> {
-        let max_retries = 10;
-        let mut retry_delay = std::time::Duration::from_millis(50);
-
-        let routing_context = self.dht.routing_context()?;
-
-        // Open the listing record
-        let _ = routing_context
-            .open_dht_record(listing_key.clone(), None)
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to open listing record: {e}")))?;
-
-        for attempt in 0..max_retries {
-            // Read current registry
-            let old_value = routing_context
-                .get_dht_value(listing_key.clone(), Self::BIDDER_REGISTRY_SUBKEY, true)
-                .await?;
-            let old_seq = old_value.as_ref().map(veilid_core::ValueData::seq);
-
-            let mut registry = if let Some(value) = &old_value {
-                BidderRegistry::from_cbor(value.data())?
-            } else {
-                debug!("No bidder registry found, creating new one");
-                BidderRegistry::new(listing_key.clone())
-            };
-
-            // Add ourselves
-            registry.add_bidder(bidder.clone(), bid_record_key.clone());
-            let data = registry.to_cbor()?;
-
-            // Try to write
-            match routing_context
-                .set_dht_value(
-                    listing_key.clone(),
-                    Self::BIDDER_REGISTRY_SUBKEY,
-                    data,
-                    None,
-                )
-                .await
-            {
-                Ok(returned_value) => {
-                    // Check for concurrent modifications
-                    if let Some(rv) = returned_value {
-                        if Some(rv.seq()) != old_seq {
-                            warn!(
-                                "Bidder registry conflict (attempt {}/{}), retrying...",
-                                attempt + 1,
-                                max_retries
-                            );
-                            tokio::time::sleep(retry_delay).await;
-                            retry_delay *= 2;
-                            continue;
-                        }
-                    }
-                    info!(
-                        "Successfully registered as bidder (attempt {}/{})",
-                        attempt + 1,
-                        max_retries
-                    );
-                    let _ = routing_context.close_dht_record(listing_key.clone()).await;
-                    return Ok(());
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to write bidder registry (attempt {}/{}): {}",
-                        attempt + 1,
-                        max_retries,
-                        e
-                    );
-                    if attempt < max_retries - 1 {
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay *= 2;
-                        continue;
-                    }
-                    let _ = routing_context.close_dht_record(listing_key.clone()).await;
-                    return Err(MarketError::Dht(format!(
-                        "Failed to register bidder after {max_retries} attempts: {e}"
-                    )));
-                }
-            }
-        }
-
-        let _ = routing_context.close_dht_record(listing_key.clone()).await;
-        Err(MarketError::Dht(format!(
-            "Failed to register bidder after {max_retries} retries"
-        )))
-    }
-
-    /// Fetch all registered bidders for a listing
-    pub async fn fetch_bidders(&self, listing_key: &RecordKey) -> MarketResult<BidderRegistry> {
-        let routing_context = self.dht.routing_context()?;
-
-        match routing_context
-            .open_dht_record(listing_key.clone(), None)
-            .await
-        {
-            Ok(_) => {
-                if let Some(value) = routing_context
-                    .get_dht_value(listing_key.clone(), Self::BIDDER_REGISTRY_SUBKEY, true)
-                    .await?
-                {
-                    let registry = BidderRegistry::from_cbor(value.data())?;
-                    info!(
-                        "Fetched bidder registry with {} bidders",
-                        registry.bidders.len()
-                    );
-                    let _ = routing_context.close_dht_record(listing_key.clone()).await;
-                    Ok(registry)
-                } else {
-                    debug!("No bidder registry found");
-                    let _ = routing_context.close_dht_record(listing_key.clone()).await;
-                    Ok(BidderRegistry::new(listing_key.clone()))
-                }
-            }
-            Err(e) => Err(MarketError::Dht(format!(
-                "Failed to open listing record: {e}"
-            ))),
+    /// Merge another registry into this one (G-Set union).
+    ///
+    /// Commutative, associative, and idempotent — suitable for
+    /// state-based CRDT convergence.
+    pub fn merge(&mut self, other: &Self) {
+        for entry in &other.bidders {
+            self.add_bidder(entry.bidder.clone(), entry.bid_record_key.clone());
         }
     }
 }
@@ -378,5 +249,91 @@ mod tests {
 
         assert_eq!(decoded.listing_key, listing_key);
         assert_eq!(decoded.bidders.len(), 0);
+    }
+
+    // ── G-Set CRDT merge property tests ──
+
+    #[test]
+    fn test_bidder_registry_merge_commutativity() {
+        let listing_key = make_test_record_key(1);
+        let time = MockTime::new(1000);
+
+        let mut a = BidderRegistry::new(listing_key.clone());
+        a.add_bidder_with_time(make_test_public_key(1), make_test_record_key(10), &time);
+
+        let mut b = BidderRegistry::new(listing_key.clone());
+        time.advance(100);
+        b.add_bidder_with_time(make_test_public_key(2), make_test_record_key(20), &time);
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+
+        let mut ba = b.clone();
+        ba.merge(&a);
+
+        assert_eq!(ab.bidders.len(), ba.bidders.len());
+        // Both should contain bidders 1 and 2
+        assert!(ab
+            .bidders
+            .iter()
+            .any(|e| e.bidder == make_test_public_key(1)));
+        assert!(ab
+            .bidders
+            .iter()
+            .any(|e| e.bidder == make_test_public_key(2)));
+        assert!(ba
+            .bidders
+            .iter()
+            .any(|e| e.bidder == make_test_public_key(1)));
+        assert!(ba
+            .bidders
+            .iter()
+            .any(|e| e.bidder == make_test_public_key(2)));
+    }
+
+    #[test]
+    fn test_bidder_registry_merge_associativity() {
+        let listing_key = make_test_record_key(1);
+        let time = MockTime::new(1000);
+
+        let mut a = BidderRegistry::new(listing_key.clone());
+        a.add_bidder_with_time(make_test_public_key(1), make_test_record_key(10), &time);
+
+        let mut b = BidderRegistry::new(listing_key.clone());
+        time.advance(100);
+        b.add_bidder_with_time(make_test_public_key(2), make_test_record_key(20), &time);
+
+        let mut c = BidderRegistry::new(listing_key.clone());
+        time.advance(100);
+        c.add_bidder_with_time(make_test_public_key(3), make_test_record_key(30), &time);
+
+        // (a ∪ b) ∪ c
+        let mut ab_c = a.clone();
+        ab_c.merge(&b);
+        ab_c.merge(&c);
+
+        // a ∪ (b ∪ c)
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        assert_eq!(ab_c.bidders.len(), 3);
+        assert_eq!(a_bc.bidders.len(), 3);
+    }
+
+    #[test]
+    fn test_bidder_registry_merge_idempotency() {
+        let listing_key = make_test_record_key(1);
+        let time = MockTime::new(1000);
+
+        let mut a = BidderRegistry::new(listing_key.clone());
+        a.add_bidder_with_time(make_test_public_key(1), make_test_record_key(10), &time);
+        time.advance(100);
+        a.add_bidder_with_time(make_test_public_key(2), make_test_record_key(20), &time);
+
+        let before = a.bidders.len();
+        a.merge(&a.clone());
+        assert_eq!(a.bidders.len(), before);
     }
 }

@@ -22,7 +22,7 @@ use super::mpc_execution::{
     MpcCleanupGuard, MpcResultContract,
 };
 use super::mpc_routes::MpcRouteManager;
-pub use super::mpc_verification::VerificationState;
+pub(crate) use super::mpc_verification::VerificationState;
 use crate::config;
 use crate::config::subkeys;
 use crate::error::{MarketError, MarketResult};
@@ -30,6 +30,15 @@ use crate::marketplace::BidIndex;
 
 pub(crate) type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
 pub(crate) type VerificationMap = Arc<Mutex<HashMap<RecordKey, VerificationState>>>;
+
+/// Intermediate state from building party maps for MPC execution.
+struct MpcPartyState {
+    bid_value: u64,
+    party_signers: HashMap<usize, [u8; 32]>,
+    party_blobs: HashMap<usize, Vec<u8>>,
+    live_routes: Option<Arc<Mutex<HashMap<PublicKey, RouteId>>>>,
+    party_pubkeys: HashMap<usize, PublicKey>,
+}
 
 /// Validate that the number of parties is sufficient for MPC.
 /// Requires at least 2 parties (seller + 1 bidder).
@@ -43,7 +52,7 @@ pub const fn validate_auction_parties(num_parties: usize) -> Result<(), &'static
 
 /// Generate hosts file content for MP-SPDZ.
 /// All parties use localhost since Veilid handles actual routing.
-pub fn generate_hosts_content(num_parties: usize) -> String {
+pub(crate) fn generate_hosts_content(num_parties: usize) -> String {
     "127.0.0.1\n".repeat(num_parties)
 }
 
@@ -116,7 +125,7 @@ impl MpcOrchestrator {
     }
 
     /// Access to pending verifications (needed by AuctionCoordinator for message handling)
-    pub const fn pending_verifications(&self) -> &VerificationMap {
+    pub(crate) const fn pending_verifications(&self) -> &VerificationMap {
         &self.pending_verifications
     }
 
@@ -303,6 +312,17 @@ impl MpcOrchestrator {
                 // immediately — they went stale during MPC execution.
                 self.needs_route_refresh
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+
+                // On failure (barrier timeout, route collection timeout),
+                // reset stale route state so the next retry starts fresh.
+                // Ready signals are preserved — see Phase 2 race comment.
+                if result.is_err() {
+                    let managers = self.route_managers.lock().await;
+                    if let Some(manager) = managers.get(listing_key) {
+                        manager.lock().await.reset_routes().await;
+                    }
+                }
+
                 result?;
             }
             None => {
@@ -315,7 +335,6 @@ impl MpcOrchestrator {
 
     /// Exchange MPC routes with all other bidders, then wait for all parties
     /// to signal readiness before returning.
-    #[allow(clippy::too_many_lines)]
     pub async fn exchange_mpc_routes(
         &self,
         listing_key: &RecordKey,
@@ -392,214 +411,38 @@ impl MpcOrchestrator {
                 .await?;
         }
 
-        // Phase 1 — Route collection: the seller (party 0) may take extra
-        // time to fetch bid records from DHT before creating its MPC route,
-        // so allow up to 30s.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Phase 1 — Route collection
+        self.collect_party_routes(
+            &route_manager,
+            listing_key,
+            my_party_id,
+            bidders,
+            peer_route_blobs,
+        )
+        .await?;
 
-        let start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(45);
-        let mut rebroadcast_counter: u8 = 0;
+        // Phase 2 — Readiness barrier
+        self.run_readiness_barrier(
+            &route_manager,
+            listing_key,
+            my_party_id,
+            bidders,
+            peer_route_blobs,
+        )
+        .await?;
 
-        loop {
-            let received = {
-                let mgr = route_manager.lock().await;
-                mgr.assemble_party_routes(bidders).await?.len()
-            };
-
-            let expected = bidders.len();
-
-            info!("Route collection: have {}/{} routes", received, expected);
-
-            if received >= expected {
-                break;
-            }
-            if start.elapsed() >= max_wait {
-                return Err(MarketError::Network(format!(
-                    "Incomplete route exchange: got {received}/{expected} routes after {max_wait:?}"
-                )));
-            }
-
-            // Periodically re-broadcast our route using the peer routes we
-            // already have, so late-joining parties can receive our MPC
-            // announcement.  Uses pre-fetched peer_route_blobs (no DHT
-            // overhead).
-            rebroadcast_counter = rebroadcast_counter.wrapping_add(1);
-            if rebroadcast_counter.is_multiple_of(3) && !peer_route_blobs.is_empty() {
-                let my_pubkey = &bidders[my_party_id];
-                route_manager
-                    .lock()
-                    .await
-                    .broadcast_route_announcement(
-                        listing_key,
-                        my_pubkey,
-                        peer_route_blobs,
-                        &self.signing_key,
-                    )
-                    .await?;
-            }
-
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-
-        // Phase 2 — Readiness barrier: all parties must signal MpcReady
-        // before any party enters MPC execution.  This replaces heuristic
-        // sleeps with a deterministic synchronisation point.
-        //
-        // We keep accumulated ready signals rather than clearing them.
-        // Clearing causes a race: Party A reaches 3/3 and enters MPC,
-        // but Party B re-enters the barrier (from a retry) and clears
-        // Party A's signal.  Since Party A is already inside MPC
-        // execution and no longer rebroadcasting, Parties B and C get
-        // stuck at 2/3 indefinitely.  Ready signals are idempotent
-        // (HashSet), so accumulating them is safe.
-        #[allow(clippy::cast_possible_truncation)] // party count always fits in u32
-        let num_parties = bidders.len() as u32;
-        {
-            let mgr = route_manager.lock().await;
-            mgr.register_ready(
-                bidders[my_party_id].clone(),
-                num_parties,
-                crate::config::now_unix(),
-            )
-            .await;
-            drop(mgr);
-        }
-
-        let my_pubkey = &bidders[my_party_id];
-        {
-            let mgr = route_manager.lock().await;
-            // Send via broadcast routes (reaches peers still in Phase 1)
-            mgr.broadcast_mpc_ready(
-                listing_key,
-                my_pubkey,
-                num_parties,
-                peer_route_blobs,
-                &self.signing_key,
-            )
-            .await?;
-            // Also send via MPC routes (known-good from Phase 1)
-            let _ = mgr
-                .send_ready_via_mpc_routes(listing_key, my_pubkey, num_parties, &self.signing_key)
-                .await;
-            drop(mgr);
-        }
-
-        let barrier_start = std::time::Instant::now();
-        // Allow 120s for the barrier: when a peer's barrier times out, it
-        // retries the full handle_auction_end flow (DHT fetch + route
-        // exchange) which takes ~30s.  A short barrier causes parties to
-        // desynchronise — one reaches 3/3 and starts MPC while others are
-        // still in their retry overhead, leading to MP-SPDZ connection
-        // timeouts.  120s accommodates multiple retry cycles.
-        let barrier_timeout = std::time::Duration::from_secs(120);
-        let mut barrier_tick: u8 = 0;
-
-        loop {
-            let ready = route_manager.lock().await.ready_count().await;
-            let expected = bidders.len();
-
-            info!("Readiness barrier: {}/{} parties ready", ready, expected);
-
-            if ready >= expected {
-                info!("All parties ready, proceeding to MPC execution");
-                // Synchronization pause: give every party time to also
-                // pass the barrier before any party creates a tunnel
-                // proxy.  Without this, the fastest party sends Opens
-                // to peers whose tunnel proxy doesn't exist yet,
-                // causing silent message drops.
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                break;
-            }
-            if barrier_start.elapsed() >= barrier_timeout {
-                return Err(MarketError::Network(format!(
-                    "MPC readiness barrier timed out: {ready}/{expected} parties ready after {barrier_timeout:?}"
-                )));
-            }
-
-            // Re-broadcast every 3 ticks (~3s).  Use the MPC routes
-            // collected in Phase 1 (known-good) as the primary delivery
-            // path; broadcast routes from the registry may be stale.
-            barrier_tick = barrier_tick.wrapping_add(1);
-            if barrier_tick.is_multiple_of(3) {
-                let mgr = route_manager.lock().await;
-                // Primary: send via already-collected MPC routes (Phase 1)
-                let _ = mgr
-                    .send_ready_via_mpc_routes(
-                        listing_key,
-                        my_pubkey,
-                        num_parties,
-                        &self.signing_key,
-                    )
-                    .await;
-                // Fallback: also try broadcast routes for peers that
-                // haven't finished Phase 1 yet.
-                if !peer_route_blobs.is_empty() {
-                    let _ = mgr
-                        .broadcast_mpc_ready(
-                            listing_key,
-                            my_pubkey,
-                            num_parties,
-                            peer_route_blobs,
-                            &self.signing_key,
-                        )
-                        .await;
-                }
-                drop(mgr);
-            }
-
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-
-        // Phase 3 — Post-barrier route refresh: MPC routes created in Phase 1
-        // likely died during the 30-120s barrier (Veilid routes expire every
-        // 60-90s in devnets).  Create fresh routes and re-announce to peers
-        // so the tunnel proxy starts with alive routes.
-        info!("Post-barrier route refresh: creating fresh route");
-        {
-            let mut mgr = route_manager.lock().await;
-            let my_pk = bidders[my_party_id].clone();
-            mgr.refresh_own_route(&my_pk).await?;
-
-            // Broadcast fresh route to peers via their broadcast routes
-            // (the broadcast route registry is maintained by the coordinator's
-            // keepalive task and stays reachable longer than MPC routes).
-            if !peer_route_blobs.is_empty() {
-                let _ = mgr
-                    .broadcast_route_announcement(
-                        listing_key,
-                        &my_pk,
-                        peer_route_blobs,
-                        &self.signing_key,
-                    )
-                    .await;
-            }
-            drop(mgr);
-        }
-
-        // Wait for peers to also refresh and for their announcements to arrive.
-        // Incoming MpcRouteAnnouncement messages are handled by the coordinator's
-        // event loop and update received_routes automatically.
-        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-
-        // Re-import all received blobs to refresh Veilid's route cache,
-        // then reassemble routes with any updates received during the wait.
-        let routes = {
-            let mgr = route_manager.lock().await;
-            mgr.refresh_routes().await;
-            mgr.assemble_party_routes(bidders).await?
-        };
-
-        info!(
-            "Post-barrier route refresh complete: {} routes assembled",
-            routes.len()
-        );
-
-        Ok(routes)
+        // Phase 3 — Post-barrier route refresh
+        self.refresh_routes_post_barrier(
+            &route_manager,
+            listing_key,
+            my_party_id,
+            bidders,
+            peer_route_blobs,
+        )
+        .await
     }
 
     /// Execute the MPC auction computation
-    #[allow(clippy::too_many_lines)]
     async fn execute_mpc_auction(
         &self,
         party_id: usize,
@@ -614,81 +457,23 @@ impl MpcOrchestrator {
             num_parties, party_id
         );
 
-        // Get my bid value from storage
         let listing_key = &bid_index.listing_key;
-        let (bid_value, _nonce) = self
-            .bid_storage
-            .get_bid(listing_key)
-            .await
-            .ok_or_else(|| MarketError::NotFound("Bid value not found in storage".into()))?;
-
-        debug!("Bid value retrieved from local storage");
-
-        // Build party_signers map from bid_index: party_id → signing_pubkey.
-        // Use sorted_bidders() to get pubkeys in party order; match them back to
-        // BidRecords to extract each party's Ed25519 signing pubkey.
-        let party_signers: HashMap<usize, [u8; 32]> = {
-            let sorted = bid_index.sorted_bidders(seller_pubkey);
-            sorted
-                .iter()
-                .enumerate()
-                .filter_map(|(pid, pubkey)| {
-                    bid_index
-                        .bids
-                        .iter()
-                        .find(|b| &b.bidder == pubkey)
-                        .map(|bid| (pid, bid.signing_pubkey))
-                })
-                .collect()
-        };
-
-        // Gather route blobs and own route ID for tunnel proxy re-import support
-        let (party_blobs, my_route_id) = {
-            let managers = self.route_managers.lock().await;
-            if let Some(mgr) = managers.get(listing_key) {
-                let mgr = mgr.lock().await;
-                let blobs = mgr.assemble_party_blobs(all_parties).await;
-                let route = mgr.get_my_route().cloned();
-                drop(mgr);
-                (blobs, route)
-            } else {
-                (HashMap::new(), None)
-            }
-        };
-
-        // Refresh imported route handles right before tunnel proxy use
-        // to ensure 5-minute LRU cache is fresh.
-        let live_routes = {
-            let managers = self.route_managers.lock().await;
-            if let Some(mgr) = managers.get(listing_key) {
-                let mgr = mgr.lock().await;
-                mgr.refresh_routes().await;
-                Some(mgr.received_routes.clone())
-            } else {
-                None
-            }
-        };
-
-        // Build party_id → PublicKey mapping for live route lookups
-        let party_pubkeys: HashMap<usize, PublicKey> = all_parties
-            .iter()
-            .enumerate()
-            .map(|(pid, pk)| (pid, pk.clone()))
-            .collect();
+        let maps = self
+            .build_party_maps(bid_index, seller_pubkey, all_parties)
+            .await?;
 
         // Start MPC tunnel proxy with the routes
-        let tunnel_proxy = MpcTunnelProxy::new(
-            self.api.clone(),
+        let tunnel_proxy = MpcTunnelProxy::new(super::mpc::MpcTunnelConfig {
+            api: self.api.clone(),
             party_id,
-            routes,
-            party_blobs,
-            self.node_offset,
-            self.signing_key.clone(),
-            &party_signers,
-            my_route_id,
-            live_routes,
-            party_pubkeys,
-        );
+            party_routes: routes,
+            party_blobs: maps.party_blobs,
+            node_offset: self.node_offset,
+            signing_key: self.signing_key.clone(),
+            party_signers: maps.party_signers,
+            live_routes: maps.live_routes,
+            party_pubkeys: maps.party_pubkeys,
+        });
         tunnel_proxy.run()?;
 
         // Store tunnel proxy so AppMessages can be routed to it
@@ -703,7 +488,9 @@ impl MpcOrchestrator {
         // delivering messages before starting MP-SPDZ (which has no tolerance
         // for message loss during the initial handshake).
         tunnel_proxy
-            .warmup(std::time::Duration::from_secs(300))
+            .warmup(std::time::Duration::from_secs(
+                config::MPC_TUNNEL_WARMUP_TIMEOUT_SECS,
+            ))
             .await?;
 
         let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
@@ -744,7 +531,7 @@ impl MpcOrchestrator {
             party_id,
             num_parties,
             &hosts_file_path,
-            bid_value,
+            maps.bid_value,
             base_port,
             1800, // 30-minute timeout for MASCOT OT over Veilid routes
         )
@@ -760,6 +547,350 @@ impl MpcOrchestrator {
             }
         };
 
+        self.process_mpc_result(
+            party_id,
+            &process_output,
+            listing_key,
+            all_parties,
+            &hosts_file_path,
+        )
+        .await?;
+
+        // Clear active tunnel proxy reference before guard drops
+        *self.active_tunnel_proxy.lock().await = None;
+        // _cleanup_guard drops here, calling tunnel_proxy.cleanup() + removing hosts file
+
+        // Route manager cleanup is handled by the per-role handlers:
+        //   - Losers: handle_bidder_mpc_result() cleans up immediately
+        //   - No-sale sellers: handle_seller_mpc_result() cleans up immediately
+        //   - Winners: cleaned up after receiving decryption hash (auction_coordinator)
+        //   - Sellers with a sale: cleaned up after sending decryption hash (mpc_verification)
+        Ok(())
+    }
+
+    /// Phase 1 — Wait for all parties' route announcements.
+    async fn collect_party_routes(
+        &self,
+        route_manager: &Arc<Mutex<MpcRouteManager>>,
+        listing_key: &RecordKey,
+        my_party_id: usize,
+        bidders: &[PublicKey],
+        peer_route_blobs: &[(String, Vec<u8>)],
+    ) -> MarketResult<()> {
+        // The seller (party 0) may take extra time to fetch bid records
+        // from DHT before creating its MPC route, so allow initial delay.
+        tokio::time::sleep(std::time::Duration::from_secs(
+            config::MPC_ROUTE_ANNOUNCE_DELAY_SECS,
+        ))
+        .await;
+
+        let start = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_secs(config::MPC_ROUTE_COLLECTION_TIMEOUT_SECS);
+        let mut rebroadcast_counter: u8 = 0;
+
+        loop {
+            let received = {
+                let mgr = route_manager.lock().await;
+                mgr.assemble_party_routes(bidders).await?.len()
+            };
+
+            let expected = bidders.len();
+
+            info!("Route collection: have {}/{} routes", received, expected);
+
+            if received >= expected {
+                break;
+            }
+            if start.elapsed() >= max_wait {
+                return Err(MarketError::Network(format!(
+                    "Incomplete route exchange: got {received}/{expected} routes after {max_wait:?}"
+                )));
+            }
+
+            // Periodically re-broadcast our route using the peer routes we
+            // already have, so late-joining parties can receive our MPC
+            // announcement.  Uses pre-fetched peer_route_blobs (no DHT
+            // overhead).
+            rebroadcast_counter = rebroadcast_counter.wrapping_add(1);
+            if rebroadcast_counter.is_multiple_of(3) && !peer_route_blobs.is_empty() {
+                let my_pubkey = &bidders[my_party_id];
+                route_manager
+                    .lock()
+                    .await
+                    .broadcast_route_announcement(
+                        listing_key,
+                        my_pubkey,
+                        peer_route_blobs,
+                        &self.signing_key,
+                    )
+                    .await?;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(
+                config::MPC_BARRIER_POLL_SECS,
+            ))
+            .await;
+        }
+
+        Ok(())
+    }
+
+    /// Phase 2 — Readiness barrier: wait for all parties to signal `MpcReady`.
+    ///
+    /// Ready signals are accumulated (not cleared) to avoid a race where a
+    /// party re-entering the barrier clears another party's signal.
+    async fn run_readiness_barrier(
+        &self,
+        route_manager: &Arc<Mutex<MpcRouteManager>>,
+        listing_key: &RecordKey,
+        my_party_id: usize,
+        bidders: &[PublicKey],
+        peer_route_blobs: &[(String, Vec<u8>)],
+    ) -> MarketResult<()> {
+        #[allow(clippy::cast_possible_truncation)] // party count always fits in u32
+        let num_parties = bidders.len() as u32;
+        {
+            let mgr = route_manager.lock().await;
+            mgr.register_ready(
+                bidders[my_party_id].clone(),
+                num_parties,
+                crate::config::now_unix(),
+            )
+            .await;
+            drop(mgr);
+        }
+
+        let my_pubkey = &bidders[my_party_id];
+        {
+            let mgr = route_manager.lock().await;
+            // Send via broadcast routes (reaches peers still in Phase 1)
+            mgr.broadcast_mpc_ready(
+                listing_key,
+                my_pubkey,
+                num_parties,
+                peer_route_blobs,
+                &self.signing_key,
+            )
+            .await?;
+            // Also send via MPC routes (known-good from Phase 1)
+            let _ = mgr
+                .send_ready_via_mpc_routes(listing_key, my_pubkey, num_parties, &self.signing_key)
+                .await;
+            drop(mgr);
+        }
+
+        let barrier_start = std::time::Instant::now();
+        // Allow 120s for the barrier: when a peer's barrier times out, it
+        // retries the full handle_auction_end flow (DHT fetch + route
+        // exchange) which takes ~30s.  120s accommodates multiple retry cycles.
+        let barrier_timeout =
+            std::time::Duration::from_secs(config::MPC_READINESS_BARRIER_TIMEOUT_SECS);
+        let mut barrier_tick: u8 = 0;
+
+        loop {
+            let ready = route_manager.lock().await.ready_count().await;
+            let expected = bidders.len();
+
+            info!("Readiness barrier: {}/{} parties ready", ready, expected);
+
+            if ready >= expected {
+                info!("All parties ready, proceeding to MPC execution");
+                // Synchronization pause: give every party time to also
+                // pass the barrier before any party creates a tunnel
+                // proxy.  Without this, the fastest party sends Opens
+                // to peers whose tunnel proxy doesn't exist yet,
+                // causing silent message drops.
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    config::MPC_POST_BARRIER_SETTLE_SECS,
+                ))
+                .await;
+                break;
+            }
+            if barrier_start.elapsed() >= barrier_timeout {
+                return Err(MarketError::Network(format!(
+                    "MPC readiness barrier timed out: {ready}/{expected} parties ready after {barrier_timeout:?}"
+                )));
+            }
+
+            // Re-broadcast every 3 ticks (~3s).  Use the MPC routes
+            // collected in Phase 1 (known-good) as the primary delivery
+            // path; broadcast routes from the registry may be stale.
+            barrier_tick = barrier_tick.wrapping_add(1);
+            if barrier_tick.is_multiple_of(3) {
+                let mgr = route_manager.lock().await;
+                // Primary: send via already-collected MPC routes (Phase 1)
+                let _ = mgr
+                    .send_ready_via_mpc_routes(
+                        listing_key,
+                        my_pubkey,
+                        num_parties,
+                        &self.signing_key,
+                    )
+                    .await;
+                // Fallback: also try broadcast routes for peers that
+                // haven't finished Phase 1 yet.
+                if !peer_route_blobs.is_empty() {
+                    let _ = mgr
+                        .broadcast_mpc_ready(
+                            listing_key,
+                            my_pubkey,
+                            num_parties,
+                            peer_route_blobs,
+                            &self.signing_key,
+                        )
+                        .await;
+                }
+                drop(mgr);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(
+                config::MPC_BARRIER_POLL_SECS,
+            ))
+            .await;
+        }
+
+        Ok(())
+    }
+
+    /// Phase 3 — Create fresh routes after the readiness barrier and reassemble.
+    ///
+    /// MPC routes created in Phase 1 likely died during the 30-120s barrier
+    /// (Veilid routes expire every 60-90s in devnets).
+    async fn refresh_routes_post_barrier(
+        &self,
+        route_manager: &Arc<Mutex<MpcRouteManager>>,
+        listing_key: &RecordKey,
+        my_party_id: usize,
+        bidders: &[PublicKey],
+        peer_route_blobs: &[(String, Vec<u8>)],
+    ) -> MarketResult<HashMap<usize, RouteId>> {
+        info!("Post-barrier route refresh: creating fresh route");
+        {
+            let mut mgr = route_manager.lock().await;
+            let my_pk = bidders[my_party_id].clone();
+            mgr.refresh_own_route(&my_pk).await?;
+
+            // Broadcast fresh route to peers via their broadcast routes
+            // (the broadcast route registry is maintained by the coordinator's
+            // keepalive task and stays reachable longer than MPC routes).
+            if !peer_route_blobs.is_empty() {
+                let _ = mgr
+                    .broadcast_route_announcement(
+                        listing_key,
+                        &my_pk,
+                        peer_route_blobs,
+                        &self.signing_key,
+                    )
+                    .await;
+            }
+            drop(mgr);
+        }
+
+        // Wait for peers to also refresh and for their announcements to arrive.
+        tokio::time::sleep(std::time::Duration::from_secs(
+            config::MPC_ROUTE_PROPAGATION_WAIT_SECS,
+        ))
+        .await;
+
+        // Re-import all received blobs to refresh Veilid's route cache,
+        // then reassemble routes with any updates received during the wait.
+        let routes = {
+            let mgr = route_manager.lock().await;
+            mgr.refresh_routes().await;
+            mgr.assemble_party_routes(bidders).await?
+        };
+
+        info!(
+            "Post-barrier route refresh complete: {} routes assembled",
+            routes.len()
+        );
+
+        Ok(routes)
+    }
+
+    /// Build party maps (signers, blobs, live routes, pubkeys) for MPC execution.
+    async fn build_party_maps(
+        &self,
+        bid_index: &BidIndex,
+        seller_pubkey: &PublicKey,
+        all_parties: &[PublicKey],
+    ) -> MarketResult<MpcPartyState> {
+        let listing_key = &bid_index.listing_key;
+        let (bid_value, _nonce) = self
+            .bid_storage
+            .get_bid(listing_key)
+            .await
+            .ok_or_else(|| MarketError::NotFound("Bid value not found in storage".into()))?;
+
+        debug!("Bid value retrieved from local storage");
+
+        // Build party_signers map from bid_index: party_id → signing_pubkey.
+        let party_signers: HashMap<usize, [u8; 32]> = {
+            let sorted = bid_index.sorted_bidders(seller_pubkey);
+            sorted
+                .iter()
+                .enumerate()
+                .filter_map(|(pid, pubkey)| {
+                    bid_index
+                        .bids
+                        .iter()
+                        .find(|b| &b.bidder == pubkey)
+                        .map(|bid| (pid, bid.signing_pubkey))
+                })
+                .collect()
+        };
+
+        // Gather route blobs for tunnel proxy re-import support
+        let party_blobs = {
+            let managers = self.route_managers.lock().await;
+            if let Some(mgr) = managers.get(listing_key) {
+                let mgr = mgr.lock().await;
+                let blobs = mgr.assemble_party_blobs(all_parties).await;
+                drop(mgr);
+                blobs
+            } else {
+                HashMap::new()
+            }
+        };
+
+        // Refresh imported route handles right before tunnel proxy use
+        // to ensure 5-minute LRU cache is fresh.
+        let live_routes = {
+            let managers = self.route_managers.lock().await;
+            if let Some(mgr) = managers.get(listing_key) {
+                let mgr = mgr.lock().await;
+                mgr.refresh_routes().await;
+                Some(mgr.received_routes.clone())
+            } else {
+                None
+            }
+        };
+
+        // Build party_id → PublicKey mapping for live route lookups
+        let party_pubkeys: HashMap<usize, PublicKey> = all_parties
+            .iter()
+            .enumerate()
+            .map(|(pid, pk)| (pid, pk.clone()))
+            .collect();
+
+        Ok(MpcPartyState {
+            bid_value,
+            party_signers,
+            party_blobs,
+            live_routes,
+            party_pubkeys,
+        })
+    }
+
+    /// Parse MPC output and handle role-specific result (seller vs bidder).
+    async fn process_mpc_result(
+        &self,
+        party_id: usize,
+        process_output: &std::process::Output,
+        listing_key: &RecordKey,
+        all_parties: &[PublicKey],
+        hosts_file_path: &std::path::Path,
+    ) -> MarketResult<()> {
         let stdout = String::from_utf8_lossy(&process_output.stdout);
         let stderr = String::from_utf8_lossy(&process_output.stderr);
         info!(
@@ -792,15 +923,6 @@ impl MpcOrchestrator {
                 .await;
         }
 
-        // Clear active tunnel proxy reference before guard drops
-        *self.active_tunnel_proxy.lock().await = None;
-        // _cleanup_guard drops here, calling tunnel_proxy.cleanup() + removing hosts file
-
-        // Route manager cleanup is handled by the per-role handlers:
-        //   - Losers: handle_bidder_mpc_result() cleans up immediately
-        //   - No-sale sellers: handle_seller_mpc_result() cleans up immediately
-        //   - Winners: cleaned up after receiving decryption hash (auction_coordinator)
-        //   - Sellers with a sale: cleaned up after sending decryption hash (mpc_verification)
         Ok(())
     }
 

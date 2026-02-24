@@ -1,10 +1,11 @@
 use tracing::{debug, info, warn};
 use veilid_core::RecordKey;
 
-use crate::config::{subkeys, BID_REGISTER_INITIAL_DELAY_MS, BID_REGISTER_MAX_RETRIES};
-use crate::error::{MarketError, MarketResult};
+use crate::config::subkeys;
+use crate::error::MarketResult;
 use crate::marketplace::{BidIndex, BidRecord};
 use crate::traits::DhtStore;
+use crate::veilid::bid_announcement::BidAnnouncementRegistry;
 
 /// Operations for managing bids in the DHT.
 /// Generic over the DHT store implementation for testability.
@@ -43,85 +44,60 @@ impl<D: DhtStore> BidOperations<D> {
         }
     }
 
-    /// Register a bid in the shared bid index for a listing.
-    /// Uses optimistic concurrency control with retry.
-    pub async fn register_bid(
-        &self,
-        listing_record: &D::OwnedRecord,
-        bid: BidRecord,
-    ) -> MarketResult<()> {
-        let listing_key = D::record_key(listing_record);
-        let max_retries = BID_REGISTER_MAX_RETRIES;
-        let mut retry_delay = std::time::Duration::from_millis(BID_REGISTER_INITIAL_DELAY_MS);
+    /// Build a bid index for a listing by reading the BID_ANNOUNCEMENTS
+    /// registry and fetching each bidder's individual BidRecord.
+    ///
+    /// This is the CRDT read path: the seller writes announcements to
+    /// its own record; readers merge at read time by fetching individual
+    /// bid records from their respective DHT keys.
+    pub async fn fetch_bid_index(&self, listing_key: &RecordKey) -> MarketResult<BidIndex> {
+        let registry = if let Some(data) = self
+            .dht
+            .get_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS)
+            .await?
+        {
+            BidAnnouncementRegistry::from_bytes(&data)?
+        } else {
+            debug!("No bid announcements found, returning empty index");
+            return Ok(BidIndex::new(listing_key.clone()));
+        };
 
-        for attempt in 0..max_retries {
-            // Fetch current bid index from subkey WITH sequence number
-            let (old_value, seq) = self
-                .dht
-                .get_subkey_with_seq(&listing_key, subkeys::BID_INDEX)
-                .await?;
+        let mut index = BidIndex::new(listing_key.clone());
 
-            let mut index = if let Some(data) = old_value {
-                BidIndex::from_cbor(&data)?
-            } else {
-                debug!("No bid index found, creating new one");
-                BidIndex::new(listing_key.clone())
-            };
-
-            // Add our bid
-            index.add_bid(bid.clone());
-
-            // Try to write back with CAS
-            let data = index.to_cbor()?;
-
-            match self
-                .dht
-                .set_subkey_cas(listing_record, subkeys::BID_INDEX, data, seq)
-                .await
-            {
-                Ok(()) => {
-                    info!(
-                        "Successfully registered bid in index (attempt {}/{})",
-                        attempt + 1,
-                        max_retries
+        for (bidder, bid_record_key, _timestamp) in &registry.announcements {
+            match self.dht.get_value(bid_record_key).await {
+                Ok(Some(data)) => match BidRecord::from_cbor(&data) {
+                    Ok(bid) => {
+                        index.add_bid(bid);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize BidRecord at {}: {}",
+                            bid_record_key, e
+                        );
+                    }
+                },
+                Ok(None) => {
+                    warn!(
+                        "BidRecord not found at {} for bidder {}",
+                        bid_record_key, bidder
                     );
-                    return Ok(());
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to write bid index (attempt {}/{}, CAS seq {:?}): {}",
-                        attempt + 1,
-                        max_retries,
-                        seq,
-                        e
+                        "Failed to fetch BidRecord at {} for bidder {}: {}",
+                        bid_record_key, bidder, e
                     );
-                    if attempt < max_retries - 1 {
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay *= 2;
-                        continue;
-                    }
-                    return Err(MarketError::Dht(format!(
-                        "Failed to register bid after {max_retries} attempts: {e}"
-                    )));
                 }
             }
         }
 
-        Err(MarketError::Dht(format!(
-            "Failed to register bid after {max_retries} retries"
-        )))
-    }
-
-    /// Fetch the bid index for a listing
-    pub async fn fetch_bid_index(&self, listing_key: &RecordKey) -> MarketResult<BidIndex> {
-        if let Some(data) = self.dht.get_subkey(listing_key, subkeys::BID_INDEX).await? {
-            let index = BidIndex::from_cbor(&data)?;
-            debug!("Fetched bid index with {} bids", index.bids.len());
-            Ok(index)
-        } else {
-            debug!("No bid index found, returning empty");
-            Ok(BidIndex::new(listing_key.clone()))
-        }
+        debug!(
+            "Built bid index with {} bids from {} announcements",
+            index.bids.len(),
+            registry.announcements.len()
+        );
+        Ok(index)
     }
 }
 
@@ -181,59 +157,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_bid() {
-        let dht = MockDht::new();
-        let ops = BidOperations::new(dht.clone());
-
-        // Create a listing record first
-        let listing_record = dht.create_record().await.unwrap();
-        let listing_key = MockDht::record_key(&listing_record);
-
-        let bid = make_test_bid(listing_key.clone(), 1);
-        ops.register_bid(&listing_record, bid).await.unwrap();
-
-        // Fetch the index and verify
-        let index = ops.fetch_bid_index(&listing_key).await.unwrap();
-        assert_eq!(index.bids.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_register_multiple_bids() {
-        let dht = MockDht::new();
-        let ops = BidOperations::new(dht.clone());
-
-        let listing_record = dht.create_record().await.unwrap();
-        let listing_key = MockDht::record_key(&listing_record);
-
-        // Register multiple bids
-        for i in 1..=3 {
-            let bid = make_test_bid(listing_key.clone(), i);
-            ops.register_bid(&listing_record, bid).await.unwrap();
-        }
-
-        let index = ops.fetch_bid_index(&listing_key).await.unwrap();
-        assert_eq!(index.bids.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_register_duplicate_bid() {
-        let dht = MockDht::new();
-        let ops = BidOperations::new(dht.clone());
-
-        let listing_record = dht.create_record().await.unwrap();
-        let listing_key = MockDht::record_key(&listing_record);
-
-        let bid = make_test_bid(listing_key.clone(), 1);
-        ops.register_bid(&listing_record, bid.clone())
-            .await
-            .unwrap();
-        ops.register_bid(&listing_record, bid).await.unwrap(); // Duplicate
-
-        let index = ops.fetch_bid_index(&listing_key).await.unwrap();
-        assert_eq!(index.bids.len(), 1); // Should not have duplicate
-    }
-
-    #[tokio::test]
     async fn test_fetch_empty_bid_index() {
         let dht = MockDht::new();
         let ops = BidOperations::new(dht);
@@ -242,5 +165,55 @@ mod tests {
         let index = ops.fetch_bid_index(&listing_key).await.unwrap();
 
         assert!(index.bids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_bid_index_from_announcements() {
+        let dht = MockDht::new();
+        let ops = BidOperations::new(dht.clone());
+        let listing_key = make_test_record_key(100);
+
+        // Create a listing record with BID_ANNOUNCEMENTS
+        let listing_record = dht.create_record().await.unwrap();
+        // Override listing_key to use listing_record's key
+        let listing_key = MockDht::record_key(&listing_record);
+
+        // Publish two bids to their own DHT records
+        let bid1 = BidRecord {
+            listing_key: listing_key.clone(),
+            bidder: make_test_public_key(1),
+            commitment: [1; 32],
+            timestamp: 1000,
+            bid_key: make_test_record_key(10), // placeholder, overwritten below
+            signing_pubkey: [1; 32],
+        };
+        let bid1_record = ops.publish_bid(bid1.clone()).await.unwrap();
+        let bid1_key = MockDht::record_key(&bid1_record);
+
+        let bid2 = BidRecord {
+            listing_key: listing_key.clone(),
+            bidder: make_test_public_key(2),
+            commitment: [2; 32],
+            timestamp: 2000,
+            bid_key: make_test_record_key(20),
+            signing_pubkey: [2; 32],
+        };
+        let bid2_record = ops.publish_bid(bid2.clone()).await.unwrap();
+        let bid2_key = MockDht::record_key(&bid2_record);
+
+        // Write BID_ANNOUNCEMENTS registry to the listing record
+        let mut registry = BidAnnouncementRegistry::new();
+        registry.add(bid1.bidder.clone(), bid1_key, 1000);
+        registry.add(bid2.bidder.clone(), bid2_key, 2000);
+        let data = registry.to_bytes().unwrap();
+        dht.set_subkey(&listing_record, subkeys::BID_ANNOUNCEMENTS, data)
+            .await
+            .unwrap();
+
+        // Fetch bid index — should build from announcements + individual records
+        let index = ops.fetch_bid_index(&listing_key).await.unwrap();
+        assert_eq!(index.bids.len(), 2);
+        assert!(index.bids.iter().any(|b| b.bidder == bid1.bidder));
+        assert!(index.bids.iter().any(|b| b.bidder == bid2.bidder));
     }
 }

@@ -21,17 +21,17 @@ mod mpc_verification;
 pub use mpc_verification::verify_commitment;
 pub mod node;
 pub mod registry;
+pub mod registry_types;
 
 pub use auction_coordinator::AuctionCoordinator;
 pub use auction_logic::AuctionLogic;
 pub use bid_ops::BidOperations;
 pub use bid_storage::BidStorage;
-pub use bidder_registry::{BidderEntry, BidderRegistry, BidderRegistryOps};
+pub use bidder_registry::{BidderEntry, BidderRegistry};
 pub use dht::DHTOperations;
 pub use listing_ops::ListingOperations;
 pub use mpc::MpcTunnelProxy;
 pub use mpc_routes::MpcRouteManager;
 pub use node::VeilidNode;
-pub use registry::{
-    CatalogEntry, MarketRegistry, RegistryEntry, RegistryOperations, SellerCatalog, SellerEntry,
-};
+pub use registry::RegistryOperations;
+pub use registry_types::{CatalogEntry, MarketRegistry, RegistryEntry, SellerCatalog, SellerEntry};

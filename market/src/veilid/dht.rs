@@ -43,9 +43,7 @@ impl DHTOperations {
 
         // Create DHT schema with configured subkeys:
         // - Subkey 0: Primary data (e.g., listing)
-        // - Subkey 1: Bid index (for auctions)
-        // - Subkey 2: Bid announcement registry
-        // - Subkey 3: Bidder registry (for n-party MPC)
+        // - Subkey 1: Bid announcement registry (G-Set CRDT)
         let schema = DHTSchema::dflt(DHT_SUBKEY_COUNT)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
 
@@ -292,97 +290,6 @@ impl DHTOperations {
         }
     }
 
-    /// Get a value from a specific subkey along with its sequence number.
-    pub async fn get_value_at_subkey_with_seq(
-        &self,
-        key: &RecordKey,
-        subkey: u32,
-    ) -> MarketResult<(Option<Vec<u8>>, Option<u32>)> {
-        let routing_context = self.routing_context()?;
-
-        let _ = routing_context
-            .open_dht_record(key.clone(), None)
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for reading: {e}")))?;
-
-        let value_data = routing_context
-            .get_dht_value(key.clone(), subkey, true)
-            .await
-            .map_err(|e| {
-                MarketError::Dht(format!("Failed to get DHT value from subkey {subkey}: {e}"))
-            })?;
-
-        routing_context
-            .close_dht_record(key.clone())
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
-
-        if let Some(data) = value_data {
-            Ok((Some(data.data().to_vec()), Some(data.seq().into())))
-        } else {
-            Ok((None, None))
-        }
-    }
-
-    /// Set a value at a specific subkey with optional CAS via sequence number.
-    pub async fn set_value_at_subkey_cas(
-        &self,
-        record: &OwnedDHTRecord,
-        subkey: u32,
-        value: Vec<u8>,
-        expected_seq: Option<u32>,
-    ) -> MarketResult<()> {
-        const MAX_DHT_VALUE_SIZE: usize = 32 * 1024;
-        if value.len() > MAX_DHT_VALUE_SIZE {
-            return Err(MarketError::Dht(format!(
-                "DHT value size {} exceeds maximum {} bytes",
-                value.len(),
-                MAX_DHT_VALUE_SIZE
-            )));
-        }
-
-        let routing_context = self.routing_context()?;
-
-        let _ = routing_context
-            .open_dht_record(record.key.clone(), Some(record.owner.clone()))
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for writing: {e}")))?;
-
-        // If expected_seq is provided, read current seq and compare
-        if let Some(expected) = expected_seq {
-            let current = routing_context
-                .get_dht_value(record.key.clone(), subkey, true)
-                .await
-                .map_err(|e| {
-                    MarketError::Dht(format!("Failed to read current value for CAS: {e}"))
-                })?;
-            let current_seq: Option<u32> = current.as_ref().map(|d| d.seq().into());
-            if current_seq != Some(expected) {
-                routing_context
-                    .close_dht_record(record.key.clone())
-                    .await
-                    .ok();
-                return Err(MarketError::Dht(format!(
-                    "CAS failed: expected seq {expected}, got {current_seq:?}"
-                )));
-            }
-        }
-
-        routing_context
-            .set_dht_value(record.key.clone(), subkey, value, None)
-            .await
-            .map_err(|e| {
-                MarketError::Dht(format!("Failed to set DHT value at subkey {subkey}: {e}"))
-            })?;
-
-        routing_context
-            .close_dht_record(record.key.clone())
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
-
-        Ok(())
-    }
-
     /// Delete a DHT record
     /// This removes the record from the DHT entirely
     pub async fn delete_dht_record(&self, key: &RecordKey) -> MarketResult<()> {
@@ -419,7 +326,7 @@ impl DHTOperations {
                 MarketError::Dht(format!("Failed to open DHT record for watching: {e}"))
             })?;
 
-        // Watch all subkeys (primary data, bid index, coordination, bidder registry)
+        // Watch all subkeys (primary data, bid announcement registry)
         let subkeys = Some(ValueSubkeyRangeSet::full());
         let expiration = None; // No expiration
         let count = None; // No watch limit
@@ -492,25 +399,6 @@ impl DhtStore for DHTOperations {
         value: Vec<u8>,
     ) -> MarketResult<()> {
         self.set_value_at_subkey(record, subkey, value).await
-    }
-
-    async fn get_subkey_with_seq(
-        &self,
-        key: &RecordKey,
-        subkey: u32,
-    ) -> MarketResult<(Option<Vec<u8>>, Option<u32>)> {
-        self.get_value_at_subkey_with_seq(key, subkey).await
-    }
-
-    async fn set_subkey_cas(
-        &self,
-        record: &Self::OwnedRecord,
-        subkey: u32,
-        value: Vec<u8>,
-        expected_seq: Option<u32>,
-    ) -> MarketResult<()> {
-        self.set_value_at_subkey_cas(record, subkey, value, expected_seq)
-            .await
     }
 
     async fn delete_record(&self, key: &RecordKey) -> MarketResult<()> {

@@ -60,8 +60,6 @@ pub fn make_test_public_key(id: u8) -> veilid_core::PublicKey {
 #[derive(Debug, Clone, Default)]
 struct RecordStorage {
     subkeys: HashMap<u32, Vec<u8>>,
-    /// Sequence numbers for each subkey (incremented on every write).
-    sequences: HashMap<u32, u32>,
     is_watched: bool,
 }
 
@@ -322,86 +320,7 @@ impl DhtStore for MockDht {
             .get_mut(&key_str)
             .ok_or_else(|| MarketError::Dht(format!("MockDht: record {key_str} does not exist")))?;
         record_storage.subkeys.insert(subkey, value);
-        let seq = record_storage.sequences.entry(subkey).or_insert(0);
-        *seq += 1;
         drop(storage);
-
-        Ok(())
-    }
-
-    async fn get_subkey_with_seq(
-        &self,
-        key: &RecordKey,
-        subkey: u32,
-    ) -> MarketResult<(Option<Vec<u8>>, Option<u32>)> {
-        let key_str = key.to_string();
-        if self.should_fail(false, Some(&key_str)).await {
-            return Err(MarketError::Dht("MockDht: simulated read failure".into()));
-        }
-
-        let storage = self.inner.storage.read().await;
-        if let Some(record) = storage.get(&key_str) {
-            let data = record.subkeys.get(&subkey).cloned();
-            let seq = record.sequences.get(&subkey).copied();
-            Ok((data, seq))
-        } else {
-            Ok((None, None))
-        }
-    }
-
-    #[allow(clippy::significant_drop_tightening)]
-    async fn set_subkey_cas(
-        &self,
-        record: &Self::OwnedRecord,
-        subkey: u32,
-        value: Vec<u8>,
-        expected_seq: Option<u32>,
-    ) -> MarketResult<()> {
-        let key_str = record.key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
-            return Err(MarketError::Dht("MockDht: simulated write failure".into()));
-        }
-
-        // Ownership check
-        {
-            let owners = self.inner.record_owners.read().await;
-            if let Some(owner) = owners.get(&key_str) {
-                if owner != &self.node_id {
-                    return Err(MarketError::Dht(format!(
-                        "MockDht: node {} does not own record {}",
-                        self.node_id, key_str
-                    )));
-                }
-            }
-        }
-
-        if subkey >= u32::from(crate::config::DHT_SUBKEY_COUNT) {
-            return Err(MarketError::Dht(format!(
-                "MockDht: subkey {subkey} exceeds max",
-            )));
-        }
-        if value.len() > crate::traits::dht::MAX_DHT_VALUE_SIZE {
-            return Err(MarketError::Dht("MockDht: value too large".into()));
-        }
-
-        let mut storage = self.inner.storage.write().await;
-        let record_storage = storage
-            .get_mut(&key_str)
-            .ok_or_else(|| MarketError::Dht(format!("MockDht: record {key_str} does not exist")))?;
-
-        // CAS check
-        if let Some(expected) = expected_seq {
-            let current_seq = record_storage.sequences.get(&subkey).copied();
-            if current_seq != Some(expected) {
-                return Err(MarketError::Dht(format!(
-                    "CAS failed: expected seq {expected}, got {current_seq:?}"
-                )));
-            }
-        }
-
-        record_storage.subkeys.insert(subkey, value);
-        let seq = record_storage.sequences.entry(subkey).or_insert(0);
-        *seq += 1;
 
         Ok(())
     }
@@ -480,10 +399,9 @@ mod tests {
         let record = dht.create_record().await.unwrap();
         let key = MockDht::record_key(&record);
 
-        // Set values at different subkeys
+        // Set values at different subkeys (0 and 1 are valid with DHT_SUBKEY_COUNT=2)
         dht.set_subkey(&record, 0, b"zero".to_vec()).await.unwrap();
         dht.set_subkey(&record, 1, b"one".to_vec()).await.unwrap();
-        dht.set_subkey(&record, 2, b"two".to_vec()).await.unwrap();
 
         // Read them back
         assert_eq!(
@@ -494,11 +412,8 @@ mod tests {
             dht.get_subkey(&key, 1).await.unwrap(),
             Some(b"one".to_vec())
         );
-        assert_eq!(
-            dht.get_subkey(&key, 2).await.unwrap(),
-            Some(b"two".to_vec())
-        );
-        assert_eq!(dht.get_subkey(&key, 3).await.unwrap(), None);
+        // Subkey 2 is out of range, should return None on get
+        assert_eq!(dht.get_subkey(&key, 2).await.unwrap(), None);
     }
 
     #[tokio::test]

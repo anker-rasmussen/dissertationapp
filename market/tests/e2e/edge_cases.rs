@@ -603,10 +603,6 @@ async fn test_e2e_edge_dht_bid_registry_cross_node_consistency() {
                 bid_key: seller_bid_rec.key.clone(),
                 signing_pubkey: seller_signing,
             };
-            let seller_bid_ops = BidOperations::new(seller_dht.clone());
-            seller_bid_ops
-                .register_bid(&listing_record, seller_bid.clone())
-                .await?;
             seller_dht
                 .set_dht_value(&seller_bid_rec, seller_bid.to_cbor()?)
                 .await?;
@@ -647,7 +643,16 @@ async fn test_e2e_edge_dht_bid_registry_cross_node_consistency() {
                 seller_dht
                     .set_dht_value(&bid_rec_dht, bid.to_cbor()?)
                     .await?;
-                seller_bid_ops.register_bid(&listing_record, bid).await?;
+                // Seller writes bidder's announcement to its own BID_ANNOUNCEMENTS (G-Set)
+                seller
+                    .coordinator
+                    .add_own_bid_to_registry(
+                        &listing_record.key,
+                        bidder_pk.clone(),
+                        bid_rec_dht.key.clone(),
+                        now + 1 + i as u64,
+                    )
+                    .await?;
             }
 
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -742,8 +747,6 @@ async fn test_e2e_edge_seller_only_no_sale() {
             bid_key: bid_rec.key.clone(),
             signing_pubkey: seller_signing,
         };
-        let bid_ops = BidOperations::new(seller_dht.clone());
-        bid_ops.register_bid(&listing_record, bid.clone()).await?;
         seller_dht.set_dht_value(&bid_rec, bid.to_cbor()?).await?;
         seller
             .bid_storage
