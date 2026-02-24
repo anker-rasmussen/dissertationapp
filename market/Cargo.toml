@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "devnet-ctl"
 path = "src/bin/devnet-ctl.rs"
 
+[[bin]]
+name = "market-headless"
+path = "src/bin/market-headless.rs"
+
 [features]
 default = []
 test = []
@@ -26,7 +30,7 @@ dioxus = { version = "0.7.2", features = ["desktop"] }
 veilid-core = { path = "../../veilid/veilid-core", default-features = false, features = ["default-tokio"] }
 
 # Async Runtime
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "io-util", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "io-util", "io-std", "net"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
