@@ -246,6 +246,8 @@ async fn test_e2e_smoke_single_node_diagnostic() {
         bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
         port_offset: 35,
         limit_over_attached: 8,
+        listen_addr: None,
+        public_addr: None,
     };
     eprintln!("   Network key: {}", config.network_key);
     eprintln!("   Bootstrap: {:?}", config.bootstrap_nodes);

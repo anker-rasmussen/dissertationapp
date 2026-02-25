@@ -129,7 +129,15 @@ fn main() -> MarketResult<()> {
                 VeilidNode::new(data_dir, &config)
             } else {
                 info!("Connecting to LOCAL devnet");
-                VeilidNode::new(data_dir, &config).with_devnet(DevNetConfig::default())
+                let devnet_config = DevNetConfig {
+                    network_key: config.network_key.clone(),
+                    bootstrap_nodes: config.bootstrap_nodes.clone(),
+                    port_offset: config.node_offset,
+                    limit_over_attached: config.limit_over_attached,
+                    listen_addr: config.listen_addr.clone(),
+                    public_addr: config.public_addr.clone(),
+                };
+                VeilidNode::new(data_dir, &config).with_devnet(devnet_config)
             };
 
             if let Err(e) = node.start().await {

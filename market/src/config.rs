@@ -59,6 +59,17 @@ pub const DEFAULT_NODE_OFFSET: u16 = 9;
 /// Default bootstrap nodes for devnet.
 pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &["udp://1.2.3.1:5160"];
 
+/// Environment variable to override bootstrap node addresses (comma-separated).
+pub const MARKET_BOOTSTRAP_NODES_ENV: &str = "MARKET_BOOTSTRAP_NODES";
+
+/// Environment variable to override the listen address (e.g., "0.0.0.0").
+/// When set, the market node listens on this address instead of 127.0.0.1.
+pub const MARKET_LISTEN_ADDR_ENV: &str = "MARKET_LISTEN_ADDR";
+
+/// Environment variable to override the public address advertised to peers.
+/// Format: "ip:port" (e.g., "100.64.0.1:5180"). When unset, computed from offset.
+pub const MARKET_PUBLIC_ADDR_ENV: &str = "MARKET_PUBLIC_ADDR";
+
 /// Default update channel capacity for Veilid updates.
 pub const DEFAULT_UPDATE_CHANNEL_CAPACITY: usize = 4096;
 
@@ -194,6 +205,12 @@ pub struct MarketConfig {
     /// Veilid RPC timeout in milliseconds (default: 10_000).
     /// Controls how long app_call waits for a response before timing out.
     pub rpc_timeout_ms: u32,
+    /// Override listen address for Veilid protocol sockets (e.g., "0.0.0.0" for tailnet).
+    /// When `None`, devnet defaults to `127.0.0.1`.
+    pub listen_addr: Option<String>,
+    /// Override public address advertised to peers (e.g., "100.64.0.1:5180").
+    /// When `None`, devnet computes from offset (`1.2.3.X:port`).
+    pub public_addr: Option<String>,
 }
 
 impl MarketConfig {
@@ -224,12 +241,30 @@ impl MarketConfig {
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        let bootstrap_nodes = std::env::var(MARKET_BOOTSTRAP_NODES_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map_or_else(
+                || {
+                    DEFAULT_BOOTSTRAP_NODES
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                },
+                |s| s.split(',').map(|t| t.trim().to_string()).collect(),
+            );
+
+        let listen_addr = std::env::var(MARKET_LISTEN_ADDR_ENV)
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let public_addr = std::env::var(MARKET_PUBLIC_ADDR_ENV)
+            .ok()
+            .filter(|s| !s.is_empty());
+
         Self {
             network_key,
-            bootstrap_nodes: DEFAULT_BOOTSTRAP_NODES
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+            bootstrap_nodes,
             mp_spdz_dir,
             insecure_storage,
             node_offset,
@@ -242,6 +277,8 @@ impl MarketConfig {
             limit_over_attached: 16,
             max_attachment_wait_secs: 180,
             rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
+            listen_addr,
+            public_addr,
         }
     }
 }
@@ -267,6 +304,8 @@ impl Default for MarketConfig {
             limit_over_attached: 16,
             max_attachment_wait_secs: 180,
             rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
+            listen_addr: None,
+            public_addr: None,
         }
     }
 }
@@ -308,11 +347,16 @@ mod tests {
         std::env::remove_var(MP_SPDZ_DIR_ENV);
         std::env::remove_var("MARKET_NODE_OFFSET");
         std::env::remove_var("MARKET_INSECURE_STORAGE");
+        std::env::remove_var(MARKET_BOOTSTRAP_NODES_ENV);
+        std::env::remove_var(MARKET_LISTEN_ADDR_ENV);
+        std::env::remove_var(MARKET_PUBLIC_ADDR_ENV);
 
         let config = MarketConfig::from_env();
         assert_eq!(config.network_key, DEFAULT_NETWORK_KEY);
         assert_eq!(config.node_offset, DEFAULT_NODE_OFFSET);
         assert!(!config.insecure_storage);
+        assert!(config.listen_addr.is_none());
+        assert!(config.public_addr.is_none());
     }
 
     #[test]
@@ -322,18 +366,33 @@ mod tests {
         std::env::set_var(MP_SPDZ_DIR_ENV, "/custom/path");
         std::env::set_var("MARKET_NODE_OFFSET", "15");
         std::env::set_var("MARKET_INSECURE_STORAGE", "true");
+        std::env::set_var(
+            MARKET_BOOTSTRAP_NODES_ENV,
+            "udp://10.0.0.1:5160,udp://10.0.0.2:5160",
+        );
+        std::env::set_var(MARKET_LISTEN_ADDR_ENV, "0.0.0.0");
+        std::env::set_var(MARKET_PUBLIC_ADDR_ENV, "100.64.0.1:5180");
 
         let config = MarketConfig::from_env();
         assert_eq!(config.network_key, "test-network");
         assert_eq!(config.mp_spdz_dir.to_str().unwrap(), "/custom/path");
         assert_eq!(config.node_offset, 15);
         assert!(config.insecure_storage);
+        assert_eq!(
+            config.bootstrap_nodes,
+            vec!["udp://10.0.0.1:5160", "udp://10.0.0.2:5160"]
+        );
+        assert_eq!(config.listen_addr.as_deref(), Some("0.0.0.0"));
+        assert_eq!(config.public_addr.as_deref(), Some("100.64.0.1:5180"));
 
         // Clean up
         std::env::remove_var(MARKET_NETWORK_KEY_ENV);
         std::env::remove_var(MP_SPDZ_DIR_ENV);
         std::env::remove_var("MARKET_NODE_OFFSET");
         std::env::remove_var("MARKET_INSECURE_STORAGE");
+        std::env::remove_var(MARKET_BOOTSTRAP_NODES_ENV);
+        std::env::remove_var(MARKET_LISTEN_ADDR_ENV);
+        std::env::remove_var(MARKET_PUBLIC_ADDR_ENV);
     }
 
     #[test]
