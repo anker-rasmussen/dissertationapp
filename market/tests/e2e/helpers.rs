@@ -290,6 +290,8 @@ impl TestNode {
             bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
             port_offset: offset,
             limit_over_attached: 24,
+            listen_addr: None,
+            public_addr: None,
         };
 
         let mut market_config = market::config::MarketConfig::default();

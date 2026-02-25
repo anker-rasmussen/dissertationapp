@@ -38,6 +38,11 @@ pub struct DevNetConfig {
     pub port_offset: u16,
     /// Routing table limit for over-attached peers.
     pub limit_over_attached: u32,
+    /// Override listen address (e.g., "0.0.0.0" for tailnet). Default: "127.0.0.1".
+    pub listen_addr: Option<String>,
+    /// Override public address advertised to peers (e.g., "100.64.0.1:5180").
+    /// When `None`, computed as `1.2.3.(offset+1):port`.
+    pub public_addr: Option<String>,
 }
 
 impl Default for DevNetConfig {
@@ -60,6 +65,8 @@ impl Default for DevNetConfig {
             bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
             port_offset,
             limit_over_attached: 24,
+            listen_addr: None,
+            public_addr: None,
         }
     }
 }
@@ -140,14 +147,19 @@ impl VeilidNode {
 
         // Build network config based on whether we're connecting to devnet
         let network_config = if let Some(devnet) = &self.devnet_config {
-            // Calculate our port and public address for the ip_spoof layer.
-            // Both market nodes and Docker infrastructure nodes use libipspoof,
-            // so advertising 1.2.3.X as our public address lets all nodes
-            // reach us.  This gives market nodes valid dial info, enabling
-            // safe route allocation for broadcasts.
+            // Calculate our port and addresses.
+            // Two modes:
+            //   1. listen_addr/public_addr overridden → tailnet mode (real IPs, no libipspoof)
+            //   2. Defaults → localhost mode (fake 1.2.3.X IPs, needs libipspoof)
             let port = 5160 + devnet.port_offset;
-            let listen_addr = format!("127.0.0.1:{port}");
-            let public_addr = format!("1.2.3.{}:{port}", devnet.port_offset + 1);
+            let listen_addr = devnet.listen_addr.as_ref().map_or_else(
+                || format!("127.0.0.1:{port}"),
+                |addr| format!("{addr}:{port}"),
+            );
+            let public_addr = devnet
+                .public_addr
+                .clone()
+                .unwrap_or_else(|| format!("1.2.3.{}:{port}", devnet.port_offset + 1));
 
             info!(
                 "Configuring for devnet: key={}, bootstrap={:?}, listen={}, public={}",

@@ -120,6 +120,8 @@ async fn main() {
         bootstrap_nodes: market_config.bootstrap_nodes.clone(),
         port_offset: offset,
         limit_over_attached: market_config.limit_over_attached,
+        listen_addr: market_config.listen_addr.clone(),
+        public_addr: market_config.public_addr.clone(),
     };
     let mut node = VeilidNode::new(dir.clone(), &market_config).with_devnet(devnet_config);
 
