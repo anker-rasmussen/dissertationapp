@@ -3554,6 +3554,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "hex",
+ "libc",
  "market",
  "parking_lot",
  "rand 0.8.5",
