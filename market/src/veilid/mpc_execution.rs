@@ -1,5 +1,6 @@
 //! MP-SPDZ program compilation, process spawning, and output parsing.
 
+use std::os::unix::io::AsRawFd;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{error, info};
@@ -17,7 +18,53 @@ fn resolve_protocol(_num_parties: usize) -> String {
 }
 
 /// Compile the MPC program for the given number of parties using MP-SPDZ's `compile.py`.
+///
+/// Uses a filesystem lock to prevent concurrent compilation — multiple market nodes
+/// on the same machine share the MP-SPDZ directory and would otherwise race on
+/// `Programs/Schedules/auction_n-N.sch`, causing
+/// `Fatal error: Error reading Programs/Schedules/auction_n-N.sch`.
+///
+/// Skips compilation entirely if the schedule file already exists (the auction_n
+/// program is static, so recompilation is unnecessary).
 pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -> MarketResult<()> {
+    let schedule_path = format!("{mp_spdz_dir}/Programs/Schedules/auction_n-{num_parties}.sch");
+
+    // Fast path: already compiled
+    if std::path::Path::new(&schedule_path).exists() {
+        info!(
+            "MPC schedule already compiled for {} parties, skipping compilation",
+            num_parties
+        );
+        return Ok(());
+    }
+
+    // Acquire a filesystem lock so only one process compiles at a time
+    let lock_path = format!("{mp_spdz_dir}/Programs/Schedules/.compile-{num_parties}.lock");
+    let lock_file = std::fs::File::create(&lock_path)
+        .map_err(|e| MarketError::Process(format!("Failed to create compile lock file: {e}")))?;
+
+    let fd = lock_file.as_raw_fd();
+    // Block until we acquire an exclusive lock
+    let lock_result =
+        tokio::task::spawn_blocking(move || unsafe { libc::flock(fd, libc::LOCK_EX) })
+            .await
+            .map_err(|e| MarketError::Process(format!("Lock task panicked: {e}")))?;
+    if lock_result != 0 {
+        return Err(MarketError::Process(format!(
+            "Failed to acquire compile lock: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // Re-check after acquiring lock — another process may have compiled while we waited
+    if std::path::Path::new(&schedule_path).exists() {
+        info!(
+            "MPC schedule compiled by another process for {} parties, skipping",
+            num_parties
+        );
+        return Ok(());
+    }
+
     let protocol_binary = resolve_protocol(num_parties);
     let is_ring = protocol_binary.contains("ring");
 
@@ -34,6 +81,8 @@ pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -
     cmd.arg("auction_n").arg("--").arg(num_parties.to_string());
 
     let compile_output = cmd.output().await;
+
+    // Lock is released when lock_file is dropped (end of function)
 
     match compile_output {
         Ok(result) => {

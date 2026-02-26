@@ -59,6 +59,9 @@ rand = "0.8"  # Random number generation
 # Cancellation
 tokio-util = { version = "0.7", features = ["rt"] }
 
+# System
+libc = "0.2"
+
 # Utilities
 parking_lot = "0.12"
 dirs = "6.0"
