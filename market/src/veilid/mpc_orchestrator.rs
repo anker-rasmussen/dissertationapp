@@ -223,6 +223,7 @@ impl MpcOrchestrator {
     /// routes, run readiness barrier, compile MP-SPDZ program, spawn tunnel proxy,
     /// execute `mascot-party.x`, parse output, and (for seller) initiate winner
     /// verification. Sets `needs_route_refresh` on completion.
+    #[tracing::instrument(skip_all, fields(listing_key = %listing_key, listing_title, session_id))]
     pub async fn handle_auction_end(
         &self,
         listing_key: &RecordKey,
@@ -232,7 +233,11 @@ impl MpcOrchestrator {
         seller_pubkey: &PublicKey,
         broadcast_route: Option<&(RouteId, Vec<u8>)>,
     ) -> MarketResult<()> {
-        info!("Handling auction end for listing '{}'", listing_title);
+        // Record a short session ID in the span for correlating all log lines in this MPC run.
+        let session_id = hex::encode(rand::random::<[u8; 4]>());
+        tracing::Span::current().record("session_id", session_id.as_str());
+
+        info!(listing_title, "Handling auction end");
 
         if bid_index.bids.is_empty() {
             // We only reach here when we know we bid on this listing
@@ -247,7 +252,10 @@ impl MpcOrchestrator {
             ));
         }
 
-        info!("Discovered {} bids for auction", bid_index.bids.len());
+        info!(
+            bid_count = bid_index.bids.len(),
+            "Discovered bids for auction"
+        );
 
         // Sort bidders: seller = party 0, remaining sorted by pubkey
         let sorted_bidders = bid_index.sorted_bidders(seller_pubkey);
@@ -281,6 +289,13 @@ impl MpcOrchestrator {
                     sorted_bidders.len()
                 );
 
+                // Build bidder → bid_record_key mapping for DHT-backed route exchange.
+                let bid_record_keys: HashMap<PublicKey, RecordKey> = bid_index
+                    .bids
+                    .iter()
+                    .map(|b| (b.bidder.clone(), b.bid_key.clone()))
+                    .collect();
+
                 let result = async {
                     // Exchange routes + readiness barrier with other parties
                     let routes = self
@@ -290,6 +305,7 @@ impl MpcOrchestrator {
                             &sorted_bidders,
                             peer_route_blobs,
                             broadcast_route,
+                            &bid_record_keys,
                         )
                         .await?;
 
@@ -334,6 +350,7 @@ impl MpcOrchestrator {
 
     /// Exchange MPC routes with all other bidders, then wait for all parties
     /// to signal readiness before returning.
+    #[tracing::instrument(skip_all, fields(listing_key = %listing_key))]
     pub async fn exchange_mpc_routes(
         &self,
         listing_key: &RecordKey,
@@ -341,12 +358,9 @@ impl MpcOrchestrator {
         bidders: &[PublicKey],
         peer_route_blobs: &[(String, Vec<u8>)],
         broadcast_route: Option<&(RouteId, Vec<u8>)>,
+        bid_record_keys: &HashMap<PublicKey, RecordKey>,
     ) -> MarketResult<HashMap<usize, RouteId>> {
-        info!(
-            "Exchanging MPC routes with {} parties for listing {}",
-            bidders.len(),
-            listing_key
-        );
+        info!(num_parties = bidders.len(), "Exchanging MPC routes");
 
         // Get existing route manager or create a new one
         let key = listing_key.clone();
@@ -410,6 +424,10 @@ impl MpcOrchestrator {
                 .await?;
         }
 
+        // DHT-backed route exchange: write own route blob to bid record subkey 1.
+        self.write_own_route_to_dht(&route_manager, listing_key, bid_record_keys)
+            .await;
+
         // Phase 1 — Route collection
         self.collect_party_routes(
             &route_manager,
@@ -417,6 +435,7 @@ impl MpcOrchestrator {
             my_party_id,
             bidders,
             peer_route_blobs,
+            bid_record_keys,
         )
         .await?;
 
@@ -437,8 +456,37 @@ impl MpcOrchestrator {
             my_party_id,
             bidders,
             peer_route_blobs,
+            bid_record_keys,
         )
         .await
+    }
+
+    /// Write own MPC route blob to bid record subkey 1 (DHT fallback for route exchange).
+    async fn write_own_route_to_dht(
+        &self,
+        route_manager: &Arc<Mutex<MpcRouteManager>>,
+        listing_key: &RecordKey,
+        bid_record_keys: &HashMap<PublicKey, RecordKey>,
+    ) {
+        let Some(bid_key) = bid_record_keys.get(&self.my_node_id) else {
+            return;
+        };
+        let Some(bid_owner) = self.bid_storage.get_bid_owner(listing_key).await else {
+            return;
+        };
+        let blob = route_manager
+            .lock()
+            .await
+            .get_my_route_blob()
+            .map(|rb| rb.blob.clone());
+        let Some(blob_bytes) = blob else {
+            return;
+        };
+        match MpcRouteManager::write_route_to_dht(&self.dht, bid_key, &bid_owner, &blob_bytes).await
+        {
+            Ok(()) => info!("Wrote MPC route blob to DHT bid record {}", bid_key),
+            Err(e) => warn!("Failed to write MPC route to DHT (non-fatal): {}", e),
+        }
     }
 
     /// Execute the MPC auction computation
@@ -569,6 +617,7 @@ impl MpcOrchestrator {
         my_party_id: usize,
         bidders: &[PublicKey],
         peer_route_blobs: &[(String, Vec<u8>)],
+        bid_record_keys: &HashMap<PublicKey, RecordKey>,
     ) -> MarketResult<()> {
         // The seller (party 0) may take extra time to fetch bid records
         // from DHT before creating its MPC route, so allow initial delay.
@@ -617,6 +666,36 @@ impl MpcOrchestrator {
                         &self.signing_key,
                     )
                     .await?;
+            }
+
+            // DHT fallback: every 2nd tick, read missing parties' bid record
+            // subkey 1 for route blobs that app_message failed to deliver.
+            if rebroadcast_counter.is_multiple_of(2) {
+                let mgr = route_manager.lock().await;
+                for bidder in bidders {
+                    if !mgr.has_route_for(bidder).await {
+                        if let Some(bid_key) = bid_record_keys.get(bidder) {
+                            match MpcRouteManager::read_route_from_dht(&self.dht, bid_key).await {
+                                Ok(Some(blob)) => {
+                                    if let Err(e) = mgr
+                                        .register_route_announcement_from_blob(
+                                            bidder.clone(),
+                                            &blob,
+                                        )
+                                        .await
+                                    {
+                                        debug!("DHT route import failed for {}: {}", bidder, e);
+                                    } else {
+                                        info!("Got route for {} via DHT fallback", bidder);
+                                    }
+                                }
+                                Ok(None) => {} // Not yet published
+                                Err(e) => debug!("DHT route read failed for {}: {}", bidder, e),
+                            }
+                        }
+                    }
+                }
+                drop(mgr);
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(
@@ -756,6 +835,7 @@ impl MpcOrchestrator {
         my_party_id: usize,
         bidders: &[PublicKey],
         peer_route_blobs: &[(String, Vec<u8>)],
+        bid_record_keys: &HashMap<PublicKey, RecordKey>,
     ) -> MarketResult<HashMap<usize, RouteId>> {
         info!("Post-barrier route refresh: creating fresh route");
         {
@@ -776,6 +856,26 @@ impl MpcOrchestrator {
                     )
                     .await;
             }
+
+            // Update DHT with the fresh post-barrier route blob so peers
+            // using the DHT fallback get the current route, not the stale one.
+            if let Some(bid_key) = bid_record_keys.get(&self.my_node_id) {
+                if let Some(bid_owner) = self.bid_storage.get_bid_owner(listing_key).await {
+                    if let Some(blob) = mgr.get_my_route_blob().map(|rb| rb.blob.clone()) {
+                        if let Err(e) = MpcRouteManager::write_route_to_dht(
+                            &self.dht, bid_key, &bid_owner, &blob,
+                        )
+                        .await
+                        {
+                            warn!(
+                                "Failed to update DHT with post-barrier route (non-fatal): {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             drop(mgr);
         }
 

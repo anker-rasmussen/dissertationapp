@@ -90,6 +90,34 @@ pub(crate) const fn validate_timestamp(message_timestamp: u64, current_time: u64
     message_timestamp.abs_diff(current_time) <= MAX_TIMESTAMP_DRIFT_SECS
 }
 
+/// MPC route blob stored in bid record subkey 1 for DHT-backed route exchange.
+///
+/// When `app_message`-based route announcements fail (stale broadcast routes),
+/// parties fall back to reading each other's MPC route blobs from DHT.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpcRouteEntry {
+    /// Veilid private route blob bytes.
+    pub route_blob: Vec<u8>,
+    /// Unix timestamp when the route was published.
+    pub timestamp: u64,
+}
+
+impl MpcRouteEntry {
+    /// Serialize to CBOR bytes for DHT storage.
+    pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(self, &mut buf).map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize MpcRouteEntry: {e}"))
+        })?;
+        Ok(buf)
+    }
+
+    /// Deserialize from CBOR bytes.
+    pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
+        crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
+    }
+}
+
 /// Registry of bid announcements stored in DHT (state-based G-Set CRDT).
 ///
 /// Entries are deduped by bidder pubkey on add; `merge()` provides

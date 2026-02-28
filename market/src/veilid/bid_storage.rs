@@ -1,14 +1,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use veilid_core::RecordKey;
+use veilid_core::{KeyPair, RecordKey};
 
-/// Per-listing bid data: optional (value, nonce) and optional DHT record key.
+/// Per-listing bid data: optional (value, nonce), optional DHT record key,
+/// and optional owner keypair for writing to the bid DHT record later.
 /// The value/nonce are `None` until the actual bid is placed via `store_bid()`.
 #[derive(Clone)]
 struct BidEntry {
     value: Option<(u64, [u8; 32])>,
     bid_key: Option<RecordKey>,
+    /// Owner keypair for the bid DHT record, retained so we can write
+    /// MPC route blobs to subkey 1 during MPC route exchange.
+    owner_keypair: Option<KeyPair>,
 }
 
 type BidMap = Arc<RwLock<HashMap<RecordKey, BidEntry>>>;
@@ -36,6 +40,7 @@ impl BidStorage {
             .or_insert_with(|| BidEntry {
                 value: None,
                 bid_key: None,
+                owner_keypair: None,
             })
             .value = Some((value, nonce));
     }
@@ -49,6 +54,7 @@ impl BidStorage {
             .or_insert_with(|| BidEntry {
                 value: None,
                 bid_key: None,
+                owner_keypair: None,
             })
             .bid_key = Some(bid_key.clone());
     }
@@ -64,6 +70,29 @@ impl BidStorage {
     pub async fn get_bid_key(&self, listing_key: &RecordKey) -> Option<RecordKey> {
         let bids = self.bids.read().await;
         bids.get(listing_key).and_then(|e| e.bid_key.clone())
+    }
+
+    /// Store the owner keypair for a bid DHT record.
+    ///
+    /// Retained so we can write MPC route blobs to the bid record's subkey 1
+    /// during DHT-backed MPC route exchange.
+    pub async fn store_bid_owner(&self, listing_key: &RecordKey, keypair: KeyPair) {
+        self.bids
+            .write()
+            .await
+            .entry(listing_key.clone())
+            .or_insert_with(|| BidEntry {
+                value: None,
+                bid_key: None,
+                owner_keypair: None,
+            })
+            .owner_keypair = Some(keypair);
+    }
+
+    /// Retrieve the stored owner keypair for a bid DHT record.
+    pub async fn get_bid_owner(&self, listing_key: &RecordKey) -> Option<KeyPair> {
+        let bids = self.bids.read().await;
+        bids.get(listing_key).and_then(|e| e.owner_keypair.clone())
     }
 
     /// Check if we have a bid value for this listing.

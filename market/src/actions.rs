@@ -216,6 +216,13 @@ pub async fn submit_bid(
     };
     let bid_record_own = bid_ops.publish_bid(bid_record.clone()).await?;
 
+    // Retain the owner keypair so we can write MPC route blobs to this
+    // bid record's subkey 1 during DHT-backed route exchange.
+    state
+        .bid_storage
+        .store_bid_owner(&listing_record_key, bid_record_own.owner.clone())
+        .await;
+
     // Update bid_key with the actual DHT record key
     bid_record.bid_key = bid_record_own.key.clone();
     // Re-write finalized BidRecord so persisted data carries the real bid_key.
