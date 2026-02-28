@@ -267,11 +267,7 @@ impl AuctionCoordinator {
         let max_wait = std::time::Duration::from_secs(config::PEER_ROUTE_WAIT_SECS);
         let peer_route_blobs = loop {
             let blobs = {
-                let ops = self.registry_ops.lock().await;
-                // Note: tokio::sync::Mutex held across .await for DHT read in retry loop.
-                // This is safe with tokio::sync::Mutex; lock scope is bounded by a single
-                // registry fetch. The loop is for route discovery readiness, not a lock
-                // contention issue.
+                let mut ops = self.registry_ops.lock().await;
                 ops.fetch_route_blobs(&self.my_node_id.to_string())
                     .await
                     .unwrap_or_default()

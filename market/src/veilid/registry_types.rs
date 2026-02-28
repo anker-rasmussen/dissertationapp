@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::now_unix;
 use crate::traits::TimeProvider;
 
 // ── Data structures ──────────────────────────────────────────────────
@@ -72,8 +71,42 @@ impl MarketRegistry {
         self.version += 1;
     }
 
+    /// G-Set merge: union sellers and routes from `other` into `self`.
+    ///
+    /// Pure add-only, dedup by key field, commutative + associative + idempotent.
+    /// Does not use `version` — version is only bumped by individual `add_*` calls
+    /// for DHT conflict detection.
+    pub fn merge(&mut self, other: &Self) {
+        for seller in &other.sellers {
+            if self.sellers.len() >= 200 {
+                break;
+            }
+            if !self
+                .sellers
+                .iter()
+                .any(|s| s.seller_pubkey == seller.seller_pubkey)
+            {
+                self.sellers.push(seller.clone());
+            }
+        }
+        for route in &other.routes {
+            if self.routes.len() >= 200 {
+                break;
+            }
+            if let Some(existing) = self.routes.iter_mut().find(|r| r.node_id == route.node_id) {
+                // Keep the fresher route
+                if route.registered_at > existing.registered_at {
+                    existing.route_blob.clone_from(&route.route_blob);
+                    existing.registered_at = route.registered_at;
+                }
+            } else {
+                self.routes.push(route.clone());
+            }
+        }
+    }
+
     /// Add a seller, deduplicating by pubkey.
-    /// Caps the registry at 500 sellers to prevent unbounded growth.
+    /// Caps the registry at 200 sellers to prevent unbounded growth.
     pub fn add_seller(&mut self, entry: SellerEntry) {
         if self.sellers.len() >= 200 {
             return; // Cap at 200 sellers (must fit in 32KB DHT value)
@@ -136,18 +169,6 @@ impl SellerCatalog {
             .any(|e| e.listing_key == entry.listing_key)
         {
             self.listings.push(entry);
-            self.version += 1;
-        }
-    }
-
-    /// Remove expired listings (auction ended more than 1 hour ago).
-    pub fn cleanup_expired(&mut self) {
-        let now = now_unix();
-        let one_hour_ago = now.saturating_sub(3600);
-
-        let before = self.listings.len();
-        self.listings.retain(|e| e.auction_end > one_hour_ago);
-        if self.listings.len() != before {
             self.version += 1;
         }
     }

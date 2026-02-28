@@ -73,12 +73,7 @@ impl AuctionCoordinator {
         // Try the master registry first (populated by SellerRegistration broadcasts).
         let seller_pubkey = listing.seller.to_string();
         let registry_result = {
-            let ops = self.registry_ops.lock().await;
-            // Note: tokio::sync::Mutex is held across .await here for a single DHT read.
-            // This is safe (tokio::sync::Mutex is designed for async contexts) and the
-            // lock scope is bounded by registry fetch latency (~ms). For current throughput
-            // requirements, this is acceptable. Restructuring would require exposing
-            // RegistryOperations internals or duplicating fetch_registry logic.
+            let mut ops = self.registry_ops.lock().await;
             ops.get_seller_signing_pubkey(&seller_pubkey).await?
         };
         if registry_result.is_some() {

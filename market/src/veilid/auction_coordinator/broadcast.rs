@@ -100,11 +100,7 @@ impl AuctionCoordinator {
     /// send to `Target::RouteId`, and release the imported route afterwards.
     async fn broadcast_message(&self, data: &[u8]) -> MarketResult<usize> {
         let route_blobs = {
-            let ops = self.registry_ops.lock().await;
-            // Note: tokio::sync::Mutex is held across .await for a single DHT read
-            // (fetch_registry). This is safe with tokio::sync::Mutex and the lock
-            // scope is bounded by registry fetch latency. Acceptable for current
-            // throughput requirements.
+            let mut ops = self.registry_ops.lock().await;
             ops.fetch_route_blobs(&self.my_node_id.to_string()).await?
         };
 
