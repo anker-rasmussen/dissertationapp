@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use tracing::{debug, info};
-use veilid_core::{
-    DHTRecordDescriptor, DHTSchema, KeyPair, RecordKey, VeilidAPI, CRYPTO_KIND_VLD0,
-};
+use veilid_core::{DHTSchema, KeyPair, RecordKey, VeilidAPI, CRYPTO_KIND_VLD0};
 
 use crate::config::DHT_SUBKEY_COUNT;
 use crate::error::{MarketError, MarketResult};
 use crate::traits::DhtStore;
+
+/// Veilid DHT value size limit (32 KB).
+const MAX_DHT_VALUE_SIZE: usize = 32 * 1024;
 
 /// DHT operations wrapper for Veilid.
 ///
@@ -37,6 +38,7 @@ impl DHTOperations {
 
     /// Create a new DHT record with the default crypto system (VLD0)
     /// Returns the OwnedDHTRecord that includes the owner keypair for write access
+    #[tracing::instrument(skip_all)]
     pub async fn create_dht_record(&self) -> MarketResult<OwnedDHTRecord> {
         let routing_context = self.routing_context()?;
 
@@ -58,23 +60,9 @@ impl DHTOperations {
             MarketError::Dht("Record was created but owner keypair is missing".into())
         })?;
 
-        info!("Created DHT record with key: {}", key);
+        info!(key = %key, "Created DHT record");
 
         Ok(OwnedDHTRecord { key, owner })
-    }
-
-    /// Open an existing DHT record for read/write access
-    /// Returns the record descriptor if successful
-    pub async fn open_record(&self, key: &RecordKey) -> MarketResult<DHTRecordDescriptor> {
-        let routing_context = self.routing_context()?;
-
-        let descriptor = routing_context
-            .open_dht_record(key.clone(), None)
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to open DHT record: {e}")))?;
-
-        debug!("Opened DHT record: {}", key);
-        Ok(descriptor)
     }
 
     /// Set a value at a specific subkey (requires write access)
@@ -84,7 +72,6 @@ impl DHTOperations {
         subkey: u32,
         value: Vec<u8>,
     ) -> MarketResult<()> {
-        const MAX_DHT_VALUE_SIZE: usize = 32 * 1024; // 32KB Veilid limit
         if value.len() > MAX_DHT_VALUE_SIZE {
             return Err(MarketError::Dht(format!(
                 "DHT value size {} exceeds maximum {} bytes",
@@ -101,26 +88,22 @@ impl DHTOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for writing: {e}")))?;
 
-        // Set the value at specified subkey
-        routing_context
+        // Set the value at specified subkey — capture result so we always close
+        let write_result = routing_context
             .set_dht_value(record.key.clone(), subkey, value.clone(), None)
             .await
             .map_err(|e| {
                 MarketError::Dht(format!("Failed to set DHT value at subkey {subkey}: {e}"))
-            })?;
+            });
 
-        info!(
-            "Set DHT value for key {}, {} bytes at subkey {}",
-            record.key,
-            value.len(),
-            subkey
-        );
-
-        // Close the record after writing
+        // Always close, even on write failure
         routing_context
             .close_dht_record(record.key.clone())
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
+
+        write_result?;
+        info!(key = %record.key, bytes = value.len(), subkey, "Set DHT value");
 
         Ok(())
     }
@@ -129,14 +112,13 @@ impl DHTOperations {
     /// reads the current value (local cache, no network refresh — we are the
     /// writer so our local copy is authoritative), applies a user-supplied
     /// transform, and writes the result back before closing.
+    #[tracing::instrument(skip_all, fields(key = %record.key, subkey))]
     pub async fn read_modify_write_subkey(
         &self,
         record: &OwnedDHTRecord,
         subkey: u32,
         transform: impl FnOnce(Option<Vec<u8>>) -> MarketResult<Vec<u8>>,
     ) -> MarketResult<()> {
-        const MAX_DHT_VALUE_SIZE: usize = 32 * 1024;
-
         let routing_context = self.routing_context()?;
 
         // Open with owner keypair so both read and write see the same local state.
@@ -181,18 +163,19 @@ impl DHTOperations {
             )));
         }
 
-        routing_context
+        let write_result = routing_context
             .set_dht_value(record.key.clone(), subkey, new_value, None)
             .await
             .map_err(|e| {
                 MarketError::Dht(format!("Failed to write subkey {subkey} during RMW: {e}"))
-            })?;
+            });
 
         routing_context
             .close_dht_record(record.key.clone())
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to close DHT record after RMW: {e}")))?;
 
+        write_result?;
         Ok(())
     }
 
@@ -213,22 +196,24 @@ impl DHTOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for reading: {e}")))?;
 
-        // Get the value at specified subkey
-        let value_data = routing_context
+        // Get the value at specified subkey — capture result so we always close
+        let read_result = routing_context
             .get_dht_value(key.clone(), subkey, force_refresh)
             .await
             .map_err(|e| {
                 MarketError::Dht(format!("Failed to get DHT value from subkey {subkey}: {e}"))
-            })?;
+            });
 
-        // Close the record after reading
+        // Always close, even on read failure
         routing_context
             .close_dht_record(key.clone())
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
 
+        let value_data = read_result?;
+
         if let Some(data) = value_data {
-            info!(
+            debug!(
                 "Retrieved DHT value for key {}: {} bytes from subkey {}",
                 key,
                 data.data().len(),
