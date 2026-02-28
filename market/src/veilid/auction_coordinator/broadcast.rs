@@ -95,9 +95,8 @@ impl AuctionCoordinator {
     }
 
     /// Broadcast a message to all known peers via private routes stored in the
-    /// master registry.  Without the `footgun` feature Veilid rejects
-    /// `Target::NodeId` for `app_message`, so we import each peer's route blob,
-    /// send to `Target::RouteId`, and release the imported route afterwards.
+    /// master registry.  Uses `app_call` for confirmed delivery — `app_message`
+    /// is fire-and-forget and silently drops data on stale routes.
     async fn broadcast_message(&self, data: &[u8]) -> MarketResult<usize> {
         let route_blobs = {
             let mut ops = self.registry_ops.lock().await;
@@ -116,10 +115,10 @@ impl AuctionCoordinator {
             match self.api.import_remote_private_route(blob.clone()) {
                 Ok(route_id) => {
                     match routing_context
-                        .app_message(Target::RouteId(route_id.clone()), data.to_vec())
+                        .app_call(Target::RouteId(route_id.clone()), data.to_vec())
                         .await
                     {
-                        Ok(()) => {
+                        Ok(_response) => {
                             sent_count += 1;
                         }
                         Err(e) => {

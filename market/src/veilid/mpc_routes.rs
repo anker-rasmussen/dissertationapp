@@ -118,8 +118,9 @@ impl MpcRouteManager {
         self.my_route_blob = Some(RouteBlob { route_id, blob });
     }
 
-    /// Import each peer's route blob, send `data` via `app_message`, then
-    /// release the imported route.  Returns the number of successful sends.
+    /// Import each peer's route blob, send `data` via `app_call` for confirmed
+    /// delivery, then release the imported route.  Returns the number of
+    /// successful sends.
     async fn broadcast_via_peer_routes(
         &self,
         data: &[u8],
@@ -141,10 +142,10 @@ impl MpcRouteManager {
             match self.api.import_remote_private_route(blob.clone()) {
                 Ok(imported_route) => {
                     match routing_context
-                        .app_message(Target::RouteId(imported_route.clone()), data.to_vec())
+                        .app_call(Target::RouteId(imported_route.clone()), data.to_vec())
                         .await
                     {
-                        Ok(()) => {
+                        Ok(_response) => {
                             debug!("Sent {} to peer {}", label, node_id);
                             sent_count += 1;
                         }
