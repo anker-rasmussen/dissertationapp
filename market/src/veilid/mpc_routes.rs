@@ -4,12 +4,13 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use veilid_core::{
-    PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, SafetySpec, Sequencing, Stability,
-    Target, VeilidAPI, CRYPTO_KIND_VLD0,
+    KeyPair, PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, SafetySpec, Sequencing,
+    Stability, Target, VeilidAPI, CRYPTO_KIND_VLD0,
 };
 
-use super::bid_announcement::AuctionMessage;
-use crate::config::now_unix;
+use super::bid_announcement::{AuctionMessage, MpcRouteEntry};
+use super::dht::{DHTOperations, OwnedDHTRecord};
+use crate::config::{bid_subkeys, now_unix};
 use crate::error::{MarketError, MarketResult};
 
 /// Manages Veilid private route lifecycle for MPC parties.
@@ -265,11 +266,19 @@ impl MpcRouteManager {
                 .collect()
         };
         let mut count = 0;
-        for (_pubkey, blob) in &snapshot {
-            if self.api.import_remote_private_route(blob.clone()).is_ok() {
-                count += 1;
+        let mut routes = self.received_routes.lock().await;
+        for (pubkey, blob) in &snapshot {
+            match self.api.import_remote_private_route(blob.clone()) {
+                Ok(new_route) => {
+                    routes.insert(pubkey.clone(), new_route);
+                    count += 1;
+                }
+                Err(e) => {
+                    debug!("Failed to refresh route for party {}: {}", pubkey, e);
+                }
             }
         }
+        drop(routes);
         if count > 0 {
             info!("Refreshed {} route handles", count);
         }
@@ -487,7 +496,7 @@ impl MpcRouteManager {
             return;
         }
 
-        let routes = self.received_routes.lock().await;
+        let mut routes = self.received_routes.lock().await;
         let blobs = self.received_blobs.lock().await;
 
         for dead_route in dead {
@@ -509,6 +518,7 @@ impl MpcRouteManager {
                             "Re-imported dead remote route for party {}: {}",
                             pubkey, new_route
                         );
+                        routes.insert(pubkey, new_route);
                     }
                     Err(e) => {
                         warn!(
@@ -518,6 +528,77 @@ impl MpcRouteManager {
                     }
                 }
             }
+        }
+    }
+
+    /// Check whether we already have a route for the given party.
+    pub async fn has_route_for(&self, pubkey: &PublicKey) -> bool {
+        self.received_routes.lock().await.contains_key(pubkey)
+    }
+
+    /// Register a route announcement from raw blob bytes (DHT fallback path).
+    ///
+    /// Same as `register_route_announcement` but takes raw bytes instead of
+    /// a `RouteBlob`. Constructs a `RouteBlob` by importing to get the `RouteId`.
+    pub async fn register_route_announcement_from_blob(
+        &self,
+        party_pubkey: PublicKey,
+        blob_bytes: &[u8],
+    ) -> MarketResult<bool> {
+        let imported_route = self
+            .api
+            .import_remote_private_route(blob_bytes.to_vec())
+            .map_err(|e| MarketError::Network(format!("Failed to import DHT route blob: {e}")))?;
+
+        let route_blob = RouteBlob {
+            route_id: imported_route.clone(),
+            blob: blob_bytes.to_vec(),
+        };
+
+        self.register_route_announcement(party_pubkey, route_blob)
+            .await
+    }
+
+    /// Write this party's MPC route blob to its bid record subkey 1.
+    ///
+    /// This provides a DHT-backed fallback for route exchange: if `app_message`
+    /// announcements fail (stale broadcast routes), peers can read the route
+    /// blob from DHT instead.
+    pub async fn write_route_to_dht(
+        dht: &DHTOperations,
+        bid_record_key: &RecordKey,
+        bid_owner: &KeyPair,
+        route_blob: &[u8],
+    ) -> MarketResult<()> {
+        let record = OwnedDHTRecord {
+            key: bid_record_key.clone(),
+            owner: bid_owner.clone(),
+        };
+        let entry = MpcRouteEntry {
+            route_blob: route_blob.to_vec(),
+            timestamp: now_unix(),
+        };
+        let data = entry.to_bytes()?;
+        dht.set_value_at_subkey(&record, bid_subkeys::MPC_ROUTE, data)
+            .await
+    }
+
+    /// Read a party's MPC route blob from their bid record subkey 1.
+    ///
+    /// Returns `None` if the party hasn't published a route blob yet.
+    pub async fn read_route_from_dht(
+        dht: &DHTOperations,
+        bid_record_key: &RecordKey,
+    ) -> MarketResult<Option<Vec<u8>>> {
+        match dht
+            .get_value_at_subkey(bid_record_key, bid_subkeys::MPC_ROUTE, true)
+            .await?
+        {
+            Some(data) => {
+                let entry = MpcRouteEntry::from_bytes(&data)?;
+                Ok(Some(entry.route_blob))
+            }
+            None => Ok(None),
         }
     }
 

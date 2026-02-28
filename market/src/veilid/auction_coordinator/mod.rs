@@ -6,7 +6,7 @@
 //! to that layer.
 
 use ed25519_dalek::SigningKey;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -69,6 +69,9 @@ type CoordinatorLogic = AuctionLogic<DHTOperations, SystemTimeProvider>;
 /// 3. `owned_listings`
 /// 4. `pending_bid_announcements`
 /// 5. `my_route_blob`
+/// 6. `broadcast_route_id`
+/// 7. `buffered_mpc_signals`
+/// 8. `bid_registry_lock`
 ///
 /// Never hold any of these locks across an `.await` point if possible.
 /// If an async call is needed under lock, re-acquire the lock after awaiting.
@@ -96,7 +99,7 @@ pub struct AuctionCoordinator {
     /// RouteId of the broadcast route (used as MPC route for keepalive reuse).
     pub(super) broadcast_route_id: Mutex<Option<RouteId>>,
     /// MPC signals received before the listing was watched (no route manager yet).
-    pub(super) buffered_mpc_signals: Mutex<HashMap<RecordKey, Vec<BufferedMpcSignal>>>,
+    pub(super) buffered_mpc_signals: Mutex<HashMap<RecordKey, VecDeque<BufferedMpcSignal>>>,
     /// Serialises writes to BID_ANNOUNCEMENTS for any listing we own.
     ///
     /// `read_modify_write_subkey` is atomic per-call, but two concurrent
@@ -178,6 +181,7 @@ impl AuctionCoordinator {
     /// All messages must be wrapped in a `SignedEnvelope`. The signature is
     /// verified first; then the payload is dispatched as either an
     /// `AuctionMessage` or an MPC tunnel message.
+    #[tracing::instrument(skip_all)]
     pub async fn process_app_message(&self, message: Vec<u8>) -> MarketResult<()> {
         // Step 1: verify the signed envelope
         let (payload, signer) =
@@ -306,12 +310,13 @@ impl AuctionCoordinator {
         let mut buf = self.buffered_mpc_signals.lock().await;
         let entry = buf.entry(listing_key).or_default();
         if entry.len() >= MPC_SIGNAL_BUFFER_CAP {
-            entry.remove(0);
+            entry.pop_front();
         }
-        entry.push(signal);
+        entry.push_back(signal);
     }
 
     /// Watch a listing for deadline (if we're a bidder)
+    #[tracing::instrument(skip_all, fields(listing_key = %listing.key))]
     pub async fn watch_listing(&self, listing: PublicListing) {
         let key = listing.key.clone();
         self.logic.watch_listing(listing).await;
@@ -388,7 +393,7 @@ impl AuctionCoordinator {
         self.dht
             .set_value_at_subkey(&record, subkeys::BID_ANNOUNCEMENTS, data)
             .await?;
-        info!("Initialized bid registry for owned listing: {}", key);
+        info!(listing_key = %key, "Initialized bid registry for owned listing");
 
         let mut owned = self.owned_listings.lock().await;
         owned.insert(key.clone(), record.clone());
@@ -397,7 +402,7 @@ impl AuctionCoordinator {
         let listing_ops = ListingOperations::new(self.dht.clone());
         if let Ok(Some(listing)) = listing_ops.get_listing(&key).await {
             self.watch_listing(listing).await;
-            info!("Seller now watching their own listing: {}", key);
+            info!(listing_key = %key, "Seller now watching their own listing");
         }
 
         Ok(())
@@ -548,8 +553,41 @@ impl AuctionCoordinator {
 
     /// Fetch all listings via two-hop discovery. Delegates to `registry_ops`.
     pub async fn fetch_all_listings(&self) -> MarketResult<Vec<RegistryEntry>> {
-        let ops = self.registry_ops.lock().await;
+        let mut ops = self.registry_ops.lock().await;
         ops.fetch_all_listings().await
+    }
+
+    /// Release owned DHT records and broadcast routes on shutdown.
+    pub async fn shutdown(&self) {
+        info!("AuctionCoordinator shutting down — releasing resources");
+
+        // Release broadcast route
+        let route_id = self.broadcast_route_id.lock().await.take();
+        if let Some(route_id) = route_id {
+            if let Err(e) = self.api.release_private_route(route_id) {
+                warn!("Failed to release broadcast route: {}", e);
+            } else {
+                info!("Released broadcast route");
+            }
+        }
+
+        // Delete owned listing DHT records
+        let records: Vec<_> = {
+            let owned = self.owned_listings.lock().await;
+            owned.keys().cloned().collect()
+        };
+        for key in &records {
+            if let Err(e) = self.dht.delete_dht_record(key).await {
+                warn!(listing_key = %key, "Failed to delete owned listing record: {}", e);
+            } else {
+                info!(listing_key = %key, "Deleted owned listing record");
+            }
+        }
+
+        info!(
+            "AuctionCoordinator shutdown complete ({} records cleaned)",
+            records.len()
+        );
     }
 
     /// Get a reference to the Veilid API (needed for `app_call_reply` in main).
@@ -599,6 +637,7 @@ impl AuctionCoordinator {
     /// Handles the full lifecycle including `app_call_reply` for AppCall.
     /// Both `main.rs` and `market-headless` call this to avoid duplicating
     /// the dispatch switch.
+    #[tracing::instrument(skip_all)]
     pub async fn dispatch_veilid_update(&self, update: veilid_core::VeilidUpdate) {
         match update {
             veilid_core::VeilidUpdate::AppMessage(msg) => {
@@ -616,7 +655,9 @@ impl AuctionCoordinator {
                     }
                     Err(e) => {
                         tracing::error!("AppCall error: {}", e);
-                        let _ = self.api.app_call_reply(call_id, vec![0x00]).await;
+                        if let Err(reply_err) = self.api.app_call_reply(call_id, vec![0x00]).await {
+                            warn!("app_call_reply (NACK) failed: {}", reply_err);
+                        }
                     }
                 }
             }
