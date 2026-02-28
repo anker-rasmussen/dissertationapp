@@ -49,7 +49,7 @@ impl SharedBidRegistry {
     }
 
     /// Calculate the winner based on highest bid.
-    /// Ties are broken by timestamp (earliest wins).
+    /// Ties are broken by timestamp (earliest wins), then by lowest party_id.
     pub async fn calculate_winner(&self) -> Option<usize> {
         let bids = self.bids.read().await;
         if bids.is_empty() {
@@ -61,9 +61,13 @@ impl SharedBidRegistry {
         for (&party_id, &(bid, timestamp)) in bids.iter() {
             match winner {
                 None => winner = Some((party_id, bid, timestamp)),
-                Some((_, best_bid, best_ts)) => {
-                    // Higher bid wins, or earlier timestamp if tied
-                    if bid > best_bid || (bid == best_bid && timestamp < best_ts) {
+                Some((best_pid, best_bid, best_ts)) => {
+                    // Higher bid wins, earlier timestamp breaks ties,
+                    // lowest party_id as final deterministic tiebreak.
+                    if bid > best_bid
+                        || (bid == best_bid && timestamp < best_ts)
+                        || (bid == best_bid && timestamp == best_ts && party_id < best_pid)
+                    {
                         winner = Some((party_id, bid, timestamp));
                     }
                 }
@@ -72,40 +76,6 @@ impl SharedBidRegistry {
         drop(bids);
 
         winner.map(|(party_id, _, _)| party_id)
-    }
-
-    /// Calculate the winner and return both party ID and winning bid.
-    pub async fn calculate_winner_with_bid(&self) -> Option<(usize, u64)> {
-        let bids = self.bids.read().await;
-        if bids.is_empty() {
-            return None;
-        }
-
-        let mut winner: Option<(usize, u64, u64)> = None;
-
-        for (&party_id, &(bid, timestamp)) in bids.iter() {
-            match winner {
-                None => winner = Some((party_id, bid, timestamp)),
-                Some((_, best_bid, best_ts)) => {
-                    if bid > best_bid || (bid == best_bid && timestamp < best_ts) {
-                        winner = Some((party_id, bid, timestamp));
-                    }
-                }
-            }
-        }
-        drop(bids);
-
-        winner.map(|(party_id, bid, _)| (party_id, bid))
-    }
-
-    /// Get the winning bid value (highest bid).
-    pub async fn get_winning_bid(&self) -> Option<u64> {
-        self.calculate_winner_with_bid().await.map(|(_, bid)| bid)
-    }
-
-    /// Get all registered bids.
-    pub async fn get_bids(&self) -> HashMap<usize, (u64, u64)> {
-        self.bids.read().await.clone()
     }
 
     /// Clear all bids.

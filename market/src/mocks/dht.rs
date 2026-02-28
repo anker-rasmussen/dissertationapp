@@ -156,21 +156,6 @@ impl MockDht {
         }
     }
 
-    /// Create a new mock DHT with a specific node ID.
-    ///
-    /// Use `SharedDhtHandle` when you need multiple parties to share the same DHT.
-    pub fn with_node_id(node_id: PublicKey) -> Self {
-        Self {
-            inner: Arc::new(MockDhtInner {
-                storage: RwLock::new(HashMap::new()),
-                next_id: AtomicU64::new(1),
-                record_owners: RwLock::new(HashMap::new()),
-                fail_mode: RwLock::new(None),
-            }),
-            node_id,
-        }
-    }
-
     /// Get the node ID for this DHT view.
     pub fn node_id(&self) -> PublicKey {
         self.node_id.clone()

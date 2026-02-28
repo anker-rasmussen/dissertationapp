@@ -17,6 +17,7 @@ impl MpcTunnelProxy {
     /// verifies that the claimed `source_party_id` matches the signer via the
     /// `signer_to_party` reverse mapping built at construction.
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(skip_all)]
     pub async fn process_message(&self, message: Vec<u8>, signer: [u8; 32]) -> MarketResult<()> {
         let mpc_msg: MpcMessage = bincode_deserialize_limited(&message)?;
 
@@ -390,6 +391,7 @@ impl MpcTunnelProxy {
     ///
     /// All MPC data is sent via `app_call` for confirmed delivery.
     /// Returns ACK `[0x01]` on success so the sender knows the data arrived.
+    #[tracing::instrument(skip_all)]
     pub async fn process_call(&self, message: Vec<u8>, signer: [u8; 32]) -> MarketResult<Vec<u8>> {
         let call_start = std::time::Instant::now();
         // Peek at message type — Open still needs async spawn (30s+ TCP connect).
