@@ -159,10 +159,8 @@ async fn test_timestamp_edge_exact_tie() {
 
     let winner = harness.execute_auction(&listing).await;
 
-    // With same timestamp, lowest party_id wins (deterministic)
-    // The SharedBidRegistry iterates HashMap, so winner depends on hash order
-    // but there should always be exactly one winner
-    assert!(winner.is_some());
+    // With same timestamp and same bid value, lowest party_id wins (deterministic)
+    assert_eq!(winner, Some(0));
 }
 
 #[tokio::test]
@@ -278,10 +276,10 @@ async fn test_listing_time_remaining() {
 }
 
 #[tokio::test]
-async fn test_bid_below_reserve_price_seller_wins() {
+async fn test_bid_below_reserve_highest_bidder_wins() {
     let mut harness = MultiPartyHarness::new(3).await;
 
-    // Reserve price = 500
+    // Reserve price = 500 (not enforced in mock — MPC simply picks highest bid)
     let listing = harness.create_listing("High Reserve Item", 500, 3600).await;
 
     // All bids below reserve
@@ -293,11 +291,8 @@ async fn test_bid_below_reserve_price_seller_wins() {
 
     let winner = harness.execute_auction(&listing).await;
 
-    // The MPC determines the highest bid; if no bid exceeds the reserve,
-    // party 0 (seller's auto-bid = reserve) wins, meaning no sale.
-    // With CalculateFromBids strategy, the highest bid (300 by party 2) wins.
-    // This test verifies the auction completes with bids below reserve.
-    assert!(winner.is_some());
+    // Mock winner determination picks highest bid (300 by party 2)
+    assert_eq!(winner, Some(2));
 }
 
 #[tokio::test]

@@ -12,6 +12,7 @@ use crate::error::{MarketError, MarketResult};
 use veilid_core::RouteId;
 
 impl MpcTunnelProxy {
+    #[tracing::instrument(skip_all, fields(listen_port, target_pid))]
     pub(super) async fn run_outgoing_proxy(
         &self,
         listen_port: u16,

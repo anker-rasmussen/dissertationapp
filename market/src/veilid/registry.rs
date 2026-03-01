@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 use veilid_core::{
     BareKeyPair, BareOpaqueRecordKey, BarePublicKey, BareRecordKey, BareSecretKey, DHTSchema,
-    KeyPair, RecordKey, ValueSeqNum, CRYPTO_KIND_VLD0,
+    KeyPair, RecordKey, CRYPTO_KIND_VLD0,
 };
 
 use super::dht::{DHTOperations, OwnedDHTRecord};
@@ -48,6 +48,8 @@ pub struct RegistryOperations {
     master_registry_key: Option<RecordKey>,
     /// This seller's catalog DHT record (sellers only).
     seller_catalog_record: Option<OwnedDHTRecord>,
+    /// Local G-Set replica — rebuilt from DHT on startup, gossip fills gaps.
+    local_registry: MarketRegistry,
 }
 
 impl RegistryOperations {
@@ -57,6 +59,7 @@ impl RegistryOperations {
             shared_keypair: derive_registry_keypair(network_key),
             master_registry_key: None,
             seller_catalog_record: None,
+            local_registry: MarketRegistry::default(),
         }
     }
 
@@ -164,6 +167,23 @@ impl RegistryOperations {
             Ok(_) => {
                 info!("Opened existing master registry at: {}", expected_key);
                 self.master_registry_key = Some(expected_key.clone());
+
+                // Seed local replica from DHT
+                if let Ok(Some(v)) = routing_context
+                    .get_dht_value(expected_key.clone(), 0, true)
+                    .await
+                {
+                    if !v.data().is_empty() {
+                        if let Ok(remote) = MarketRegistry::from_cbor(v.data()) {
+                            self.local_registry.merge(&remote);
+                            info!(
+                                sellers = self.local_registry.sellers.len(),
+                                "Seeded local replica from DHT"
+                            );
+                        }
+                    }
+                }
+
                 return Ok(expected_key);
             }
             Err(e) => {
@@ -180,42 +200,40 @@ impl RegistryOperations {
         self.master_registry_key = Some(key);
     }
 
-    /// Register a seller in the master registry.
-    /// Retries on concurrent-write conflicts.
+    /// Register a seller in the master registry via local-replica G-Set merge.
     pub async fn register_seller(
         &mut self,
         seller_pubkey: &str,
         catalog_key: &str,
         signing_pubkey: &str,
     ) -> MarketResult<()> {
-        let spk = seller_pubkey.to_string();
-        let ck = catalog_key.to_string();
-        let sk = signing_pubkey.to_string();
+        if self
+            .local_registry
+            .sellers
+            .iter()
+            .any(|e| e.seller_pubkey == seller_pubkey)
+        {
+            info!("Seller already in local replica, skipping");
+            return Ok(());
+        }
 
-        self.write_registry_with_cas("seller", move |registry| {
-            if registry.sellers.iter().any(|e| e.seller_pubkey == spk) {
-                return false; // already registered
-            }
-            registry.add_seller(SellerEntry {
-                seller_pubkey: spk.clone(),
-                catalog_key: ck.clone(),
-                registered_at: now_unix(),
-                signing_pubkey: sk.clone(),
-            });
-            true
-        })
-        .await
+        self.local_registry.add_seller(SellerEntry {
+            seller_pubkey: seller_pubkey.to_string(),
+            catalog_key: catalog_key.to_string(),
+            registered_at: now_unix(),
+            signing_pubkey: signing_pubkey.to_string(),
+        });
+
+        self.flush_registry_to_dht().await
     }
 
-    /// Write to the master registry with compare-and-swap retry logic.
+    /// Flush the local G-Set replica to the DHT.
     ///
-    /// `mutate` is called on each attempt with the current registry state.
-    /// It should apply the desired mutation and return `true` to proceed with
-    /// the write, or `false` to skip (e.g. the entry already exists).
-    async fn write_registry_with_cas<F>(&self, label: &str, mutate: F) -> MarketResult<()>
-    where
-        F: Fn(&mut MarketRegistry) -> bool,
-    {
+    /// Opens the shared registry record, reads the current DHT state, merges our
+    /// local replica on top, and writes the merged result back.  Best-effort — a
+    /// failure here does not lose data because the local replica is the source of
+    /// truth and will be flushed again on the next write.
+    async fn flush_registry_to_dht(&self) -> MarketResult<()> {
         let registry_key = self
             .master_registry_key
             .as_ref()
@@ -228,136 +246,56 @@ impl RegistryOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to open registry record: {e}")))?;
 
-        let max_retries: u32 = 10;
-        let mut retry_delay = std::time::Duration::from_millis(50);
-        let mut conflict_value: Option<Vec<u8>> = None;
-
-        for attempt in 0..max_retries {
-            let (mut registry, old_seq) = if let Some(cv) = conflict_value.take() {
-                match MarketRegistry::from_cbor(&cv) {
-                    Ok(reg) => {
-                        debug!(
-                            "Using conflict value as base ({} routes, {} sellers)",
-                            reg.routes.len(),
-                            reg.sellers.len()
-                        );
-                        (reg, None)
-                    }
-                    Err(e) => {
-                        warn!("Conflict value corrupted ({}), re-fetching", e);
-                        self.read_registry_from_dht(&routing_context, &registry_key)
-                            .await?
-                    }
-                }
-            } else {
-                self.read_registry_from_dht(&routing_context, &registry_key)
-                    .await?
-            };
-
-            if !mutate(&mut registry) {
-                info!("{} already present, skipping", label);
-                return Ok(());
-            }
-
-            let data = registry.to_cbor().map_err(|e| {
-                MarketError::Serialization(format!("Failed to serialize registry: {e}"))
-            })?;
-
-            match routing_context
-                .set_dht_value(registry_key.clone(), 0, data, None)
-                .await
-            {
-                Ok(old_value) => {
-                    if let Some(returned) = old_value {
-                        if let Some(expected) = old_seq {
-                            if returned.seq() != expected && attempt < max_retries - 1 {
-                                warn!(
-                                    "{} registration: concurrent write (seq {} -> {}), retrying",
-                                    label,
-                                    expected,
-                                    returned.seq()
-                                );
-                                conflict_value = Some(returned.data().to_vec());
-                                tokio::time::sleep(retry_delay).await;
-                                retry_delay *= 2;
-                                continue;
-                            }
-                        }
-                    }
-                    info!(
-                        "Registered {} (attempt {}/{})",
-                        label,
-                        attempt + 1,
-                        max_retries
-                    );
-                    return Ok(());
-                }
-                Err(e) => {
-                    if attempt < max_retries - 1 {
-                        warn!("{} registration write failed ({}), retrying", label, e);
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay *= 2;
-                        continue;
-                    }
-                    return Err(MarketError::Dht(format!(
-                        "Failed to register {label} after {max_retries} attempts: {e}",
-                    )));
-                }
-            }
-        }
-
-        Err(MarketError::Dht(format!(
-            "Failed to register {label} after {max_retries} attempts",
-        )))
-    }
-
-    /// Force-refresh read of the registry from the DHT network.
-    ///
-    /// Returns `(registry, Some(seq))` when data exists, or
-    /// `(default, None)` for an empty/missing record.
-    async fn read_registry_from_dht(
-        &self,
-        routing_context: &veilid_core::RoutingContext,
-        registry_key: &RecordKey,
-    ) -> MarketResult<(MarketRegistry, Option<ValueSeqNum>)> {
-        let value_data = routing_context
+        // Read current DHT state and merge our local replica on top.
+        let dht_data = routing_context
             .get_dht_value(registry_key.clone(), 0, true)
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?;
 
-        Ok(match value_data {
+        let mut merged = match dht_data {
             Some(v) if !v.data().is_empty() => {
-                let seq = v.seq();
-                match MarketRegistry::from_cbor(v.data()) {
-                    Ok(reg) => (reg, Some(seq)),
-                    Err(e) => {
-                        warn!("Registry data corrupted (seq {}), overwriting: {}", seq, e);
-                        (MarketRegistry::default(), Some(seq))
-                    }
-                }
+                MarketRegistry::from_cbor(v.data()).unwrap_or_default()
             }
-            Some(_) => {
-                debug!("Registry subkey 0 has no data yet (fresh record)");
-                (MarketRegistry::default(), None)
-            }
-            None => (MarketRegistry::default(), None),
-        })
+            _ => MarketRegistry::default(),
+        };
+        merged.merge(&self.local_registry);
+
+        let data = merged.to_cbor().map_err(|e| {
+            MarketError::Serialization(format!("Failed to serialize registry: {e}"))
+        })?;
+        routing_context
+            .set_dht_value(registry_key, 0, data, None)
+            .await
+            .map_err(|e| MarketError::Dht(format!("Failed to write merged registry: {e}")))?;
+
+        info!(
+            sellers = merged.sellers.len(),
+            routes = merged.routes.len(),
+            "Flushed local replica to DHT"
+        );
+        Ok(())
     }
 
-    /// Register (or update) this node's broadcast route in the master registry.
-    /// Retries on concurrent-write conflicts.
-    pub async fn register_route(&mut self, node_id: &str, route_blob: Vec<u8>) -> MarketResult<()> {
-        let nid = node_id.to_string();
+    /// Merge a remote registry snapshot into the local replica.
+    /// Called on gossip receive (`SellerRegistration`, `RegistryAnnouncement`).
+    pub fn merge_into_local(&mut self, remote: &MarketRegistry) {
+        self.local_registry.merge(remote);
+    }
 
-        self.write_registry_with_cas("route", move |registry| {
-            registry.add_route(RouteEntry {
-                node_id: nid.clone(),
-                route_blob: route_blob.clone(),
-                registered_at: now_unix(),
-            });
-            true
-        })
-        .await
+    /// Merge a single seller entry into the local replica (gossip path).
+    pub fn merge_seller_entry(&mut self, entry: SellerEntry) {
+        self.local_registry.add_seller(entry);
+    }
+
+    /// Register (or update) this node's broadcast route via local-replica merge.
+    pub async fn register_route(&mut self, node_id: &str, route_blob: Vec<u8>) -> MarketResult<()> {
+        self.local_registry.add_route(RouteEntry {
+            node_id: node_id.to_string(),
+            route_blob,
+            registered_at: now_unix(),
+        });
+
+        self.flush_registry_to_dht().await
     }
 
     /// Fetch all route blobs from the master registry, excluding the given node_id.
@@ -366,7 +304,7 @@ impl RegistryOperations {
     /// network.  Without this, an early reader (e.g. the first node to start)
     /// caches an empty route list and never discovers peers that register later.
     pub async fn fetch_route_blobs(
-        &self,
+        &mut self,
         exclude_node_id: &str,
     ) -> MarketResult<Vec<(String, Vec<u8>)>> {
         let registry = self.fetch_registry(true).await?;
@@ -382,7 +320,7 @@ impl RegistryOperations {
     ///
     /// Returns `Ok(None)` when the seller is unknown or has no signing key set.
     pub async fn get_seller_signing_pubkey(
-        &self,
+        &mut self,
         seller_pubkey: &str,
     ) -> MarketResult<Option<[u8; 32]>> {
         let registry = self.fetch_registry(true).await?;
@@ -466,11 +404,6 @@ impl RegistryOperations {
         Ok(catalog_key)
     }
 
-    /// Get the seller catalog key (if created).
-    pub fn seller_catalog_key(&self) -> Option<RecordKey> {
-        self.seller_catalog_record.as_ref().map(|r| r.key.clone())
-    }
-
     /// Add a listing to the seller's own catalog.
     pub async fn add_listing_to_catalog(&self, entry: CatalogEntry) -> MarketResult<()> {
         let record = self
@@ -517,51 +450,50 @@ impl RegistryOperations {
 
     // ── Discovery (all nodes) ────────────────────────────────────────
 
-    /// Fetch the master registry from DHT.
+    /// Fetch the registry, returning the local G-Set replica.
     ///
-    /// Returns an empty registry if the master key is not yet known
-    /// (e.g. no `RegistryAnnouncement` received yet).
-    ///
-    /// When `force_refresh` is `true` the value is fetched from the network
-    /// (required for accurate discovery).  When `false` the locally cached
-    /// copy is returned, which avoids a network round-trip and is sufficient
-    /// for broadcast-path reads where slightly stale data is acceptable.
-    pub async fn fetch_registry(&self, force_refresh: bool) -> MarketResult<MarketRegistry> {
-        let Some(key) = &self.master_registry_key else {
-            info!("Master registry key not known yet, returning empty registry");
-            return Ok(MarketRegistry::default());
-        };
-        let key = key.clone();
+    /// When `force_refresh` is `true`, the DHT is read first and merged into
+    /// the local replica before returning — this is the "catch-up" path for
+    /// discovery.  When `false`, the local replica is returned directly (no
+    /// network round-trip).
+    pub async fn fetch_registry(&mut self, force_refresh: bool) -> MarketResult<MarketRegistry> {
+        if force_refresh {
+            if let Some(key) = &self.master_registry_key {
+                let key = key.clone();
+                let routing_context = self.dht.routing_context()?;
+                let _ = routing_context
+                    .open_dht_record(key.clone(), Some(self.shared_keypair.clone()))
+                    .await
+                    .map_err(|e| {
+                        MarketError::Dht(format!("Failed to open registry record: {e}"))
+                    })?;
 
-        let routing_context = self.dht.routing_context()?;
-        // Defensive re-open (no-op if already open from ensure_master_registry).
-        let _ = routing_context
-            .open_dht_record(key.clone(), Some(self.shared_keypair.clone()))
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to open registry record: {e}")))?;
+                let data = routing_context
+                    .get_dht_value(key, 0, true)
+                    .await
+                    .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?
+                    .map(|v| v.data().to_vec());
 
-        let data = routing_context
-            .get_dht_value(key.clone(), 0, force_refresh)
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?
-            .map(|v| v.data().to_vec());
-
-        match data {
-            Some(bytes) if !bytes.is_empty() => match MarketRegistry::from_cbor(&bytes) {
-                Ok(registry) => {
-                    debug!("Fetched registry with {} sellers", registry.sellers.len());
-                    Ok(registry)
+                if let Some(bytes) = data {
+                    if !bytes.is_empty() {
+                        match MarketRegistry::from_cbor(&bytes) {
+                            Ok(remote) => {
+                                debug!(
+                                    remote_sellers = remote.sellers.len(),
+                                    "Merged DHT registry into local replica"
+                                );
+                                self.local_registry.merge(&remote);
+                            }
+                            Err(e) => {
+                                warn!("Registry data corrupted, ignoring DHT read: {}", e);
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    warn!("Registry data corrupted, returning empty: {}", e);
-                    Ok(MarketRegistry::default())
-                }
-            },
-            _ => {
-                debug!("Registry has no data yet");
-                Ok(MarketRegistry::default())
             }
         }
+
+        Ok(self.local_registry.clone())
     }
 
     /// Fetch a single seller's catalog from DHT.
@@ -606,7 +538,7 @@ impl RegistryOperations {
     }
 
     /// Two-hop discovery: master registry → seller catalogs → flat listing list.
-    pub async fn fetch_all_listings(&self) -> MarketResult<Vec<RegistryEntry>> {
+    pub async fn fetch_all_listings(&mut self) -> MarketResult<Vec<RegistryEntry>> {
         let registry = self.fetch_registry(true).await?;
         let mut all_listings = Vec::new();
 

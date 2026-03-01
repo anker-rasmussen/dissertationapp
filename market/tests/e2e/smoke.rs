@@ -814,8 +814,10 @@ async fn test_e2e_full_happy_path() {
 
 /// Test sequential auctions using separate processes.
 ///
-/// Bidder nodes persist across auctions; sellers are fresh per auction.
-/// Validates that bidder state from auction 1 does not interfere with auction 2.
+/// Bidder nodes persist across both auctions.  The seller is shut down
+/// between auctions and restarted on the same offset so that the Veilid
+/// routing tables re-converge quickly (a brand-new offset would need
+/// minutes to fully join the network, causing bid-announcement delays).
 #[tokio::test]
 #[ignore]
 #[serial]
@@ -828,30 +830,30 @@ async fn test_e2e_full_sequential_auctions() {
     }
 
     run_e2e_test("test_e2e_full_sequential_auctions", 1800, || async {
-        // Shared bidders across both auctions
-        let mut bidder1 = HeadlessParticipant::new(21).await?;
-        let mut bidder2 = HeadlessParticipant::new(22).await?;
+        // 3 persistent nodes — roles rotate between auctions (no restart).
+        let mut node_a = HeadlessParticipant::new(20).await?;
+        let mut node_b = HeadlessParticipant::new(21).await?;
+        let mut node_c = HeadlessParticipant::new(22).await?;
 
         // ════════════════════════════════════════════════════════════════
-        // AUCTION 1
+        // AUCTION 1 — node_a sells, node_b + node_c bid
         // ════════════════════════════════════════════════════════════════
-        eprintln!("\n[E2E] ═══ AUCTION 1 START ═══");
-        let mut seller1 = HeadlessParticipant::new(20).await?;
+        eprintln!("\n[E2E] ═══ AUCTION 1 START (seller=node_a) ═══");
 
-        let (listing1_key, _) = seller1
+        let (listing1_key, _) = node_a
             .create_listing("Auction 1 Item", "first sale secret content", 100, 30)
             .await?;
 
         tokio::time::sleep(Duration::from_secs(15)).await;
 
-        bidder1.place_bid(&listing1_key, 250).await?;
-        bidder2.place_bid(&listing1_key, 150).await?;
+        node_b.place_bid(&listing1_key, 250).await?;
+        node_c.place_bid(&listing1_key, 150).await?;
 
         eprintln!("[E2E] Auction 1: polling for MPC completion (max 600s)...");
-        let a1_winner_key = poll_decryption_key(&mut bidder1, &listing1_key, 600).await;
+        let a1_winner_key = poll_decryption_key(&mut node_b, &listing1_key, 600).await;
         assert!(a1_winner_key.is_some(), "Auction 1: winner should have key");
 
-        let a1_loser_key = match bidder2.get_decryption_key(&listing1_key).await {
+        let a1_loser_key = match node_c.get_decryption_key(&listing1_key).await {
             Ok(k) => k,
             Err(_) => None,
         };
@@ -861,28 +863,25 @@ async fn test_e2e_full_sequential_auctions() {
         );
         eprintln!("[E2E] ═══ AUCTION 1 PASSED ═══\n");
 
-        seller1.shutdown().await?;
-
         // ════════════════════════════════════════════════════════════════
-        // AUCTION 2 — new seller, same bidders
+        // AUCTION 2 — node_b sells, node_a + node_c bid (rotated roles)
         // ════════════════════════════════════════════════════════════════
-        eprintln!("[E2E] ═══ AUCTION 2 START (new seller, same bidders) ═══");
-        let mut seller2 = HeadlessParticipant::new(23).await?;
+        eprintln!("[E2E] ═══ AUCTION 2 START (seller=node_b, rotated roles) ═══");
 
-        let (listing2_key, _) = seller2
-            .create_listing("Auction 2 Item", "second sale from new seller", 200, 30)
+        let (listing2_key, _) = node_b
+            .create_listing("Auction 2 Item", "second sale rotated seller", 200, 30)
             .await?;
 
         tokio::time::sleep(Duration::from_secs(15)).await;
 
-        bidder1.place_bid(&listing2_key, 500).await?;
-        bidder2.place_bid(&listing2_key, 350).await?;
+        node_a.place_bid(&listing2_key, 500).await?;
+        node_c.place_bid(&listing2_key, 350).await?;
 
         eprintln!("[E2E] Auction 2: polling for MPC completion (max 600s)...");
-        let a2_winner_key = poll_decryption_key(&mut bidder1, &listing2_key, 600).await;
+        let a2_winner_key = poll_decryption_key(&mut node_a, &listing2_key, 600).await;
         assert!(a2_winner_key.is_some(), "Auction 2: winner should have key");
 
-        let a2_loser_key = match bidder2.get_decryption_key(&listing2_key).await {
+        let a2_loser_key = match node_c.get_decryption_key(&listing2_key).await {
             Ok(k) => k,
             Err(_) => None,
         };
@@ -892,9 +891,9 @@ async fn test_e2e_full_sequential_auctions() {
         );
         eprintln!("[E2E] ═══ AUCTION 2 PASSED ═══");
 
-        seller2.shutdown().await?;
-        bidder1.shutdown().await?;
-        bidder2.shutdown().await?;
+        node_a.shutdown().await?;
+        node_b.shutdown().await?;
+        node_c.shutdown().await?;
 
         Ok::<_, MarketError>(())
     })

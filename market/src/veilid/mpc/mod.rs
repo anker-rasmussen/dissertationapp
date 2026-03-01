@@ -3,7 +3,7 @@
 //! Each party runs a local TCP listener that MP-SPDZ connects to. Outgoing data is chunked,
 //! signed, and sent via pipelined `app_call` (depth 8) to the remote party's private route.
 //! Incoming data is reorder-buffered per stream to handle out-of-order delivery. Supports
-//! mid-execution route updates (`RouteUpdate`) and pre-MPC warmup pings.
+//! mid-execution route updates (`RouteUpdate`) and pre-MPC SYN/ACK pings.
 
 mod incoming;
 mod outgoing;
@@ -39,6 +39,23 @@ pub(super) const fn party_port(base_port: u16, party_id: usize) -> u16 {
     base_port + party_id as u16
 }
 
+/// Envelope wrapping serialized [`MpcMessage`] bytes with a session
+/// identifier so concurrent auctions can be routed to the correct
+/// tunnel proxy.
+///
+/// `session_id` is the listing key string — deterministic and known to
+/// all parties in the same auction without extra coordination.
+///
+/// The coordinator peek-deserializes this to extract `session_id` for
+/// routing, then forwards the inner `message` bytes to the matching
+/// tunnel proxy which deserializes and processes the `MpcMessage`.
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct MpcEnvelope {
+    pub session_id: String,
+    /// Bincode-serialized [`MpcMessage`].
+    pub message: Vec<u8>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) enum MpcMessage {
     Open {
@@ -55,7 +72,7 @@ pub(super) enum MpcMessage {
         source_party_id: usize,
         stream_id: u64,
     },
-    /// Route warmup ping: sent before starting MP-SPDZ to confirm that
+    /// SYN/ACK ping: sent before starting MP-SPDZ to confirm that
     /// MPC private routes are alive and delivering messages.
     Ping { source_party_id: usize },
     /// Mid-execution route update: a party's receiving route died and was
@@ -102,6 +119,8 @@ pub(super) const SEND_PIPELINE_DEPTH: u32 = 8;
 pub(super) struct MpcTunnelProxyInner {
     pub(super) api: VeilidAPI,
     pub(super) party_id: usize,
+    /// Session identifier (listing key string) for MPC envelope tagging.
+    pub(super) session_id: String,
     /// Imported remote private route handles per party.
     pub(super) party_routes: Mutex<HashMap<usize, RouteId>>,
     /// Raw route blobs per party — for re-import when a route expires.
@@ -129,16 +148,19 @@ pub(super) struct MpcTunnelProxyInner {
     pub(super) live_routes: Option<Arc<Mutex<HashMap<PublicKey, RouteId>>>>,
     /// Mapping from party_id → PublicKey for looking up live routes.
     pub(super) party_pubkeys: HashMap<usize, PublicKey>,
-    /// Parties from which we've received a Ping during warmup.
-    pub(super) warmup_received: Mutex<std::collections::HashSet<usize>>,
-    /// Notified when a new Ping is received (wakes the warmup waiter).
-    pub(super) warmup_notify: Notify,
+    /// Parties from which we've received a Ping during SYN/ACK.
+    pub(super) syn_ack_received: Mutex<std::collections::HashSet<usize>>,
+    /// Notified when a new Ping is received (wakes the SYN/ACK waiter).
+    pub(super) syn_ack_notify: Notify,
 }
 
 /// Configuration for constructing an [`MpcTunnelProxy`].
 pub struct MpcTunnelConfig {
     pub api: VeilidAPI,
     pub party_id: usize,
+    /// Session identifier (listing key string) — tags every outgoing
+    /// [`MpcEnvelope`] so the receiver can route to the correct tunnel.
+    pub session_id: String,
     pub party_routes: HashMap<usize, RouteId>,
     pub party_blobs: HashMap<usize, Vec<u8>>,
     pub node_offset: u16,
@@ -165,14 +187,16 @@ impl MpcTunnelProxy {
             .collect();
 
         info!(
-            "MPC TunnelProxy for Party {}: using base port {} (node offset {}), {} authenticated peers, live_routes={}",
-            config.party_id, base_port, config.node_offset, signer_to_party.len(), config.live_routes.is_some()
+            "MPC TunnelProxy for Party {} session {}: base port {} (offset {}), {} peers, live_routes={}",
+            config.party_id, config.session_id, base_port, config.node_offset,
+            signer_to_party.len(), config.live_routes.is_some()
         );
 
         Self {
             inner: Arc::new(MpcTunnelProxyInner {
                 api: config.api,
                 party_id: config.party_id,
+                session_id: config.session_id,
                 party_routes: Mutex::new(config.party_routes),
                 party_blobs: Arc::new(Mutex::new(config.party_blobs)),
                 signer_to_party,
@@ -187,8 +211,8 @@ impl MpcTunnelProxy {
                 local_connect_mutex: Mutex::new(()),
                 live_routes: config.live_routes,
                 party_pubkeys: config.party_pubkeys,
-                warmup_received: Mutex::new(std::collections::HashSet::new()),
-                warmup_notify: Notify::new(),
+                syn_ack_received: Mutex::new(std::collections::HashSet::new()),
+                syn_ack_notify: Notify::new(),
             }),
         }
     }
@@ -223,79 +247,145 @@ impl MpcTunnelProxy {
         Ok(())
     }
 
-    /// Send Pings to all peers and wait until Pings from all peers arrive.
-    pub async fn warmup(&self, timeout: std::time::Duration) -> MarketResult<()> {
+    /// SYN/ACK: send Pings to all peers and wait until Pings from all peers arrive,
+    /// confirming that MPC private routes are bidirectionally reachable.
+    ///
+    /// Each round waits `round_timeout` for responses.  If any peers are still
+    /// missing, their route blobs are re-imported (route restore) and the next
+    /// round begins.  Returns `Err` after `max_rounds` consecutive failures.
+    #[allow(clippy::too_many_lines)]
+    pub async fn syn_ack(
+        &self,
+        round_timeout: std::time::Duration,
+        max_rounds: u32,
+    ) -> MarketResult<()> {
+        let my_pid = self.inner.party_id;
         let peers: Vec<usize> = self
             .inner
             .signer_to_party
             .values()
-            .filter(|&&pid| pid != self.inner.party_id)
+            .filter(|&&pid| pid != my_pid)
             .copied()
             .collect();
 
         info!(
-            "Party {}: warming up MPC routes to {} peers (timeout {}s)",
-            self.inner.party_id,
+            "Party {my_pid}: MPC route SYN/ACK to {} peers ({}s × {max_rounds} rounds)",
             peers.len(),
-            timeout.as_secs()
+            round_timeout.as_secs(),
         );
 
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(
-            crate::config::MPC_PING_INTERVAL_SECS,
-        ));
-        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            let received = self.inner.warmup_received.lock().await.clone();
-            let missing: Vec<usize> = peers
-                .iter()
-                .filter(|p| !received.contains(p))
-                .copied()
-                .collect();
+        for round in 0..max_rounds {
+            // Check which peers haven't responded yet.
+            let missing: Vec<usize> = {
+                let received = self.inner.syn_ack_received.lock().await;
+                peers
+                    .iter()
+                    .filter(|p| !received.contains(p))
+                    .copied()
+                    .collect()
+            };
             if missing.is_empty() {
                 info!(
-                    "Party {}: all {} peers confirmed reachable via MPC routes",
-                    self.inner.party_id,
+                    "Party {my_pid}: all {} peers confirmed reachable",
                     peers.len()
                 );
                 return Ok(());
             }
 
-            if tokio::time::Instant::now() >= deadline {
-                warn!(
-                    "Party {}: warmup timed out, missing pings from {:?}. Proceeding anyway.",
-                    self.inner.party_id, missing
-                );
-                return Ok(());
-            }
-
+            // Send Pings only to missing peers.
             let ping = MpcMessage::Ping {
-                source_party_id: self.inner.party_id,
+                source_party_id: my_pid,
             };
             if let Ok(data) = self.sign_mpc_message(&ping) {
-                for &pid in &peers {
-                    let label = format!("Ping P{}→P{}", self.inner.party_id, pid);
+                for &pid in &missing {
+                    let label = format!("Ping P{my_pid}→P{pid}");
                     self.send_reliable(pid, &data, &label).await;
                 }
             }
 
-            tokio::select! {
-                _instant = ping_interval.tick() => {}
-                () = self.inner.warmup_notify.notified() => {}
-                () = tokio::time::sleep_until(deadline) => {}
+            // Wait for responses up to round_timeout.
+            let round_deadline = tokio::time::Instant::now() + round_timeout;
+            loop {
+                let all_received = {
+                    let received = self.inner.syn_ack_received.lock().await;
+                    peers.iter().all(|p| received.contains(p))
+                };
+                if all_received {
+                    info!(
+                        "Party {my_pid}: all {} peers confirmed reachable",
+                        peers.len()
+                    );
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= round_deadline {
+                    break;
+                }
+                tokio::select! {
+                    () = self.inner.syn_ack_notify.notified() => {}
+                    () = tokio::time::sleep_until(round_deadline) => { break; }
+                }
+            }
+
+            // Round failed — restore routes for non-responsive peers.
+            let still_missing: Vec<usize> = {
+                let received = self.inner.syn_ack_received.lock().await;
+                peers
+                    .iter()
+                    .filter(|p| !received.contains(p))
+                    .copied()
+                    .collect()
+            };
+            warn!(
+                "Party {my_pid}: SYN/ACK round {round} failed, missing {still_missing:?} — restoring routes",
+            );
+            for &pid in &still_missing {
+                let blob = self.inner.party_blobs.lock().await.get(&pid).cloned();
+                if let Some(blob) = blob {
+                    match self.inner.api.import_remote_private_route(blob) {
+                        Ok(new_route) => {
+                            self.inner.party_routes.lock().await.insert(pid, new_route);
+                            debug!("Party {my_pid}: restored route for Party {pid}");
+                        }
+                        Err(e) => {
+                            warn!("Party {my_pid}: failed to restore route for Party {pid}: {e}");
+                        }
+                    }
+                }
             }
         }
+
+        let final_missing: Vec<usize> = {
+            let received = self.inner.syn_ack_received.lock().await;
+            peers
+                .iter()
+                .filter(|p| !received.contains(p))
+                .copied()
+                .collect()
+        };
+        Err(MarketError::Network(format!(
+            "SYN/ACK failed after {max_rounds} rounds: peers {final_missing:?} unreachable",
+        )))
     }
 
-    /// Serialize an MPC message and wrap it in a signed envelope.
+    /// Serialize an MPC message, wrap it in an [`MpcEnvelope`] tagged with
+    /// this tunnel's session ID, and sign the result.
     pub(super) fn sign_mpc_message(&self, msg: &MpcMessage) -> MarketResult<Vec<u8>> {
         let t = std::time::Instant::now();
-        let payload = bincode::options()
+        let msg_bytes = bincode::options()
             .with_limit(super::bid_announcement::MAX_BINCODE_SIZE)
             .serialize(msg)
             .map_err(|e| {
                 MarketError::Serialization(format!("Failed to serialize MPC message: {e}"))
+            })?;
+        let mpc_envelope = MpcEnvelope {
+            session_id: self.inner.session_id.clone(),
+            message: msg_bytes,
+        };
+        let payload = bincode::options()
+            .with_limit(super::bid_announcement::MAX_BINCODE_SIZE)
+            .serialize(&mpc_envelope)
+            .map_err(|e| {
+                MarketError::Serialization(format!("Failed to serialize MPC envelope: {e}"))
             })?;
         let envelope = SignedEnvelope::sign(payload, &self.inner.signing_key);
         let result = envelope.to_bytes();
@@ -583,5 +673,64 @@ mod tests {
         let base = base_port_for_offset(7); // 5070
         assert_eq!(party_port(base, 0), 5070);
         assert_eq!(party_port(base, 3), 5073);
+    }
+
+    #[test]
+    fn test_mpc_envelope_roundtrip() {
+        let msg = MpcMessage::Data {
+            source_party_id: 1,
+            stream_id: 7,
+            seq: 42,
+            payload: vec![0xDE, 0xAD],
+        };
+        let msg_bytes = bincode::serialize(&msg).unwrap();
+        let envelope = MpcEnvelope {
+            session_id: "VLD0:abc123".to_string(),
+            message: msg_bytes.clone(),
+        };
+        let env_bytes = bincode::serialize(&envelope).unwrap();
+        let decoded: MpcEnvelope = bincode::deserialize(&env_bytes).unwrap();
+        assert_eq!(decoded.session_id, "VLD0:abc123");
+        assert_eq!(decoded.message, msg_bytes);
+
+        let inner: MpcMessage = bincode::deserialize(&decoded.message).unwrap();
+        match inner {
+            MpcMessage::Data {
+                source_party_id,
+                stream_id,
+                seq,
+                payload,
+            } => {
+                assert_eq!(source_party_id, 1);
+                assert_eq!(stream_id, 7);
+                assert_eq!(seq, 42);
+                assert_eq!(payload, vec![0xDE, 0xAD]);
+            }
+            other => panic!("Expected Data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mpc_envelope_session_id_routing() {
+        let msg = MpcMessage::Ping { source_party_id: 0 };
+        let msg_bytes = bincode::serialize(&msg).unwrap();
+
+        let env_a = MpcEnvelope {
+            session_id: "auction-A".to_string(),
+            message: msg_bytes.clone(),
+        };
+        let env_b = MpcEnvelope {
+            session_id: "auction-B".to_string(),
+            message: msg_bytes,
+        };
+
+        let bytes_a = bincode::serialize(&env_a).unwrap();
+        let bytes_b = bincode::serialize(&env_b).unwrap();
+        assert_ne!(bytes_a, bytes_b);
+
+        let dec_a: MpcEnvelope = bincode::deserialize(&bytes_a).unwrap();
+        let dec_b: MpcEnvelope = bincode::deserialize(&bytes_b).unwrap();
+        assert_eq!(dec_a.session_id, "auction-A");
+        assert_eq!(dec_b.session_id, "auction-B");
     }
 }

@@ -200,11 +200,6 @@ fn main() -> MarketResult<()> {
             };
             let bid_storage = app_state.bid_storage.clone();
 
-            let node_offset = std::env::var("MARKET_NODE_OFFSET")
-                .ok()
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(5);
-
             let api = match node.api() {
                 Some(api) => api.clone(),
                 None => {
@@ -219,7 +214,7 @@ fn main() -> MarketResult<()> {
                 dht,
                 my_node_id,
                 bid_storage,
-                node_offset,
+                config.node_offset,
                 &network_key,
                 coordinator_shutdown,
             ));
@@ -262,6 +257,14 @@ fn main() -> MarketResult<()> {
                 shutdown_bg.cancelled().await;
             }
 
+            // Graceful coordinator shutdown — release routes and DHT records.
+            {
+                let coord = coordinator_holder.read().clone();
+                if let Some(c) = coord {
+                    c.shutdown().await;
+                }
+            }
+
             // Ensure node is detached and shut down before thread exits.
             let mut node = node_holder.write().take();
             if let Some(node_ref) = node.as_ref() {
@@ -274,6 +277,37 @@ fn main() -> MarketResult<()> {
                     error!("Node shutdown failed: {}", e);
                 }
             }
+        });
+    });
+
+    // Spawn a signal handler so Ctrl-C / SIGTERM trigger shutdown
+    // even while the UI is running.
+    let signal_shutdown = shutdown.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("signal handler runtime");
+        rt.block_on(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Ctrl-C received, initiating shutdown");
+                }
+                _ = async {
+                    #[cfg(unix)]
+                    {
+                        let mut sig = tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::terminate(),
+                        ).expect("SIGTERM handler");
+                        sig.recv().await;
+                    }
+                    #[cfg(not(unix))]
+                    std::future::pending::<()>().await;
+                } => {
+                    info!("SIGTERM received, initiating shutdown");
+                }
+            }
+            signal_shutdown.cancel();
         });
     });
 

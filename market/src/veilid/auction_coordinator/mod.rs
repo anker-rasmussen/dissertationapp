@@ -6,7 +6,7 @@
 //! to that layer.
 
 use ed25519_dalek::SigningKey;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -14,10 +14,13 @@ use tracing::{debug, info, warn};
 use veilid_core::{PublicKey, RecordKey, RouteBlob, RouteId, VeilidAPI};
 
 use super::auction_logic::AuctionLogic;
-use super::bid_announcement::{validate_timestamp, AuctionMessage, BidAnnouncementRegistry};
+use super::bid_announcement::{
+    bincode_deserialize_limited, validate_timestamp, AuctionMessage, BidAnnouncementRegistry,
+};
 use super::bid_storage::BidStorage;
 use super::dht::{DHTOperations, OwnedDHTRecord};
 use super::listing_ops::ListingOperations;
+use super::mpc::MpcEnvelope;
 use super::mpc_orchestrator::MpcOrchestrator;
 use super::registry::RegistryOperations;
 use super::registry_types::RegistryEntry;
@@ -69,6 +72,9 @@ type CoordinatorLogic = AuctionLogic<DHTOperations, SystemTimeProvider>;
 /// 3. `owned_listings`
 /// 4. `pending_bid_announcements`
 /// 5. `my_route_blob`
+/// 6. `broadcast_route_id`
+/// 7. `buffered_mpc_signals`
+/// 8. `bid_registry_lock`
 ///
 /// Never hold any of these locks across an `.await` point if possible.
 /// If an async call is needed under lock, re-acquire the lock after awaiting.
@@ -96,7 +102,7 @@ pub struct AuctionCoordinator {
     /// RouteId of the broadcast route (used as MPC route for keepalive reuse).
     pub(super) broadcast_route_id: Mutex<Option<RouteId>>,
     /// MPC signals received before the listing was watched (no route manager yet).
-    pub(super) buffered_mpc_signals: Mutex<HashMap<RecordKey, Vec<BufferedMpcSignal>>>,
+    pub(super) buffered_mpc_signals: Mutex<HashMap<RecordKey, VecDeque<BufferedMpcSignal>>>,
     /// Serialises writes to BID_ANNOUNCEMENTS for any listing we own.
     ///
     /// `read_modify_write_subkey` is atomic per-call, but two concurrent
@@ -178,6 +184,7 @@ impl AuctionCoordinator {
     /// All messages must be wrapped in a `SignedEnvelope`. The signature is
     /// verified first; then the payload is dispatched as either an
     /// `AuctionMessage` or an MPC tunnel message.
+    #[tracing::instrument(skip_all)]
     pub async fn process_app_message(&self, message: Vec<u8>) -> MarketResult<()> {
         // Step 1: verify the signed envelope
         let (payload, signer) =
@@ -189,19 +196,36 @@ impl AuctionCoordinator {
             return Ok(());
         }
 
-        // Step 3: forward to active MPC tunnel proxy.
-        // Clone the proxy out of the lock before awaiting process_message
-        // to avoid holding the Mutex across the .await point.
-        let proxy = self.mpc.active_tunnel_proxy().lock().await.clone();
-        if let Some(proxy) = proxy.as_ref() {
-            proxy.process_message(payload, signer).await?;
+        // Step 3: peek-deserialize MpcEnvelope to extract session_id for routing.
+        let envelope: MpcEnvelope = match bincode_deserialize_limited(&payload) {
+            Ok(env) => env,
+            Err(e) => {
+                debug!("Payload is neither AuctionMessage nor MpcEnvelope: {}", e);
+                return Ok(());
+            }
+        };
+
+        let session_id = &envelope.session_id;
+        let proxy = self
+            .mpc
+            .active_tunnel_proxies()
+            .lock()
+            .await
+            .get(session_id)
+            .cloned();
+
+        if let Some(proxy) = proxy {
+            proxy.process_message(envelope.message, signer).await?;
         } else {
-            // Tunnel proxy not ready yet — buffer the message so it's
-            // delivered once the proxy is activated.  This handles the
-            // case where faster parties send Opens/Data before this
-            // node has started its MPC execution.
-            debug!("MPC message buffered (tunnel proxy not ready)");
-            self.mpc.buffer_mpc_message(payload, signer).await;
+            // Tunnel proxy not ready yet — buffer per-session so it's
+            // delivered once the corresponding proxy is activated.
+            debug!(
+                "MPC message buffered for session {} (tunnel proxy not ready)",
+                session_id
+            );
+            self.mpc
+                .buffer_mpc_message(session_id, envelope.message, signer)
+                .await;
         }
         Ok(())
     }
@@ -306,12 +330,13 @@ impl AuctionCoordinator {
         let mut buf = self.buffered_mpc_signals.lock().await;
         let entry = buf.entry(listing_key).or_default();
         if entry.len() >= MPC_SIGNAL_BUFFER_CAP {
-            entry.remove(0);
+            entry.pop_front();
         }
-        entry.push(signal);
+        entry.push_back(signal);
     }
 
     /// Watch a listing for deadline (if we're a bidder)
+    #[tracing::instrument(skip_all, fields(listing_key = %listing.key))]
     pub async fn watch_listing(&self, listing: PublicListing) {
         let key = listing.key.clone();
         self.logic.watch_listing(listing).await;
@@ -388,7 +413,7 @@ impl AuctionCoordinator {
         self.dht
             .set_value_at_subkey(&record, subkeys::BID_ANNOUNCEMENTS, data)
             .await?;
-        info!("Initialized bid registry for owned listing: {}", key);
+        info!(listing_key = %key, "Initialized bid registry for owned listing");
 
         let mut owned = self.owned_listings.lock().await;
         owned.insert(key.clone(), record.clone());
@@ -397,7 +422,7 @@ impl AuctionCoordinator {
         let listing_ops = ListingOperations::new(self.dht.clone());
         if let Ok(Some(listing)) = listing_ops.get_listing(&key).await {
             self.watch_listing(listing).await;
-            info!("Seller now watching their own listing: {}", key);
+            info!(listing_key = %key, "Seller now watching their own listing");
         }
 
         Ok(())
@@ -548,8 +573,41 @@ impl AuctionCoordinator {
 
     /// Fetch all listings via two-hop discovery. Delegates to `registry_ops`.
     pub async fn fetch_all_listings(&self) -> MarketResult<Vec<RegistryEntry>> {
-        let ops = self.registry_ops.lock().await;
+        let mut ops = self.registry_ops.lock().await;
         ops.fetch_all_listings().await
+    }
+
+    /// Release owned DHT records and broadcast routes on shutdown.
+    pub async fn shutdown(&self) {
+        info!("AuctionCoordinator shutting down — releasing resources");
+
+        // Release broadcast route
+        let route_id = self.broadcast_route_id.lock().await.take();
+        if let Some(route_id) = route_id {
+            if let Err(e) = self.api.release_private_route(route_id) {
+                warn!("Failed to release broadcast route: {}", e);
+            } else {
+                info!("Released broadcast route");
+            }
+        }
+
+        // Delete owned listing DHT records
+        let records: Vec<_> = {
+            let owned = self.owned_listings.lock().await;
+            owned.keys().cloned().collect()
+        };
+        for key in &records {
+            if let Err(e) = self.dht.delete_dht_record(key).await {
+                warn!(listing_key = %key, "Failed to delete owned listing record: {}", e);
+            } else {
+                info!(listing_key = %key, "Deleted owned listing record");
+            }
+        }
+
+        info!(
+            "AuctionCoordinator shutdown complete ({} records cleaned)",
+            records.len()
+        );
     }
 
     /// Get a reference to the Veilid API (needed for `app_call_reply` in main).
@@ -578,14 +636,35 @@ impl AuctionCoordinator {
                 return Ok(vec![0x01]);
             }
 
-            // Not an AuctionMessage — must be an MPC tunnel message.
-            let tunnel = self.mpc.active_tunnel_proxy().lock().await.clone();
+            // Not an AuctionMessage — peek-deserialize MpcEnvelope for routing.
+            let envelope: MpcEnvelope = match bincode_deserialize_limited(&payload) {
+                Ok(env) => env,
+                Err(e) => {
+                    debug!(
+                        "AppCall payload is neither AuctionMessage nor MpcEnvelope: {}",
+                        e
+                    );
+                    return Ok(vec![0x00]);
+                }
+            };
+
+            let tunnel = self
+                .mpc
+                .active_tunnel_proxies()
+                .lock()
+                .await
+                .get(&envelope.session_id)
+                .cloned();
+
             if let Some(tunnel) = tunnel {
-                return tunnel.process_call(payload, signer).await;
+                return tunnel.process_call(envelope.message, signer).await;
             }
 
             // MPC message but tunnel not ready — NACK so sender retries.
-            debug!("MPC message received but tunnel proxy not ready — sending NACK");
+            debug!(
+                "MPC message for session {} but tunnel proxy not ready — sending NACK",
+                envelope.session_id
+            );
             return Ok(vec![0x00]);
         }
 
@@ -599,6 +678,7 @@ impl AuctionCoordinator {
     /// Handles the full lifecycle including `app_call_reply` for AppCall.
     /// Both `main.rs` and `market-headless` call this to avoid duplicating
     /// the dispatch switch.
+    #[tracing::instrument(skip_all)]
     pub async fn dispatch_veilid_update(&self, update: veilid_core::VeilidUpdate) {
         match update {
             veilid_core::VeilidUpdate::AppMessage(msg) => {
@@ -616,7 +696,9 @@ impl AuctionCoordinator {
                     }
                     Err(e) => {
                         tracing::error!("AppCall error: {}", e);
-                        let _ = self.api.app_call_reply(call_id, vec![0x00]).await;
+                        if let Err(reply_err) = self.api.app_call_reply(call_id, vec![0x00]).await {
+                            warn!("app_call_reply (NACK) failed: {}", reply_err);
+                        }
                     }
                 }
             }
