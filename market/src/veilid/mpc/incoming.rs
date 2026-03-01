@@ -11,12 +11,14 @@ use crate::error::{MarketError, MarketResult};
 use crate::veilid::bid_announcement::bincode_deserialize_limited;
 
 impl MpcTunnelProxy {
-    /// Process incoming Veilid message (already unwrapped from [`SignedEnvelope`]).
+    /// Process incoming MPC message bytes (inner `MpcMessage` already extracted
+    /// from the [`MpcEnvelope`] by the coordinator's routing layer).
     ///
     /// `signer` is the Ed25519 verifying key from the envelope. The method
     /// verifies that the claimed `source_party_id` matches the signer via the
     /// `signer_to_party` reverse mapping built at construction.
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(skip_all)]
     pub async fn process_message(&self, message: Vec<u8>, signer: [u8; 32]) -> MarketResult<()> {
         let mpc_msg: MpcMessage = bincode_deserialize_limited(&message)?;
 
@@ -89,12 +91,28 @@ impl MpcTunnelProxy {
             }
             MpcMessage::Ping { source_party_id } => {
                 debug!("Received Ping from Party {}", source_party_id);
-                self.inner
-                    .warmup_received
+                let was_new = self
+                    .inner
+                    .syn_ack_received
                     .lock()
                     .await
                     .insert(source_party_id);
-                self.inner.warmup_notify.notify_waiters();
+                self.inner.syn_ack_notify.notify_waiters();
+
+                // Echo back a Ping so the sender also sees us (ACK).
+                // Only on first receipt to avoid infinite ping-pong.
+                if was_new {
+                    let ack = MpcMessage::Ping {
+                        source_party_id: self.inner.party_id,
+                    };
+                    if let Ok(data) = self.sign_mpc_message(&ack) {
+                        let label = format!("Ack P{}→P{}", self.inner.party_id, source_party_id);
+                        let proxy = self.clone();
+                        tokio::spawn(async move {
+                            proxy.send_reliable(source_party_id, &data, &label).await;
+                        });
+                    }
+                }
             }
             MpcMessage::RouteUpdate {
                 source_party_id,
@@ -388,8 +406,12 @@ impl MpcTunnelProxy {
 
     /// Process an incoming `AppCall` for MPC tunnel messages.
     ///
+    /// `message` contains the inner `MpcMessage` bytes (already extracted from
+    /// the [`MpcEnvelope`] by the coordinator's routing layer).
+    ///
     /// All MPC data is sent via `app_call` for confirmed delivery.
     /// Returns ACK `[0x01]` on success so the sender knows the data arrived.
+    #[tracing::instrument(skip_all)]
     pub async fn process_call(&self, message: Vec<u8>, signer: [u8; 32]) -> MarketResult<Vec<u8>> {
         let call_start = std::time::Instant::now();
         // Peek at message type — Open still needs async spawn (30s+ TCP connect).

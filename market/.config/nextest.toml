@@ -12,7 +12,7 @@ retries = 0
 # MASCOT MPC over Veilid: ~600-900s per auction execution.
 # Sequential auction test runs 2 auctions → needs ~2100s.
 test-threads = 1
-slow-timeout = { period = "600s", terminate-after = 10 }
+slow-timeout = { period = "60s", terminate-after = 10 }
 fail-fast = false
 
 # Setup script for E2E tests - sets LD_PRELOAD for IP spoofing

@@ -283,7 +283,11 @@ impl MpcOrchestrator {
         }
     }
 
-    /// Send decryption hash to auction winner via their MPC route
+    /// Send decryption hash to auction winner via their MPC route.
+    ///
+    /// Uses the same retry loop as `send_winner_challenge` — if the route
+    /// dies between challenge and key delivery the winner would prove they
+    /// won but never receive the decryption key.
     pub async fn send_decryption_hash(
         &self,
         listing_key: &RecordKey,
@@ -304,51 +308,83 @@ impl MpcOrchestrator {
 
         let data = message.to_signed_bytes(&self.signing_key)?;
 
-        // Look up the winner's route while holding locks, then release before async work
-        let winner_route = {
-            let route_manager = {
-                let managers = self.route_managers.lock().await;
-                managers
-                    .get(listing_key)
-                    .ok_or_else(|| {
-                        MarketError::InvalidState(format!(
+        let start = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_secs(crate::config::WINNER_REVEAL_TIMEOUT_SECS);
+
+        loop {
+            let winner_route = {
+                let route_manager = {
+                    let managers = self.route_managers.lock().await;
+                    managers.get(listing_key).cloned()
+                };
+                let Some(route_manager) = route_manager else {
+                    if start.elapsed() >= max_wait {
+                        return Err(MarketError::InvalidState(format!(
                             "Route manager not found for listing {listing_key}"
-                        ))
-                    })?
-                    .clone()
-            };
-            let received_routes = {
-                let mgr = route_manager.lock().await;
-                mgr.received_routes.clone()
-            };
-            let routes = received_routes.lock().await;
-            routes.get(winner).cloned().ok_or_else(|| {
-                MarketError::NotFound(format!(
-                    "Winner's MPC route not found in route manager for listing {listing_key}"
-                ))
-            })?
-        };
+                        )));
+                    }
+                    warn!(
+                        "Route manager not found for listing {}, retrying",
+                        listing_key
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
+                    continue;
+                };
 
-        info!("Found winner's MPC route: {}", winner_route);
-        let routing_context = self.safe_routing_context()?;
+                let received_routes = {
+                    let mgr = route_manager.lock().await;
+                    mgr.received_routes.clone()
+                };
+                let routes = received_routes.lock().await;
+                if let Some(route) = routes.get(winner).cloned() {
+                    route
+                } else {
+                    if start.elapsed() >= max_wait {
+                        return Err(MarketError::NotFound(format!(
+                            "Winner's MPC route not found for listing {listing_key}"
+                        )));
+                    }
+                    warn!(
+                        "Winner route not found for listing {}, retrying",
+                        listing_key
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
+                    continue;
+                }
+            };
 
-        match routing_context
-            .app_call(Target::RouteId(winner_route.clone()), data)
-            .await
-        {
-            Ok(_reply) => {
-                info!(
-                    "Successfully sent decryption hash to winner via MPC route {}",
-                    winner_route
-                );
-                self.cleanup_route_manager(listing_key).await;
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to send to winner's MPC route: {}", e);
-                Err(MarketError::Network(format!(
-                    "Failed to send decryption hash: {e}"
-                )))
+            let routing_context = self.safe_routing_context()?;
+
+            match routing_context
+                .app_call(Target::RouteId(winner_route.clone()), data.clone())
+                .await
+            {
+                Ok(_reply) => {
+                    info!(
+                        "Successfully sent decryption hash to winner via MPC route {}",
+                        winner_route
+                    );
+                    self.cleanup_route_manager(listing_key).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    if start.elapsed() >= max_wait {
+                        return Err(MarketError::Network(format!(
+                            "Failed to send decryption hash: {e}"
+                        )));
+                    }
+                    warn!("Failed to send decryption hash, retrying: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
+                }
             }
         }
     }

@@ -8,12 +8,20 @@
 /// - Subkey 1: Bid announcement registry (G-Set CRDT, seller-owned)
 pub const DHT_SUBKEY_COUNT: u16 = 2;
 
-/// Subkey indices for DHT record data.
+/// Subkey indices for listing DHT records.
 pub mod subkeys {
     /// Primary listing data.
     pub const LISTING: u32 = 0;
     /// Bid announcement registry (state-based G-Set, merged at read time).
     pub const BID_ANNOUNCEMENTS: u32 = 1;
+}
+
+/// Subkey indices for bid DHT records.
+pub mod bid_subkeys {
+    /// Primary bid data (BidRecord).
+    pub const BID_DATA: u32 = 0;
+    /// MPC route blob for DHT-backed route exchange fallback.
+    pub const MPC_ROUTE: u32 = 1;
 }
 
 /// Default network key for shared-keypair registry derivation.
@@ -116,13 +124,12 @@ pub const MPC_BARRIER_POLL_SECS: u64 = 1;
 /// Wait for peer route refresh announcements after barrier.
 pub const MPC_ROUTE_PROPAGATION_WAIT_SECS: u64 = 8;
 
-/// Timeout for MPC tunnel warmup (Ping round-trip to all peers).
-pub const MPC_TUNNEL_WARMUP_TIMEOUT_SECS: u64 = 300;
+/// Per-round timeout for MPC tunnel SYN/ACK (Ping round-trip).
+/// If a round fails, routes are restored and the next round begins.
+pub const MPC_SYN_ACK_ROUND_SECS: u64 = 5;
 
-// --- MPC Tunnel ---
-
-/// Interval between Ping messages during MPC tunnel warmup.
-pub const MPC_PING_INTERVAL_SECS: u64 = 3;
+/// Maximum SYN/ACK rounds before failing (5s × 6 = 30s total).
+pub const MPC_SYN_ACK_MAX_ROUNDS: u32 = 6;
 
 /// Interval for Open re-send retries to handle route-death.
 pub const MPC_OPEN_RESEND_INTERVAL_SECS: u64 = 5;
@@ -167,6 +174,7 @@ pub const DHT_RETRY_INITIAL_DELAY_MS: u64 = 50;
 pub const MPC_PROTOCOL_ENV: &str = "MPC_PROTOCOL";
 
 use std::path::PathBuf;
+use tracing::warn;
 
 /// Centralized configuration for the marketplace application.
 ///
@@ -232,10 +240,19 @@ impl MarketConfig {
             .unwrap_or_else(|_| DEFAULT_MP_SPDZ_DIR.to_string())
             .into();
 
-        let node_offset = std::env::var("MARKET_NODE_OFFSET")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(DEFAULT_NODE_OFFSET);
+        let node_offset = match std::env::var("MARKET_NODE_OFFSET") {
+            Ok(s) => match s.parse::<u16>() {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "MARKET_NODE_OFFSET='{}' is not a valid u16 ({}), using default {}",
+                        s, e, DEFAULT_NODE_OFFSET
+                    );
+                    DEFAULT_NODE_OFFSET
+                }
+            },
+            Err(_) => DEFAULT_NODE_OFFSET,
+        };
 
         let insecure_storage = std::env::var("MARKET_INSECURE_STORAGE")
             .map(|v| v.eq_ignore_ascii_case("true"))

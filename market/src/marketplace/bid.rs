@@ -29,8 +29,10 @@ pub struct Bid {
     pub commitment: [u8; 32],
 
     /// Secret nonce used in commitment (revealed after auction ends)
-    /// Only set when bid is revealed
-    pub reveal_nonce: Option<[u8; 32]>,
+    /// Only set when bid is revealed.  Skipped during serialization to
+    /// prevent accidental leakage over the wire.
+    #[serde(skip_serializing)]
+    pub(crate) reveal_nonce: Option<[u8; 32]>,
 }
 
 impl Bid {
@@ -236,7 +238,8 @@ mod tests {
         assert_eq!(original.amount, restored.amount);
         assert_eq!(original.timestamp, restored.timestamp);
         assert_eq!(original.commitment, restored.commitment);
-        assert_eq!(original.reveal_nonce, restored.reveal_nonce);
+        // reveal_nonce is skip_serializing — must be None after round-trip
+        assert_eq!(restored.reveal_nonce, None);
     }
 
     #[test]

@@ -5,14 +5,12 @@
 //! external processes.
 
 pub mod dht;
-pub mod process;
 pub mod random;
 pub mod time;
 
 // Re-export all traits for crate-internal use.
 // The public API surface is controlled by lib.rs re-exports.
 pub use dht::DhtStore;
-pub use process::MpcResult;
 pub use random::RandomSource;
 pub use time::TimeProvider;
 

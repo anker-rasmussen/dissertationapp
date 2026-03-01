@@ -118,19 +118,9 @@ fn decrypt_content_impl(
 }
 
 impl PublicListing {
-    /// Check if the auction is still active (hasn't ended yet)
-    pub fn is_active(&self) -> bool {
-        self.is_active_at(now_unix())
-    }
-
     /// Check if the auction is still active at a specific timestamp
     pub fn is_active_at(&self, now: u64) -> bool {
         is_active_impl(self.status, self.auction_end, now)
-    }
-
-    /// Check if the auction has ended
-    pub fn has_ended(&self) -> bool {
-        self.has_ended_at(now_unix())
     }
 
     /// Check if the auction has ended at a specific timestamp
@@ -185,29 +175,14 @@ impl Listing {
         ListingBuilder::new(time)
     }
 
-    /// Check if the auction is still active (hasn't ended yet)
-    pub fn is_active(&self) -> bool {
-        self.is_active_at(now_unix())
-    }
-
     /// Check if the auction is still active at a specific timestamp
     pub fn is_active_at(&self, now: u64) -> bool {
         is_active_impl(self.status, self.auction_end, now)
     }
 
-    /// Check if the auction has ended
-    pub fn has_ended(&self) -> bool {
-        self.has_ended_at(now_unix())
-    }
-
     /// Check if the auction has ended at a specific timestamp
     pub const fn has_ended_at(&self, now: u64) -> bool {
         has_ended_impl(self.auction_end, now)
-    }
-
-    /// Get time remaining in seconds (0 if ended)
-    pub fn time_remaining(&self) -> u64 {
-        self.time_remaining_at(now_unix())
     }
 
     /// Get time remaining at a specific timestamp

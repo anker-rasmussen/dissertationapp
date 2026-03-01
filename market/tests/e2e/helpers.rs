@@ -662,7 +662,7 @@ pub async fn wait_for_broadcast_routes(
     let max_wait = Duration::from_secs(timeout_secs);
     loop {
         let routes = {
-            let ops = coordinator.registry_ops().lock().await;
+            let mut ops = coordinator.registry_ops().lock().await;
             ops.fetch_route_blobs(my_node_id).await
         };
         match routes {

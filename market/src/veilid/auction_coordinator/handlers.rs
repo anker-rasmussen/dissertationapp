@@ -202,11 +202,11 @@ impl AuctionCoordinator {
 
             let routing_context = self.mpc.safe_routing_context()?;
             match routing_context
-                .app_message(Target::RouteId(route_id), data.clone())
+                .app_call(Target::RouteId(route_id), data.clone())
                 .await
             {
-                Ok(()) => {
-                    info!("Sent WinnerBidReveal to seller via MPC route");
+                Ok(_reply) => {
+                    info!("Sent WinnerBidReveal to seller via MPC route (confirmed)");
                     return Ok(());
                 }
                 Err(e) => {
@@ -527,6 +527,15 @@ impl AuctionCoordinator {
                 false
             }
         };
+
+        // Phase 1b: seed local replica from DHT now that we know the key
+        if should_replay {
+            let mut ops = self.registry_ops.lock().await;
+            if let Err(e) = ops.fetch_registry(true).await {
+                warn!("Failed to seed local replica from DHT: {}", e);
+            }
+            drop(ops);
+        }
 
         // Phase 2: drain pending registrations and replay (locks acquired separately)
         if should_replay {

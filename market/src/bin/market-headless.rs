@@ -220,19 +220,33 @@ async fn main() {
     });
     info!("Ready event emitted");
 
-    // Command loop
+    // Command loop with signal handling
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM handler");
 
     loop {
-        let line = match lines.next_line().await {
-            Ok(Some(l)) => l,
-            Ok(None) => {
-                info!("stdin closed, shutting down");
+        let line = tokio::select! {
+            result = lines.next_line() => {
+                match result {
+                    Ok(Some(l)) => l,
+                    Ok(None) => {
+                        info!("stdin closed, shutting down");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("stdin read error: {}", e);
+                        break;
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl-C received in headless, shutting down");
                 break;
             }
-            Err(e) => {
-                error!("stdin read error: {}", e);
+            _ = sigterm.recv() => {
+                info!("SIGTERM received in headless, shutting down");
                 break;
             }
         };
@@ -341,6 +355,7 @@ async fn main() {
     }
 
     // Graceful shutdown
+    coordinator.shutdown().await;
     shutdown.cancel();
     let node = app_state.node_holder.write().take();
     if let Some(mut n) = node {
