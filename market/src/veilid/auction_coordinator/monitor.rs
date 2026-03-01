@@ -51,7 +51,7 @@ impl AuctionCoordinator {
         }
         drop(managers);
 
-        // Refresh active MPC tunnel proxy routes.
+        // Refresh all active MPC tunnel proxy routes.
         // app_message to a dead route silently succeeds (fire-and-forget),
         // so we proactively reimport all party blobs on any route death.
         let all_dead: Vec<_> = dead_routes
@@ -59,12 +59,18 @@ impl AuctionCoordinator {
             .chain(dead_remote_routes.iter())
             .cloned()
             .collect();
-        if let Some(tunnel) = self.mpc.active_tunnel_proxy().lock().await.as_ref() {
+        let tunnels: Vec<_> = self
+            .mpc
+            .active_tunnel_proxies()
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        for tunnel in &tunnels {
             tunnel.handle_dead_routes(&all_dead).await;
-            // If our own receiving route was recreated, broadcast the new
-            // blob to all peers so they update their sending table.
-            if let Some(blob) = new_route_blob {
-                tunnel.broadcast_route_update(blob).await;
+            if let Some(blob) = &new_route_blob {
+                tunnel.broadcast_route_update(blob.clone()).await;
             }
         }
     }

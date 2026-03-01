@@ -67,8 +67,9 @@ pub struct MpcOrchestrator {
     pub(crate) node_offset: u16,
     /// Ed25519 signing key for authenticating outgoing messages.
     pub(crate) signing_key: SigningKey,
-    /// Currently active MPC tunnel proxy (if any)
-    pub(crate) active_tunnel_proxy: Arc<Mutex<Option<MpcTunnelProxy>>>,
+    /// Active MPC tunnel proxies keyed by session ID (listing key string).
+    /// Supports concurrent auctions — each auction gets its own tunnel.
+    pub(crate) active_tunnel_proxies: Arc<Mutex<HashMap<String, MpcTunnelProxy>>>,
     /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
     pub(crate) route_managers: RouteManagerMap,
     /// Pending verifications: listing_key -> (winner_pubkey, mpc_winning_bid, verified?)
@@ -77,10 +78,11 @@ pub struct MpcOrchestrator {
     pub(crate) expected_winner_listings: Arc<Mutex<HashSet<RecordKey>>>,
     /// Listings currently in MPC route-exchange / execution flow.
     pub(crate) active_auctions: Arc<Mutex<HashSet<RecordKey>>>,
-    /// MPC messages that arrived before the tunnel proxy was created.
-    /// Flushed to the proxy once it's activated.
+    /// MPC messages that arrived before the tunnel proxy was created,
+    /// keyed by session ID (listing key string). Flushed per-session
+    /// once the corresponding tunnel proxy is activated.
     #[allow(clippy::type_complexity)]
-    pub(crate) pending_mpc_messages: Arc<Mutex<Vec<(Vec<u8>, [u8; 32])>>>,
+    pub(crate) pending_mpc_messages: Arc<Mutex<HashMap<String, Vec<(Vec<u8>, [u8; 32])>>>>,
     /// Set after MPC completes so the monitoring loop can refresh broadcast
     /// routes immediately.  Routes go stale during MPC (keepalive suppressed)
     /// and peers in a subsequent auction need fresh blobs.
@@ -108,12 +110,12 @@ impl MpcOrchestrator {
             bid_storage,
             node_offset,
             signing_key,
-            active_tunnel_proxy: Arc::new(Mutex::new(None)),
+            active_tunnel_proxies: Arc::new(Mutex::new(HashMap::new())),
             route_managers: Arc::new(Mutex::new(HashMap::new())),
             pending_verifications: Arc::new(Mutex::new(HashMap::new())),
             expected_winner_listings: Arc::new(Mutex::new(HashSet::new())),
             active_auctions: Arc::new(Mutex::new(HashSet::new())),
-            pending_mpc_messages: Arc::new(Mutex::new(Vec::new())),
+            pending_mpc_messages: Arc::new(Mutex::new(HashMap::new())),
             needs_route_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -128,30 +130,43 @@ impl MpcOrchestrator {
         &self.pending_verifications
     }
 
-    /// Access to active tunnel proxy (needed by AuctionCoordinator for message forwarding)
-    pub const fn active_tunnel_proxy(&self) -> &Arc<Mutex<Option<MpcTunnelProxy>>> {
-        &self.active_tunnel_proxy
+    /// Access to active tunnel proxies (needed by AuctionCoordinator for message forwarding)
+    pub const fn active_tunnel_proxies(&self) -> &Arc<Mutex<HashMap<String, MpcTunnelProxy>>> {
+        &self.active_tunnel_proxies
     }
 
     /// Buffer an MPC message that arrived before the tunnel proxy was created.
-    pub async fn buffer_mpc_message(&self, payload: Vec<u8>, signer: [u8; 32]) {
+    pub async fn buffer_mpc_message(&self, session_id: &str, payload: Vec<u8>, signer: [u8; 32]) {
         self.pending_mpc_messages
             .lock()
             .await
+            .entry(session_id.to_string())
+            .or_default()
             .push((payload, signer));
     }
 
-    /// Flush buffered MPC messages to the now-active tunnel proxy.
-    pub async fn flush_buffered_mpc_messages(&self) {
-        let buffered: Vec<_> = self.pending_mpc_messages.lock().await.drain(..).collect();
+    /// Flush buffered MPC messages for a specific session to its tunnel proxy.
+    pub async fn flush_buffered_mpc_messages(&self, session_id: &str) {
+        let buffered: Vec<_> = self
+            .pending_mpc_messages
+            .lock()
+            .await
+            .remove(session_id)
+            .unwrap_or_default();
         if buffered.is_empty() {
             return;
         }
-        let proxy = self.active_tunnel_proxy.lock().await.clone();
+        let proxy = self
+            .active_tunnel_proxies
+            .lock()
+            .await
+            .get(session_id)
+            .cloned();
         if let Some(proxy) = proxy {
             info!(
-                "Flushing {} buffered MPC messages to tunnel proxy",
-                buffered.len()
+                "Flushing {} buffered MPC messages for session {}",
+                buffered.len(),
+                session_id
             );
             for (payload, signer) in buffered {
                 if let Err(e) = proxy.process_message(payload, signer).await {
@@ -509,10 +524,14 @@ impl MpcOrchestrator {
             .build_party_maps(bid_index, seller_pubkey, all_parties)
             .await?;
 
+        // Session ID = listing key string (deterministic, all parties agree).
+        let session_id = listing_key.to_string();
+
         // Start MPC tunnel proxy with the routes
         let tunnel_proxy = MpcTunnelProxy::new(super::mpc::MpcTunnelConfig {
             api: self.api.clone(),
             party_id,
+            session_id: session_id.clone(),
             party_routes: routes,
             party_blobs: maps.party_blobs,
             node_offset: self.node_offset,
@@ -523,12 +542,15 @@ impl MpcOrchestrator {
         });
         tunnel_proxy.run()?;
 
-        // Store tunnel proxy so AppMessages can be routed to it
-        *self.active_tunnel_proxy.lock().await = Some(tunnel_proxy.clone());
+        // Store tunnel proxy keyed by session so concurrent auctions route correctly
+        self.active_tunnel_proxies
+            .lock()
+            .await
+            .insert(session_id.clone(), tunnel_proxy.clone());
 
-        // Flush any MPC messages that arrived before the tunnel proxy was created
-        // (from faster parties that already started their MPC execution).
-        self.flush_buffered_mpc_messages().await;
+        // Flush any MPC messages for this session that arrived before the tunnel
+        // proxy was created (from faster parties that already started their MPC execution).
+        self.flush_buffered_mpc_messages(&session_id).await;
 
         // Warm up MPC routes: send Pings to all peers and wait until all
         // peers have pinged us back.  This ensures routes are alive and
@@ -588,7 +610,7 @@ impl MpcOrchestrator {
         let process_output = match result {
             Ok(output) => output,
             Err(e) => {
-                *self.active_tunnel_proxy.lock().await = None;
+                self.active_tunnel_proxies.lock().await.remove(&session_id);
                 self.cleanup_route_manager(listing_key).await;
                 return Err(e);
             }
@@ -597,8 +619,8 @@ impl MpcOrchestrator {
         self.process_mpc_result(party_id, &process_output, listing_key, all_parties)
             .await?;
 
-        // Clear active tunnel proxy reference before guard drops
-        *self.active_tunnel_proxy.lock().await = None;
+        // Remove this session's tunnel proxy before guard drops
+        self.active_tunnel_proxies.lock().await.remove(&session_id);
         // _cleanup_guard drops here, calling tunnel_proxy.cleanup() + removing hosts file
 
         // Route manager cleanup is handled by the per-role handlers:

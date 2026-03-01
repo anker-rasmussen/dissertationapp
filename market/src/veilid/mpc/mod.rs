@@ -39,6 +39,23 @@ pub(super) const fn party_port(base_port: u16, party_id: usize) -> u16 {
     base_port + party_id as u16
 }
 
+/// Envelope wrapping serialized [`MpcMessage`] bytes with a session
+/// identifier so concurrent auctions can be routed to the correct
+/// tunnel proxy.
+///
+/// `session_id` is the listing key string — deterministic and known to
+/// all parties in the same auction without extra coordination.
+///
+/// The coordinator peek-deserializes this to extract `session_id` for
+/// routing, then forwards the inner `message` bytes to the matching
+/// tunnel proxy which deserializes and processes the `MpcMessage`.
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct MpcEnvelope {
+    pub session_id: String,
+    /// Bincode-serialized [`MpcMessage`].
+    pub message: Vec<u8>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) enum MpcMessage {
     Open {
@@ -102,6 +119,8 @@ pub(super) const SEND_PIPELINE_DEPTH: u32 = 8;
 pub(super) struct MpcTunnelProxyInner {
     pub(super) api: VeilidAPI,
     pub(super) party_id: usize,
+    /// Session identifier (listing key string) for MPC envelope tagging.
+    pub(super) session_id: String,
     /// Imported remote private route handles per party.
     pub(super) party_routes: Mutex<HashMap<usize, RouteId>>,
     /// Raw route blobs per party — for re-import when a route expires.
@@ -139,6 +158,9 @@ pub(super) struct MpcTunnelProxyInner {
 pub struct MpcTunnelConfig {
     pub api: VeilidAPI,
     pub party_id: usize,
+    /// Session identifier (listing key string) — tags every outgoing
+    /// [`MpcEnvelope`] so the receiver can route to the correct tunnel.
+    pub session_id: String,
     pub party_routes: HashMap<usize, RouteId>,
     pub party_blobs: HashMap<usize, Vec<u8>>,
     pub node_offset: u16,
@@ -165,14 +187,16 @@ impl MpcTunnelProxy {
             .collect();
 
         info!(
-            "MPC TunnelProxy for Party {}: using base port {} (node offset {}), {} authenticated peers, live_routes={}",
-            config.party_id, base_port, config.node_offset, signer_to_party.len(), config.live_routes.is_some()
+            "MPC TunnelProxy for Party {} session {}: base port {} (offset {}), {} peers, live_routes={}",
+            config.party_id, config.session_id, base_port, config.node_offset,
+            signer_to_party.len(), config.live_routes.is_some()
         );
 
         Self {
             inner: Arc::new(MpcTunnelProxyInner {
                 api: config.api,
                 party_id: config.party_id,
+                session_id: config.session_id,
                 party_routes: Mutex::new(config.party_routes),
                 party_blobs: Arc::new(Mutex::new(config.party_blobs)),
                 signer_to_party,
@@ -288,14 +312,25 @@ impl MpcTunnelProxy {
         }
     }
 
-    /// Serialize an MPC message and wrap it in a signed envelope.
+    /// Serialize an MPC message, wrap it in an [`MpcEnvelope`] tagged with
+    /// this tunnel's session ID, and sign the result.
     pub(super) fn sign_mpc_message(&self, msg: &MpcMessage) -> MarketResult<Vec<u8>> {
         let t = std::time::Instant::now();
-        let payload = bincode::options()
+        let msg_bytes = bincode::options()
             .with_limit(super::bid_announcement::MAX_BINCODE_SIZE)
             .serialize(msg)
             .map_err(|e| {
                 MarketError::Serialization(format!("Failed to serialize MPC message: {e}"))
+            })?;
+        let mpc_envelope = MpcEnvelope {
+            session_id: self.inner.session_id.clone(),
+            message: msg_bytes,
+        };
+        let payload = bincode::options()
+            .with_limit(super::bid_announcement::MAX_BINCODE_SIZE)
+            .serialize(&mpc_envelope)
+            .map_err(|e| {
+                MarketError::Serialization(format!("Failed to serialize MPC envelope: {e}"))
             })?;
         let envelope = SignedEnvelope::sign(payload, &self.inner.signing_key);
         let result = envelope.to_bytes();
@@ -583,5 +618,64 @@ mod tests {
         let base = base_port_for_offset(7); // 5070
         assert_eq!(party_port(base, 0), 5070);
         assert_eq!(party_port(base, 3), 5073);
+    }
+
+    #[test]
+    fn test_mpc_envelope_roundtrip() {
+        let msg = MpcMessage::Data {
+            source_party_id: 1,
+            stream_id: 7,
+            seq: 42,
+            payload: vec![0xDE, 0xAD],
+        };
+        let msg_bytes = bincode::serialize(&msg).unwrap();
+        let envelope = MpcEnvelope {
+            session_id: "VLD0:abc123".to_string(),
+            message: msg_bytes.clone(),
+        };
+        let env_bytes = bincode::serialize(&envelope).unwrap();
+        let decoded: MpcEnvelope = bincode::deserialize(&env_bytes).unwrap();
+        assert_eq!(decoded.session_id, "VLD0:abc123");
+        assert_eq!(decoded.message, msg_bytes);
+
+        let inner: MpcMessage = bincode::deserialize(&decoded.message).unwrap();
+        match inner {
+            MpcMessage::Data {
+                source_party_id,
+                stream_id,
+                seq,
+                payload,
+            } => {
+                assert_eq!(source_party_id, 1);
+                assert_eq!(stream_id, 7);
+                assert_eq!(seq, 42);
+                assert_eq!(payload, vec![0xDE, 0xAD]);
+            }
+            other => panic!("Expected Data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mpc_envelope_session_id_routing() {
+        let msg = MpcMessage::Ping { source_party_id: 0 };
+        let msg_bytes = bincode::serialize(&msg).unwrap();
+
+        let env_a = MpcEnvelope {
+            session_id: "auction-A".to_string(),
+            message: msg_bytes.clone(),
+        };
+        let env_b = MpcEnvelope {
+            session_id: "auction-B".to_string(),
+            message: msg_bytes,
+        };
+
+        let bytes_a = bincode::serialize(&env_a).unwrap();
+        let bytes_b = bincode::serialize(&env_b).unwrap();
+        assert_ne!(bytes_a, bytes_b);
+
+        let dec_a: MpcEnvelope = bincode::deserialize(&bytes_a).unwrap();
+        let dec_b: MpcEnvelope = bincode::deserialize(&bytes_b).unwrap();
+        assert_eq!(dec_a.session_id, "auction-A");
+        assert_eq!(dec_b.session_id, "auction-B");
     }
 }

@@ -14,10 +14,13 @@ use tracing::{debug, info, warn};
 use veilid_core::{PublicKey, RecordKey, RouteBlob, RouteId, VeilidAPI};
 
 use super::auction_logic::AuctionLogic;
-use super::bid_announcement::{validate_timestamp, AuctionMessage, BidAnnouncementRegistry};
+use super::bid_announcement::{
+    bincode_deserialize_limited, validate_timestamp, AuctionMessage, BidAnnouncementRegistry,
+};
 use super::bid_storage::BidStorage;
 use super::dht::{DHTOperations, OwnedDHTRecord};
 use super::listing_ops::ListingOperations;
+use super::mpc::MpcEnvelope;
 use super::mpc_orchestrator::MpcOrchestrator;
 use super::registry::RegistryOperations;
 use super::registry_types::RegistryEntry;
@@ -193,19 +196,36 @@ impl AuctionCoordinator {
             return Ok(());
         }
 
-        // Step 3: forward to active MPC tunnel proxy.
-        // Clone the proxy out of the lock before awaiting process_message
-        // to avoid holding the Mutex across the .await point.
-        let proxy = self.mpc.active_tunnel_proxy().lock().await.clone();
-        if let Some(proxy) = proxy.as_ref() {
-            proxy.process_message(payload, signer).await?;
+        // Step 3: peek-deserialize MpcEnvelope to extract session_id for routing.
+        let envelope: MpcEnvelope = match bincode_deserialize_limited(&payload) {
+            Ok(env) => env,
+            Err(e) => {
+                debug!("Payload is neither AuctionMessage nor MpcEnvelope: {}", e);
+                return Ok(());
+            }
+        };
+
+        let session_id = &envelope.session_id;
+        let proxy = self
+            .mpc
+            .active_tunnel_proxies()
+            .lock()
+            .await
+            .get(session_id)
+            .cloned();
+
+        if let Some(proxy) = proxy {
+            proxy.process_message(envelope.message, signer).await?;
         } else {
-            // Tunnel proxy not ready yet — buffer the message so it's
-            // delivered once the proxy is activated.  This handles the
-            // case where faster parties send Opens/Data before this
-            // node has started its MPC execution.
-            debug!("MPC message buffered (tunnel proxy not ready)");
-            self.mpc.buffer_mpc_message(payload, signer).await;
+            // Tunnel proxy not ready yet — buffer per-session so it's
+            // delivered once the corresponding proxy is activated.
+            debug!(
+                "MPC message buffered for session {} (tunnel proxy not ready)",
+                session_id
+            );
+            self.mpc
+                .buffer_mpc_message(session_id, envelope.message, signer)
+                .await;
         }
         Ok(())
     }
@@ -616,14 +636,35 @@ impl AuctionCoordinator {
                 return Ok(vec![0x01]);
             }
 
-            // Not an AuctionMessage — must be an MPC tunnel message.
-            let tunnel = self.mpc.active_tunnel_proxy().lock().await.clone();
+            // Not an AuctionMessage — peek-deserialize MpcEnvelope for routing.
+            let envelope: MpcEnvelope = match bincode_deserialize_limited(&payload) {
+                Ok(env) => env,
+                Err(e) => {
+                    debug!(
+                        "AppCall payload is neither AuctionMessage nor MpcEnvelope: {}",
+                        e
+                    );
+                    return Ok(vec![0x00]);
+                }
+            };
+
+            let tunnel = self
+                .mpc
+                .active_tunnel_proxies()
+                .lock()
+                .await
+                .get(&envelope.session_id)
+                .cloned();
+
             if let Some(tunnel) = tunnel {
-                return tunnel.process_call(payload, signer).await;
+                return tunnel.process_call(envelope.message, signer).await;
             }
 
             // MPC message but tunnel not ready — NACK so sender retries.
-            debug!("MPC message received but tunnel proxy not ready — sending NACK");
+            debug!(
+                "MPC message for session {} but tunnel proxy not ready — sending NACK",
+                envelope.session_id
+            );
             return Ok(vec![0x00]);
         }
 

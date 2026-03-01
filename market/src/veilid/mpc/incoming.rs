@@ -11,7 +11,8 @@ use crate::error::{MarketError, MarketResult};
 use crate::veilid::bid_announcement::bincode_deserialize_limited;
 
 impl MpcTunnelProxy {
-    /// Process incoming Veilid message (already unwrapped from [`SignedEnvelope`]).
+    /// Process incoming MPC message bytes (inner `MpcMessage` already extracted
+    /// from the [`MpcEnvelope`] by the coordinator's routing layer).
     ///
     /// `signer` is the Ed25519 verifying key from the envelope. The method
     /// verifies that the claimed `source_party_id` matches the signer via the
@@ -388,6 +389,9 @@ impl MpcTunnelProxy {
     }
 
     /// Process an incoming `AppCall` for MPC tunnel messages.
+    ///
+    /// `message` contains the inner `MpcMessage` bytes (already extracted from
+    /// the [`MpcEnvelope`] by the coordinator's routing layer).
     ///
     /// All MPC data is sent via `app_call` for confirmed delivery.
     /// Returns ACK `[0x01]` on success so the sender knows the data arrived.
