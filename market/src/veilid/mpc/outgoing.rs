@@ -70,12 +70,13 @@ impl MpcTunnelProxy {
     }
 
     /// Handle a single outgoing MP-SPDZ connection through the tunnel.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_outgoing_connection(
         &self,
         socket: tokio::net::TcpStream,
         target_pid: usize,
         stream_id: u64,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> MarketResult<()> {
         let (mut rd, wr) = socket.into_split();
         let session_key = (target_pid, stream_id);
@@ -121,12 +122,20 @@ impl MpcTunnelProxy {
         let mut total_bytes_sent: u64 = 0;
         let mut last_progress_log = std::time::Instant::now();
         let send_sem = Arc::new(Semaphore::new(SEND_PIPELINE_DEPTH as usize));
+        let mut cancelled = false;
         loop {
-            let n = match rd.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(e) => {
-                    error!("TCP read error (stream {}): {}", stream_id, e);
+            let n = tokio::select! {
+                result = rd.read(&mut buf) => match result {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) => {
+                        error!("TCP read error (stream {}): {}", stream_id, e);
+                        break;
+                    }
+                },
+                () = cancel.cancelled() => {
+                    debug!("Outgoing connection stream {} cancelled", stream_id);
+                    cancelled = true;
                     break;
                 }
             };
@@ -174,17 +183,22 @@ impl MpcTunnelProxy {
             }
         }
 
-        // Drain pipeline: wait for all in-flight sends before Close
-        let _ = send_sem.acquire_many(SEND_PIPELINE_DEPTH).await;
+        // On cancellation, skip the pipeline drain and Close send — we're
+        // shutting down and need to release the socket promptly so that a
+        // retry can re-bind the same port.
+        if !cancelled {
+            // Drain pipeline: wait for all in-flight sends before Close
+            let _ = send_sem.acquire_many(SEND_PIPELINE_DEPTH).await;
 
-        // Send Close via app_call (best-effort)
-        let close_msg = MpcMessage::Close {
-            source_party_id: my_pid,
-            stream_id,
-        };
-        if let Ok(close_data) = self.sign_mpc_message(&close_msg) {
-            let label = format!("Close P{my_pid}→P{target_pid} s{stream_id}");
-            self.send_reliable(target_pid, &close_data, &label).await;
+            // Send Close via app_call (best-effort)
+            let close_msg = MpcMessage::Close {
+                source_party_id: my_pid,
+                stream_id,
+            };
+            if let Ok(close_data) = self.sign_mpc_message(&close_msg) {
+                let label = format!("Close P{my_pid}→P{target_pid} s{stream_id}");
+                self.send_reliable(target_pid, &close_data, &label).await;
+            }
         }
 
         // Cleanup
