@@ -205,7 +205,7 @@ impl AuctionCoordinator {
                 .app_call(Target::RouteId(route_id), data.clone())
                 .await
             {
-                Ok(_reply) => {
+                Ok(_) => {
                     info!("Sent WinnerBidReveal to seller via MPC route (confirmed)");
                     return Ok(());
                 }

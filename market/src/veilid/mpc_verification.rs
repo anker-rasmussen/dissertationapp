@@ -261,7 +261,7 @@ impl MpcOrchestrator {
                 .app_call(Target::RouteId(winner_route), data.clone())
                 .await
             {
-                Ok(_reply) => {
+                Ok(_) => {
                     info!("Sent WinnerDecryptionRequest challenge to winner via MPC route");
                     return;
                 }
@@ -365,7 +365,7 @@ impl MpcOrchestrator {
                 .app_call(Target::RouteId(winner_route.clone()), data.clone())
                 .await
             {
-                Ok(_reply) => {
+                Ok(_) => {
                     info!(
                         "Successfully sent decryption hash to winner via MPC route {}",
                         winner_route

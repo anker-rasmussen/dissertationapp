@@ -1,8 +1,7 @@
 //! Trait abstractions for dependency injection and testability.
 //!
 //! This module provides trait-based abstractions for external dependencies,
-//! enabling unit testing without requiring actual network connections or
-//! external processes.
+//! enabling unit testing without requiring actual network connections.
 
 pub mod dht;
 pub mod random;

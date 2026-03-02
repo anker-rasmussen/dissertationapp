@@ -34,7 +34,7 @@ pub struct NodeState {
 pub struct DevNetConfig {
     pub network_key: String,
     pub bootstrap_nodes: Vec<String>,
-    /// Port offset from base port 5160 (0=bootstrap, 1-4=nodes, 5+=market clients)
+    /// Port offset from base port 5160 (0=bootstrap, 1-19=devnet nodes, 20+=market instances)
     pub port_offset: u16,
     /// Routing table limit for over-attached peers.
     pub limit_over_attached: u32,
@@ -182,7 +182,7 @@ impl VeilidNode {
                 routing_table: VeilidConfigRoutingTable {
                     bootstrap: devnet.bootstrap_nodes.clone(),
                     bootstrap_keys: vec![], // No signature verification for devnet
-                    // Limits for 9-node devnet (9 docker + N market instances).
+                    // Limits for 20-node devnet (1 bootstrap + 19 regular + N market instances).
                     // Over-attached at 16 peers to ensure enough routing table
                     // entries for unique safety route construction.
                     limit_over_attached: devnet.limit_over_attached,
@@ -235,8 +235,8 @@ impl VeilidNode {
         };
 
         // For devnet, disable capabilities not needed by market nodes.
-        // RELAY is left enabled so safe routing works (devnet nodes 1-4 are
-        // relay-capable, and market nodes need to construct safe routes).
+        // RELAY is left enabled so safe routing works (all 19 regular devnet
+        // nodes are relay-capable, and market nodes need to construct safe routes).
         let capabilities = if self.devnet_config.is_some() {
             VeilidConfigCapabilities {
                 disable: vec![

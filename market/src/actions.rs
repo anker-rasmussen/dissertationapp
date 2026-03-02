@@ -75,7 +75,7 @@ pub async fn create_and_publish_listing(
             .await;
 
         // Ensure the master registry exists (creates on first listing)
-        let _registry_key = coordinator
+        let _ = coordinator
             .ensure_master_registry()
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to ensure master registry: {e}")))?;

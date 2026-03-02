@@ -60,7 +60,7 @@ impl<D: DhtStore> BidOperations<D> {
 
         let mut index = BidIndex::new(listing_key.clone());
 
-        for (bidder, bid_record_key, _timestamp) in &registry.announcements {
+        for (bidder, bid_record_key, _) in &registry.announcements {
             match self.dht.get_value(bid_record_key).await {
                 Ok(Some(data)) => match BidRecord::from_cbor(&data) {
                     Ok(bid) => {

@@ -305,7 +305,7 @@ async fn main() {
             } => {
                 let result = submit_bid(&app_state, &dht, &listing_key, amount).await;
                 match result {
-                    Ok(_msg) => {
+                    Ok(_) => {
                         let bid_key = app_state
                             .bid_storage
                             .get_bid_key(
