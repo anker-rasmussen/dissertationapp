@@ -62,7 +62,8 @@ pub const AUCTION_STALE_TIMEOUT_SECS: u64 = 600;
 
 /// Default node offset for devnet deployments.
 /// Determines port (5160 + offset) and IP (1.2.3.1 + offset).
-pub const DEFAULT_NODE_OFFSET: u16 = 9;
+/// Must be >= 20 to avoid colliding with devnet nodes (offsets 0-19).
+pub const DEFAULT_NODE_OFFSET: u16 = 20;
 
 /// Default bootstrap nodes for devnet.
 pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &["udp://1.2.3.1:5160"];
@@ -227,7 +228,7 @@ impl MarketConfig {
     /// Environment variables:
     /// - `MARKET_NETWORK_KEY`: Network key (default: "development-network-2025")
     /// - `MP_SPDZ_DIR`: MP-SPDZ directory path
-    /// - `MARKET_NODE_OFFSET`: Port offset for devnet (default: 9)
+    /// - `MARKET_NODE_OFFSET`: Port offset for devnet (default: 20)
     /// - `MARKET_INSECURE_STORAGE`: Set to "true" to enable (default: false)
     ///
     /// All timeout values use hardcoded defaults unless explicitly overridden

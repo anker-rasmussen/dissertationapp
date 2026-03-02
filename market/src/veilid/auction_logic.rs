@@ -205,7 +205,7 @@ where
         listing_key: RecordKey,
         bidder: PublicKey,
         bid_record_key: RecordKey,
-        _timestamp: u64,
+        _: u64,
     ) -> MarketResult<()> {
         info!(
             "Processing bid announcement for listing {} from {}",

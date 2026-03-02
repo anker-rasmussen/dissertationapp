@@ -34,7 +34,7 @@ impl AuctionCoordinator {
         // Refresh route managers (MPC coordination routes)
         let mut new_route_blob: Option<Vec<u8>> = None;
         let managers = self.mpc.route_managers().lock().await;
-        for (_key, manager) in managers.iter() {
+        for (_, manager) in managers.iter() {
             let mut mgr = manager.lock().await;
             if !dead_remote_routes.is_empty() {
                 mgr.handle_dead_remote_routes(&dead_remote_routes).await;
@@ -93,7 +93,7 @@ impl AuctionCoordinator {
         // Self-import the route blob so Veilid marks it as deliverable.
         // Without this, only one of N created routes actually works.
         // See: https://gitlab.com/nicator/veilid — confirmed by Veilid core team.
-        let _self_route = self
+        let _ = self
             .api
             .import_remote_private_route(blob_bytes.clone())
             .map_err(|e| {

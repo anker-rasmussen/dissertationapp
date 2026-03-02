@@ -71,7 +71,7 @@ impl MpcRouteManager {
         // Self-import the route blob so Veilid marks it as deliverable.
         // Without this, only one of N created routes actually works.
         // See: https://gitlab.com/nicator/veilid — confirmed by Veilid core team.
-        let _self_route = self
+        let _ = self
             .api
             .import_remote_private_route(blob_bytes)
             .map_err(|e| MarketError::Network(format!("Failed to self-import MPC route: {e}")))?;
@@ -145,7 +145,7 @@ impl MpcRouteManager {
                         .app_call(Target::RouteId(imported_route.clone()), data.to_vec())
                         .await
                     {
-                        Ok(_response) => {
+                        Ok(_) => {
                             debug!("Sent {} to peer {}", label, node_id);
                             sent_count += 1;
                         }
@@ -445,7 +445,7 @@ impl MpcRouteManager {
                 .app_call(Target::RouteId(route_id.clone()), data.clone())
                 .await
             {
-                Ok(_reply) => sent += 1,
+                Ok(_) => sent += 1,
                 Err(e) => warn!("Failed to send MpcReady via MPC route to {}: {}", pubkey, e),
             }
         }

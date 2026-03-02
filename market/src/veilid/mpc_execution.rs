@@ -12,7 +12,7 @@ use crate::error::{MarketError, MarketResult};
 ///
 /// Default is `mascot-party.x` (dishonest majority, malicious security, N >= 2).
 /// Override via `MPC_PROTOCOL` env var.
-fn resolve_protocol(_num_parties: usize) -> String {
+fn resolve_protocol(_: usize) -> String {
     std::env::var(crate::config::MPC_PROTOCOL_ENV)
         .unwrap_or_else(|_| crate::config::DEFAULT_MPC_PROTOCOL.to_string())
 }

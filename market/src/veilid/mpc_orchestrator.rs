@@ -932,7 +932,7 @@ impl MpcOrchestrator {
         all_parties: &[PublicKey],
     ) -> MarketResult<MpcPartyState> {
         let listing_key = &bid_index.listing_key;
-        let (bid_value, _nonce) = self
+        let (bid_value, _) = self
             .bid_storage
             .get_bid(listing_key)
             .await
@@ -1122,7 +1122,7 @@ impl MpcOrchestrator {
         }
 
         // Fetch each bidder's BidRecord from the DHT
-        for (bidder, bid_record_key, _timestamp) in &bidder_list {
+        for (bidder, bid_record_key, _) in &bidder_list {
             info!(
                 "Fetching bid record for bidder {} at {}",
                 bidder, bid_record_key

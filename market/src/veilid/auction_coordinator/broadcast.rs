@@ -118,7 +118,7 @@ impl AuctionCoordinator {
                         .app_call(Target::RouteId(route_id.clone()), data.to_vec())
                         .await
                     {
-                        Ok(_response) => {
+                        Ok(_) => {
                             sent_count += 1;
                         }
                         Err(e) => {
