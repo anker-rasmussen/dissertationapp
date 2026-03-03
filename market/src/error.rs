@@ -34,14 +34,6 @@ pub enum MarketError {
     #[error("Operation timed out: {0}")]
     Timeout(String),
 
-    #[error("Transport error: {0}")]
-    Transport(String),
-
-    #[error("IO error: {0}")]
-    Io(String),
-
-    #[error("{0}")]
-    Other(String),
 }
 
 impl From<bincode::Error> for MarketError {
@@ -58,7 +50,7 @@ impl From<veilid_core::VeilidAPIError> for MarketError {
 
 impl From<std::io::Error> for MarketError {
     fn from(e: std::io::Error) -> Self {
-        Self::Io(format!("{e}"))
+        Self::Network(format!("IO error: {e}"))
     }
 }
 
