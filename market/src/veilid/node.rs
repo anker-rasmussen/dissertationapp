@@ -45,28 +45,17 @@ pub struct DevNetConfig {
     pub public_addr: Option<String>,
 }
 
-impl Default for DevNetConfig {
-    fn default() -> Self {
-        // Port offset can be overridden via MARKET_NODE_OFFSET env var
-        // The devnet uses offsets 0-19 (20 nodes), so market instances start at 20+:
-        // - MARKET_NODE_OFFSET=20 (default)  -> port 5180, IP 1.2.3.21, data: ~/.local/share/smpc-auction-node-20
-        // - MARKET_NODE_OFFSET=21 -> port 5181, IP 1.2.3.22, data: ~/.local/share/smpc-auction-node-21
-        // - MARKET_NODE_OFFSET=22 -> port 5182, IP 1.2.3.23, data: ~/.local/share/smpc-auction-node-22
-        let port_offset = std::env::var("MARKET_NODE_OFFSET")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(20);
-
+impl DevNetConfig {
+    /// Construct devnet config from a [`MarketConfig`](crate::config::MarketConfig), avoiding
+    /// duplicate env-var parsing.
+    pub fn from_market_config(config: &crate::config::MarketConfig) -> Self {
         Self {
-            network_key: "development-network-2025".to_string(),
-            // Use fake global IP for bootstrap (1.2.3.1:5160)
-            // The LD_PRELOAD library translates this to 127.0.0.1:5160
-            // Use UDP for BOOT protocol - TCP requires VL framing which BOOT doesn't have
-            bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
-            port_offset,
-            limit_over_attached: 24,
-            listen_addr: None,
-            public_addr: None,
+            network_key: config.network_key.clone(),
+            bootstrap_nodes: config.bootstrap_nodes.clone(),
+            port_offset: config.node_offset,
+            limit_over_attached: config.limit_over_attached,
+            listen_addr: config.listen_addr.clone(),
+            public_addr: config.public_addr.clone(),
         }
     }
 }

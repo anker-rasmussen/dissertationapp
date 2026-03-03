@@ -285,18 +285,11 @@ impl TestNode {
         let _ = std::fs::remove_dir_all(&data_dir);
         std::fs::create_dir_all(&data_dir).expect("Failed to create test data dir");
 
-        let config = DevNetConfig {
-            network_key: "development-network-2025".to_string(),
-            bootstrap_nodes: vec!["udp://1.2.3.1:5160".to_string()],
-            port_offset: offset,
-            limit_over_attached: 24,
-            listen_addr: None,
-            public_addr: None,
-        };
-
         let mut market_config = market::config::MarketConfig::default();
         market_config.insecure_storage = true;
-        let node = VeilidNode::new(data_dir.clone(), &market_config).with_devnet(config);
+        let mut devnet_config = DevNetConfig::from_market_config(&market_config);
+        devnet_config.port_offset = offset;
+        let node = VeilidNode::new(data_dir.clone(), &market_config).with_devnet(devnet_config);
 
         Self {
             node,
