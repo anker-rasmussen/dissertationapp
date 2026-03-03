@@ -27,16 +27,6 @@ impl MockRandom {
         Self::new(0x1234_5678_9ABC_DEF0)
     }
 
-    /// Reset the counter to generate the same sequence again.
-    pub fn reset(&self) {
-        self.counter.store(0, Ordering::SeqCst);
-    }
-
-    /// Get the current counter value.
-    pub fn counter(&self) -> u64 {
-        self.counter.load(Ordering::SeqCst)
-    }
-
     /// Simple deterministic mixing function.
     const fn mix(&self, counter: u64) -> u64 {
         let mut x = self.seed.wrapping_add(counter);

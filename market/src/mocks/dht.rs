@@ -71,8 +71,6 @@ pub enum MockDhtFailure {
     Reads,
     /// Fail only write operations.
     Writes,
-    /// Fail on specific record key.
-    OnKey(String),
 }
 
 #[derive(Debug)]
@@ -167,24 +165,14 @@ impl MockDht {
     }
 
     /// Check if current operation should fail.
-    async fn should_fail(&self, is_write: bool, key: Option<&str>) -> bool {
+    async fn should_fail(&self, is_write: bool) -> bool {
         let mode = self.inner.fail_mode.read().await;
         match &*mode {
             None => false,
             Some(MockDhtFailure::All) => true,
             Some(MockDhtFailure::Reads) => !is_write,
             Some(MockDhtFailure::Writes) => is_write,
-            Some(MockDhtFailure::OnKey(k)) => key.is_some_and(|key| key == k),
         }
-    }
-
-    /// Get a snapshot of all stored data (for test assertions).
-    pub async fn snapshot(&self) -> HashMap<String, HashMap<u32, Vec<u8>>> {
-        let storage = self.inner.storage.read().await;
-        storage
-            .iter()
-            .map(|(k, v)| (k.clone(), v.subkeys.clone()))
-            .collect()
     }
 
     /// Check if a specific record exists.
@@ -210,7 +198,7 @@ impl DhtStore for MockDht {
     type OwnedRecord = MockOwnedRecord;
 
     async fn create_record(&self) -> MarketResult<Self::OwnedRecord> {
-        if self.should_fail(true, None).await {
+        if self.should_fail(true).await {
             return Err(MarketError::Dht("MockDht: simulated create failure".into()));
         }
 
@@ -246,11 +234,11 @@ impl DhtStore for MockDht {
     }
 
     async fn get_subkey(&self, key: &RecordKey, subkey: u32) -> MarketResult<Option<Vec<u8>>> {
-        let key_str = key.to_string();
-        if self.should_fail(false, Some(&key_str)).await {
+        if self.should_fail(false).await {
             return Err(MarketError::Dht("MockDht: simulated read failure".into()));
         }
 
+        let key_str = key.to_string();
         let storage = self.inner.storage.read().await;
         Ok(storage
             .get(&key_str)
@@ -263,10 +251,11 @@ impl DhtStore for MockDht {
         subkey: u32,
         value: Vec<u8>,
     ) -> MarketResult<()> {
-        let key_str = record.key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
+        if self.should_fail(true).await {
             return Err(MarketError::Dht("MockDht: simulated write failure".into()));
         }
+
+        let key_str = record.key.to_string();
 
         // Verify ownership: only the creator can write to a record
         {
@@ -310,12 +299,11 @@ impl DhtStore for MockDht {
     }
 
     async fn delete_record(&self, key: &RecordKey) -> MarketResult<()> {
-        let key_str = key.to_string();
-        if self.should_fail(true, Some(&key_str)).await {
+        if self.should_fail(true).await {
             return Err(MarketError::Dht("MockDht: simulated delete failure".into()));
         }
 
-        self.inner.storage.write().await.remove(&key_str);
+        self.inner.storage.write().await.remove(&key.to_string());
         Ok(())
     }
 }
