@@ -115,14 +115,8 @@ async fn main() {
         insecure_storage: true,
         ..config::MarketConfig::from_env()
     };
-    let devnet_config = DevNetConfig {
-        network_key: market_config.network_key.clone(),
-        bootstrap_nodes: market_config.bootstrap_nodes.clone(),
-        port_offset: offset,
-        limit_over_attached: market_config.limit_over_attached,
-        listen_addr: market_config.listen_addr.clone(),
-        public_addr: market_config.public_addr.clone(),
-    };
+    let mut devnet_config = DevNetConfig::from_market_config(&market_config);
+    devnet_config.port_offset = offset;
     let mut node = VeilidNode::new(dir.clone(), &market_config).with_devnet(devnet_config);
 
     if let Err(e) = node.start().await {
