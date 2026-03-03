@@ -54,12 +54,6 @@ pub fn now_unix() -> u64 {
         .as_secs()
 }
 
-/// Timeout for individual app_message sends (control messages).
-pub const APP_MESSAGE_TIMEOUT_SECS: u64 = 10;
-
-/// Timeout for auctions stuck in pending-MPC state.
-pub const AUCTION_STALE_TIMEOUT_SECS: u64 = 600;
-
 /// Default node offset for devnet deployments.
 /// Determines port (5160 + offset) and IP (1.2.3.1 + offset).
 /// Must be >= 20 to avoid colliding with devnet nodes (offsets 0-19).
@@ -81,12 +75,6 @@ pub const MARKET_PUBLIC_ADDR_ENV: &str = "MARKET_PUBLIC_ADDR";
 
 /// Default update channel capacity for Veilid updates.
 pub const DEFAULT_UPDATE_CHANNEL_CAPACITY: usize = 4096;
-
-/// Default timeout for attachment operations (waiting for AttachedWeak state).
-pub const DEFAULT_ATTACHMENT_TIMEOUT_SECS: u64 = 20;
-
-/// Default wait time for MPC route establishment.
-pub const DEFAULT_MPC_ROUTE_WAIT_SECS: u64 = 20;
 
 /// Default timeout for MPC execution.
 pub const DEFAULT_MPC_EXECUTION_TIMEOUT_SECS: u64 = 900;
@@ -195,18 +183,10 @@ pub struct MarketConfig {
     pub insecure_storage: bool,
     /// Port offset for devnet deployments (base port = 5160).
     pub node_offset: u16,
-    /// Timeout (seconds) for Veilid attachment operations.
-    pub attachment_timeout_secs: u64,
-    /// Wait time (seconds) for MPC route establishment.
-    pub mpc_route_wait_secs: u64,
     /// Timeout (seconds) for MPC execution.
     pub mpc_execution_timeout_secs: u64,
-    /// Timeout (seconds) for individual app_message sends.
-    pub app_message_timeout_secs: u64,
     /// Capacity for Veilid update channel.
     pub update_channel_capacity: usize,
-    /// Timeout (seconds) for auctions stuck in pending-MPC state.
-    pub auction_stale_timeout_secs: u64,
     /// Routing table limit for over-attached peers.
     pub limit_over_attached: u32,
     /// Maximum seconds to wait for network attachment.
@@ -286,12 +266,8 @@ impl MarketConfig {
             mp_spdz_dir,
             insecure_storage,
             node_offset,
-            attachment_timeout_secs: DEFAULT_ATTACHMENT_TIMEOUT_SECS,
-            mpc_route_wait_secs: DEFAULT_MPC_ROUTE_WAIT_SECS,
             mpc_execution_timeout_secs: DEFAULT_MPC_EXECUTION_TIMEOUT_SECS,
-            app_message_timeout_secs: APP_MESSAGE_TIMEOUT_SECS,
             update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
-            auction_stale_timeout_secs: AUCTION_STALE_TIMEOUT_SECS,
             limit_over_attached: 16,
             max_attachment_wait_secs: 180,
             rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
@@ -313,12 +289,8 @@ impl Default for MarketConfig {
             mp_spdz_dir: DEFAULT_MP_SPDZ_DIR.into(),
             insecure_storage: false,
             node_offset: DEFAULT_NODE_OFFSET,
-            attachment_timeout_secs: DEFAULT_ATTACHMENT_TIMEOUT_SECS,
-            mpc_route_wait_secs: DEFAULT_MPC_ROUTE_WAIT_SECS,
             mpc_execution_timeout_secs: DEFAULT_MPC_EXECUTION_TIMEOUT_SECS,
-            app_message_timeout_secs: APP_MESSAGE_TIMEOUT_SECS,
             update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
-            auction_stale_timeout_secs: AUCTION_STALE_TIMEOUT_SECS,
             limit_over_attached: 16,
             max_attachment_wait_secs: 180,
             rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
