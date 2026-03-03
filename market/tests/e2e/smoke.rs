@@ -771,21 +771,30 @@ async fn place_bid_with_retry(
 #[tokio::test]
 #[ignore]
 #[serial]
-async fn test_e2e_full_happy_path() {
+async fn test_e2e_3_happy_path() {
     if !check_mp_spdz_available() {
         eprintln!(
-            "[E2E] SKIPPING test_e2e_full_happy_path: MP-SPDZ protocol binary not found at {}",
+            "[E2E] SKIPPING test_e2e_3_happy_path: MP-SPDZ protocol binary not found at {}",
             market::config::DEFAULT_MP_SPDZ_DIR
         );
         return;
     }
 
-    run_e2e_test("test_e2e_full_happy_path", 900, || async {
+    run_e2e_test("test_e2e_3_happy_path", 900, || async {
         let (mut seller, mut bidder1, mut bidder2) = tokio::try_join!(
             HeadlessParticipant::new(20),
             HeadlessParticipant::new(21),
             HeadlessParticipant::new(22),
         )?;
+
+        // Wait for broadcast routes before any auction activity
+        eprintln!("[E2E] Waiting for routes to be ready...");
+        tokio::try_join!(
+            seller.wait_for_routes(30),
+            bidder1.wait_for_routes(30),
+            bidder2.wait_for_routes(30),
+        )?;
+        eprintln!("[E2E] All routes ready");
 
         // Seller creates listing (encryption, DHT, registry, auto-bid at reserve)
         eprintln!("[E2E] Seller creating listing...");
@@ -844,21 +853,31 @@ async fn test_e2e_full_happy_path() {
 #[tokio::test]
 #[ignore]
 #[serial]
-async fn test_e2e_full_sequential_auctions() {
+async fn test_e2e_1_sequential_auctions() {
     if !check_mp_spdz_available() {
         eprintln!(
-            "[E2E] SKIPPING test_e2e_full_sequential_auctions: MP-SPDZ protocol binary not found"
+            "[E2E] SKIPPING test_e2e_1_sequential_auctions: MP-SPDZ protocol binary not found"
         );
         return;
     }
 
-    run_e2e_test("test_e2e_full_sequential_auctions", 1800, || async {
+    run_e2e_test("test_e2e_1_sequential_auctions", 1800, || async {
         // 3 persistent nodes — roles rotate between auctions (no restart).
+        // Offsets 23-25 to avoid clashing with happy path (20-22).
         let (mut node_a, mut node_b, mut node_c) = tokio::try_join!(
-            HeadlessParticipant::new(20),
-            HeadlessParticipant::new(21),
-            HeadlessParticipant::new(22),
+            HeadlessParticipant::new(23),
+            HeadlessParticipant::new(24),
+            HeadlessParticipant::new(25),
         )?;
+
+        // Wait for broadcast routes before any auction activity
+        eprintln!("[E2E] Waiting for routes to be ready...");
+        tokio::try_join!(
+            node_a.wait_for_routes(30),
+            node_b.wait_for_routes(30),
+            node_c.wait_for_routes(30),
+        )?;
+        eprintln!("[E2E] All routes ready");
 
         // ════════════════════════════════════════════════════════════════
         // AUCTION 1 — node_a sells, node_b + node_c bid
@@ -866,7 +885,7 @@ async fn test_e2e_full_sequential_auctions() {
         eprintln!("\n[E2E] ═══ AUCTION 1 START (seller=node_a) ═══");
 
         let (listing1_key, _) = node_a
-            .create_listing("Auction 1 Item", "first sale secret content", 100, 20)
+            .create_listing("Auction 1 Item", "first sale secret content", 100, 15)
             .await?;
 
         place_bid_with_retry(&mut node_b, &listing1_key, 250, 30).await?;
@@ -892,7 +911,7 @@ async fn test_e2e_full_sequential_auctions() {
         eprintln!("[E2E] ═══ AUCTION 2 START (seller=node_b, rotated roles) ═══");
 
         let (listing2_key, _) = node_b
-            .create_listing("Auction 2 Item", "second sale rotated seller", 200, 20)
+            .create_listing("Auction 2 Item", "second sale rotated seller", 200, 15)
             .await?;
 
         place_bid_with_retry(&mut node_a, &listing2_key, 500, 30).await?;
@@ -925,34 +944,44 @@ async fn test_e2e_full_sequential_auctions() {
 
 /// Two auctions run at the same time on overlapping participants.
 ///
-/// seller1 creates listing A, seller2 creates listing B (both 45s deadline).
+/// seller1 creates listing A, seller2 creates listing B (both 30s deadline).
 /// Both bidders bid on BOTH listings.  Both MPC executions run concurrently.
 /// Verifies that both winners receive their decryption keys.
 #[tokio::test]
 #[ignore]
 #[serial]
-async fn test_e2e_full_concurrent_auctions() {
+async fn test_e2e_2_concurrent_auctions() {
     if !check_mp_spdz_available() {
         eprintln!(
-            "[E2E] SKIPPING test_e2e_full_concurrent_auctions: MP-SPDZ protocol binary not found"
+            "[E2E] SKIPPING test_e2e_2_concurrent_auctions: MP-SPDZ protocol binary not found"
         );
         return;
     }
 
-    run_e2e_test("test_e2e_full_concurrent_auctions", 900, || async {
+    run_e2e_test("test_e2e_2_concurrent_auctions", 900, || async {
         // 3 nodes: node_a and node_b each create a listing, node_c is a pure bidder.
         // All 3 bid on both listings → two 3-party MPC auctions run concurrently.
+        // Offsets 26-28 to avoid clashing with happy (20-22) and sequential (23-25).
         let (mut node_a, mut node_b, mut node_c) = tokio::try_join!(
-            HeadlessParticipant::new(20),
-            HeadlessParticipant::new(21),
-            HeadlessParticipant::new(22),
+            HeadlessParticipant::new(26),
+            HeadlessParticipant::new(27),
+            HeadlessParticipant::new(28),
         )?;
+
+        // Wait for broadcast routes before any auction activity
+        eprintln!("[E2E] Waiting for routes to be ready...");
+        tokio::try_join!(
+            node_a.wait_for_routes(30),
+            node_b.wait_for_routes(30),
+            node_c.wait_for_routes(30),
+        )?;
+        eprintln!("[E2E] All routes ready");
 
         // Both sellers create listings at roughly the same time
         eprintln!("[E2E] Creating two listings concurrently...");
         let (listing_a, listing_b) = tokio::try_join!(
-            node_a.create_listing("Concurrent A", "secret content A", 100, 45),
-            node_b.create_listing("Concurrent B", "secret content B", 100, 45),
+            node_a.create_listing("Concurrent A", "secret content A", 100, 15),
+            node_b.create_listing("Concurrent B", "secret content B", 100, 15),
         )?;
         let (listing_a_key, _) = listing_a;
         let (listing_b_key, _) = listing_b;
@@ -1023,6 +1052,14 @@ async fn run_n_party_headless_test(
         let offset = base_offset + 1 + i as u16;
         bidders.push(HeadlessParticipant::new(offset).await?);
     }
+
+    // Wait for broadcast routes before any auction activity
+    eprintln!("[E2E] Waiting for routes to be ready...");
+    seller.wait_for_routes(30).await?;
+    for bidder in &mut bidders {
+        bidder.wait_for_routes(30).await?;
+    }
+    eprintln!("[E2E] All routes ready");
 
     // Seller creates listing with duration long enough for N-party DHT setup
     let duration = 60 + (num_bidders as u64) * 15;
@@ -1103,7 +1140,7 @@ async fn test_e2e_scale_mpc_5_party() {
     }
 
     run_e2e_test("test_e2e_scale_mpc_5_party", 1800, || async {
-        run_n_party_headless_test(4, 20, 600).await
+        run_n_party_headless_test(4, 29, 600).await
     })
     .await;
 }
@@ -1122,7 +1159,7 @@ async fn test_e2e_scale_mpc_10_party() {
     }
 
     run_e2e_test("test_e2e_scale_mpc_10_party", 3600, || async {
-        run_n_party_headless_test(9, 20, 1800).await
+        run_n_party_headless_test(9, 29, 1800).await
     })
     .await;
 }

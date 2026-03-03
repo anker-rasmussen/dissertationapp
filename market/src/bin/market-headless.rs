@@ -48,6 +48,10 @@ enum TestCommand {
     GetDecryptionKey {
         listing_key: String,
     },
+    /// Wait until this node's broadcast route is created.
+    WaitForRoutes {
+        timeout_secs: u64,
+    },
     GetNodeId,
     Shutdown,
 }
@@ -332,6 +336,36 @@ async fn main() {
                 emit_json(&TestResponse::Ok {
                     data: Some(serde_json::json!({ "key": key })),
                 });
+            }
+
+            TestCommand::WaitForRoutes { timeout_secs } => {
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(timeout_secs);
+                loop {
+                    if coordinator.has_broadcast_route().await {
+                        info!("Broadcast route ready ({}s)", start.elapsed().as_secs());
+                        emit_json(&TestResponse::Ok {
+                            data: Some(serde_json::json!({
+                                "elapsed_secs": start.elapsed().as_secs(),
+                            })),
+                        });
+                        break;
+                    }
+                    if start.elapsed() >= timeout {
+                        warn!(
+                            "Route wait timeout: no broadcast route after {}s",
+                            timeout_secs
+                        );
+                        emit_json(&TestResponse::Err {
+                            message: format!(
+                                "Timeout waiting for broadcast route after {}s",
+                                timeout_secs
+                            ),
+                        });
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
             }
 
             TestCommand::GetNodeId => {
