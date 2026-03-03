@@ -732,7 +732,29 @@ async fn poll_decryption_key(
         if start.elapsed() > max_wait {
             return None;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Helper: place a bid, retrying until the listing is visible on DHT or timeout.
+async fn place_bid_with_retry(
+    node: &mut HeadlessParticipant,
+    listing_key: &str,
+    amount: u64,
+    timeout_secs: u64,
+) -> Result<Option<String>, MarketError> {
+    let start = tokio::time::Instant::now();
+    let max_wait = Duration::from_secs(timeout_secs);
+    loop {
+        match node.place_bid(listing_key, amount).await {
+            Ok(key) => return Ok(key),
+            Err(e) => {
+                if start.elapsed() > max_wait {
+                    return Err(e);
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
     }
 }
 
@@ -759,24 +781,25 @@ async fn test_e2e_full_happy_path() {
     }
 
     run_e2e_test("test_e2e_full_happy_path", 900, || async {
-        let mut seller = HeadlessParticipant::new(20).await?;
-        let mut bidder1 = HeadlessParticipant::new(21).await?;
-        let mut bidder2 = HeadlessParticipant::new(22).await?;
+        let (mut seller, mut bidder1, mut bidder2) = tokio::try_join!(
+            HeadlessParticipant::new(20),
+            HeadlessParticipant::new(21),
+            HeadlessParticipant::new(22),
+        )?;
 
         // Seller creates listing (encryption, DHT, registry, auto-bid at reserve)
         eprintln!("[E2E] Seller creating listing...");
         let (listing_key, expected_key) = seller
-            .create_listing("MPC Test Item", "quantum computing blueprint", 100, 30)
+            .create_listing("MPC Test Item", "quantum computing blueprint", 100, 15)
             .await?;
         eprintln!("[E2E] Listing created: {}", &listing_key[..20]);
 
-        tokio::time::sleep(Duration::from_secs(15)).await;
-
         // Bidder1 bids 200 (will win), bidder2 bids 150
+        // Retry until listing is visible on DHT (replaces hardcoded sleep)
         eprintln!("[E2E] Bidder1 placing bid (200)...");
-        bidder1.place_bid(&listing_key, 200).await?;
+        place_bid_with_retry(&mut bidder1, &listing_key, 200, 30).await?;
         eprintln!("[E2E] Bidder2 placing bid (150)...");
-        bidder2.place_bid(&listing_key, 150).await?;
+        place_bid_with_retry(&mut bidder2, &listing_key, 150, 30).await?;
 
         // Poll for winner's decryption key
         eprintln!("[E2E] Polling for MPC + post-MPC verification (max 600s)...");
@@ -831,9 +854,11 @@ async fn test_e2e_full_sequential_auctions() {
 
     run_e2e_test("test_e2e_full_sequential_auctions", 1800, || async {
         // 3 persistent nodes — roles rotate between auctions (no restart).
-        let mut node_a = HeadlessParticipant::new(20).await?;
-        let mut node_b = HeadlessParticipant::new(21).await?;
-        let mut node_c = HeadlessParticipant::new(22).await?;
+        let (mut node_a, mut node_b, mut node_c) = tokio::try_join!(
+            HeadlessParticipant::new(20),
+            HeadlessParticipant::new(21),
+            HeadlessParticipant::new(22),
+        )?;
 
         // ════════════════════════════════════════════════════════════════
         // AUCTION 1 — node_a sells, node_b + node_c bid
@@ -841,13 +866,11 @@ async fn test_e2e_full_sequential_auctions() {
         eprintln!("\n[E2E] ═══ AUCTION 1 START (seller=node_a) ═══");
 
         let (listing1_key, _) = node_a
-            .create_listing("Auction 1 Item", "first sale secret content", 100, 30)
+            .create_listing("Auction 1 Item", "first sale secret content", 100, 15)
             .await?;
 
-        tokio::time::sleep(Duration::from_secs(15)).await;
-
-        node_b.place_bid(&listing1_key, 250).await?;
-        node_c.place_bid(&listing1_key, 150).await?;
+        place_bid_with_retry(&mut node_b, &listing1_key, 250, 30).await?;
+        place_bid_with_retry(&mut node_c, &listing1_key, 150, 30).await?;
 
         eprintln!("[E2E] Auction 1: polling for MPC completion (max 600s)...");
         let a1_winner_key = poll_decryption_key(&mut node_b, &listing1_key, 600).await;
@@ -869,13 +892,11 @@ async fn test_e2e_full_sequential_auctions() {
         eprintln!("[E2E] ═══ AUCTION 2 START (seller=node_b, rotated roles) ═══");
 
         let (listing2_key, _) = node_b
-            .create_listing("Auction 2 Item", "second sale rotated seller", 200, 30)
+            .create_listing("Auction 2 Item", "second sale rotated seller", 200, 15)
             .await?;
 
-        tokio::time::sleep(Duration::from_secs(15)).await;
-
-        node_a.place_bid(&listing2_key, 500).await?;
-        node_c.place_bid(&listing2_key, 350).await?;
+        place_bid_with_retry(&mut node_a, &listing2_key, 500, 30).await?;
+        place_bid_with_retry(&mut node_c, &listing2_key, 350, 30).await?;
 
         eprintln!("[E2E] Auction 2: polling for MPC completion (max 600s)...");
         let a2_winner_key = poll_decryption_key(&mut node_a, &listing2_key, 600).await;
@@ -921,32 +942,32 @@ async fn test_e2e_full_concurrent_auctions() {
     run_e2e_test("test_e2e_full_concurrent_auctions", 900, || async {
         // 3 nodes: node_a and node_b each create a listing, node_c is a pure bidder.
         // All 3 bid on both listings → two 3-party MPC auctions run concurrently.
-        let mut node_a = HeadlessParticipant::new(20).await?;
-        let mut node_b = HeadlessParticipant::new(21).await?;
-        let mut node_c = HeadlessParticipant::new(22).await?;
+        let (mut node_a, mut node_b, mut node_c) = tokio::try_join!(
+            HeadlessParticipant::new(20),
+            HeadlessParticipant::new(21),
+            HeadlessParticipant::new(22),
+        )?;
 
         // Both sellers create listings at roughly the same time
         eprintln!("[E2E] Creating two listings concurrently...");
         let (listing_a, listing_b) = tokio::try_join!(
-            node_a.create_listing("Concurrent A", "secret content A", 100, 30),
-            node_b.create_listing("Concurrent B", "secret content B", 100, 30),
+            node_a.create_listing("Concurrent A", "secret content A", 100, 15),
+            node_b.create_listing("Concurrent B", "secret content B", 100, 15),
         )?;
         let (listing_a_key, _) = listing_a;
         let (listing_b_key, _) = listing_b;
         eprintln!("[E2E] Listing A: {listing_a_key}");
         eprintln!("[E2E] Listing B: {listing_b_key}");
 
-        // Wait for DHT propagation
-        tokio::time::sleep(Duration::from_secs(10)).await;
-
         // Each non-seller bids on the other's listing; node_c bids on both.
         // Listing A: seller=node_a (auto-bid 100), node_b bids 200, node_c bids 150
         // Listing B: seller=node_b (auto-bid 100), node_a bids 300, node_c bids 400
+        // Retry until listings are visible on DHT (replaces hardcoded sleep)
         eprintln!("[E2E] Placing bids on both listings...");
-        node_b.place_bid(&listing_a_key, 200).await?;
-        node_c.place_bid(&listing_a_key, 150).await?;
-        node_a.place_bid(&listing_b_key, 300).await?;
-        node_c.place_bid(&listing_b_key, 400).await?;
+        place_bid_with_retry(&mut node_b, &listing_a_key, 200, 30).await?;
+        place_bid_with_retry(&mut node_c, &listing_a_key, 150, 30).await?;
+        place_bid_with_retry(&mut node_a, &listing_b_key, 300, 30).await?;
+        place_bid_with_retry(&mut node_c, &listing_b_key, 400, 30).await?;
         eprintln!("[E2E] All bids placed, waiting for deadlines + concurrent MPC...");
 
         // Poll both auctions concurrently.
@@ -1004,7 +1025,7 @@ async fn run_n_party_headless_test(
     }
 
     // Seller creates listing with duration long enough for N-party DHT setup
-    let duration = 120 + (num_bidders as u64) * 30;
+    let duration = 60 + (num_bidders as u64) * 15;
     let (listing_key, _) = seller
         .create_listing(
             "N-Party Test Item",
@@ -1014,15 +1035,13 @@ async fn run_n_party_headless_test(
         )
         .await?;
 
-    // Wait for listing propagation
-    tokio::time::sleep(Duration::from_secs(15)).await;
-
     // Each bidder places a bid: 200, 300, 400, ...
     // Last bidder always has highest bid (= winner)
+    // Retry until listing is visible on DHT (replaces hardcoded sleep)
     for (i, bidder) in bidders.iter_mut().enumerate() {
         let bid_value = 200 + (i as u64) * 100;
         eprintln!("[E2E] Bidder{} placing bid ({})...", i + 1, bid_value);
-        bidder.place_bid(&listing_key, bid_value).await?;
+        place_bid_with_retry(bidder, &listing_key, bid_value, 30).await?;
     }
 
     eprintln!("[E2E] All {num_bidders} bids placed. Polling for MPC (max {mpc_wait_secs}s)...");
