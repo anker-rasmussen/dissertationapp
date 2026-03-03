@@ -53,6 +53,9 @@ pub struct DevnetManager {
     compose_path: PathBuf,
     started: bool,
     fast_mode: bool,
+    /// True if we started the devnet ourselves (vs found it pre-existing).
+    /// Only tear down on Drop if we own it.
+    owns_devnet: bool,
 }
 
 impl DevnetManager {
@@ -65,6 +68,7 @@ impl DevnetManager {
             compose_path: docker_compose_path(),
             started: false,
             fast_mode,
+            owns_devnet: false,
         }
     }
 
@@ -116,6 +120,15 @@ impl DevnetManager {
             return Ok(());
         }
 
+        // If devnet is already running and all nodes are reachable, reuse it
+        // instead of tearing down and rebuilding (saves ~30-60s per test).
+        if self.is_devnet_running() && self.check_all_nodes_reachable() {
+            eprintln!("[E2E] Devnet already running and healthy — reusing");
+            self.started = true;
+            self.owns_devnet = false;
+            return Ok(());
+        }
+
         self.ensure_stopped()?;
         eprintln!("[E2E] Starting devnet...");
 
@@ -140,6 +153,7 @@ impl DevnetManager {
         }
 
         self.started = true;
+        self.owns_devnet = true;
         eprintln!("[E2E] Devnet containers started");
         Ok(())
     }
@@ -228,8 +242,11 @@ impl DevnetManager {
     }
 
     pub fn stop(&mut self) -> MarketResult<()> {
-        if self.fast_mode {
-            eprintln!("[E2E] Fast mode: keeping devnet running");
+        if self.fast_mode || !self.owns_devnet {
+            eprintln!(
+                "[E2E] Keeping devnet running (fast_mode={}, owns={})",
+                self.fast_mode, self.owns_devnet
+            );
             return Ok(());
         }
         if !self.started {
@@ -262,7 +279,7 @@ impl DevnetManager {
 
 impl Drop for DevnetManager {
     fn drop(&mut self) {
-        if !self.fast_mode {
+        if !self.fast_mode && self.owns_devnet {
             let _ = self.stop();
         }
     }
