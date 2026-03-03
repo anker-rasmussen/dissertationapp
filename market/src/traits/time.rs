@@ -29,4 +29,3 @@ impl SystemTimeProvider {
         Self
     }
 }
-

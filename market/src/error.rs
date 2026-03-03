@@ -33,7 +33,6 @@ pub enum MarketError {
 
     #[error("Operation timed out: {0}")]
     Timeout(String),
-
 }
 
 impl From<bincode::Error> for MarketError {
