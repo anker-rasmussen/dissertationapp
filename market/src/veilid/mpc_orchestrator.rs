@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
-use veilid_core::{PublicKey, RecordKey, RouteId, SafetySelection, Sequencing, VeilidAPI};
+use veilid_core::{PublicKey, RecordKey, RouteId, SafetySelection, Sequencing, Target, VeilidAPI};
 
 use super::bid_announcement::BidAnnouncementRegistry;
 use super::bid_ops::BidOperations;
@@ -1059,6 +1059,94 @@ impl MpcOrchestrator {
         let mut managers = self.route_managers.lock().await;
         if managers.remove(&key).is_some() {
             info!("Cleaned up route manager for listing {}", listing_key);
+        }
+    }
+
+    /// Send a message to a specific party via their MPC route with retry logic.
+    ///
+    /// Looks up the target's route in the route manager for the given listing,
+    /// then sends via `app_call`. Retries on transient failures until `timeout`.
+    pub(crate) async fn send_via_mpc_route(
+        &self,
+        listing_key: &RecordKey,
+        target_pubkey: &PublicKey,
+        message_bytes: Vec<u8>,
+        timeout: std::time::Duration,
+        label: &str,
+    ) -> MarketResult<()> {
+        let start = std::time::Instant::now();
+
+        loop {
+            let target_route = {
+                let route_manager = {
+                    let managers = self.route_managers.lock().await;
+                    managers.get(listing_key).cloned()
+                };
+                let Some(route_manager) = route_manager else {
+                    if start.elapsed() >= timeout {
+                        return Err(MarketError::Network(format!(
+                            "{label}: route manager not found for listing {listing_key} after {timeout:?}"
+                        )));
+                    }
+                    warn!(
+                        "{}: route manager not found for listing {}, retrying",
+                        label, listing_key
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
+                    continue;
+                };
+
+                let received_routes = {
+                    let mgr = route_manager.lock().await;
+                    mgr.received_routes.clone()
+                };
+                let routes = received_routes.lock().await;
+                if let Some(route) = routes.get(target_pubkey).cloned() {
+                    route
+                } else {
+                    if start.elapsed() >= timeout {
+                        return Err(MarketError::NotFound(format!(
+                            "{label}: target route not found for listing {listing_key} after {timeout:?}"
+                        )));
+                    }
+                    warn!(
+                        "{}: target route not found for listing {}, retrying",
+                        label, listing_key
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
+                    continue;
+                }
+            };
+
+            let routing_context = self.safe_routing_context()?;
+
+            match routing_context
+                .app_call(Target::RouteId(target_route), message_bytes.clone())
+                .await
+            {
+                Ok(_) => {
+                    info!("{}: sent successfully via MPC route", label);
+                    return Ok(());
+                }
+                Err(e) => {
+                    if start.elapsed() >= timeout {
+                        return Err(MarketError::Network(format!(
+                            "{label}: failed within {timeout:?}: {e}"
+                        )));
+                    }
+                    warn!("{}: send failed, retrying: {}", label, e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        crate::config::WINNER_REVEAL_RETRY_SECS,
+                    ))
+                    .await;
+                }
+            }
         }
     }
 

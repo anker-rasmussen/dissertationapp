@@ -1,7 +1,7 @@
 //! Auction message handlers for each `AuctionMessage` variant.
 
 use tracing::{debug, error, info, warn};
-use veilid_core::{PublicKey, RecordKey, RouteBlob, Target};
+use veilid_core::{PublicKey, RecordKey, RouteBlob};
 
 use super::{AuctionCoordinator, BufferedMpcSignal};
 use crate::config::{self, now_unix, subkeys};
@@ -134,15 +134,17 @@ impl AuctionCoordinator {
         let seller_pubkey = match listing_ops.get_listing(listing_key).await {
             Ok(Some(listing)) => {
                 info!("Resolved seller pubkey from listing for {listing_key}");
-                Some(listing.seller)
+                listing.seller
             }
             Ok(None) => {
-                warn!("Listing missing while sending reveal for {listing_key}");
-                None
+                return Err(MarketError::NotFound(format!(
+                    "Listing missing while sending reveal for {listing_key}"
+                )));
             }
             Err(e) => {
-                warn!("Failed to resolve listing for reveal on {listing_key}: {e}");
-                None
+                return Err(MarketError::Network(format!(
+                    "Failed to resolve listing for reveal on {listing_key}: {e}"
+                )));
             }
         };
 
@@ -155,74 +157,16 @@ impl AuctionCoordinator {
         );
 
         let data = message.to_signed_bytes(&self.signing_key)?;
-        let start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(config::WINNER_REVEAL_TIMEOUT_SECS);
 
-        loop {
-            let route_manager = {
-                let managers = self.mpc.route_managers().lock().await;
-                managers.get(listing_key).cloned()
-            };
-
-            let Some(route_manager) = route_manager else {
-                if start.elapsed() >= max_wait {
-                    return Err(MarketError::Network(format!(
-                        "No route manager for listing {listing_key} after waiting {max_wait:?}"
-                    )));
-                }
-                warn!("No route manager for listing {listing_key}, retrying reveal send");
-                tokio::time::sleep(tokio::time::Duration::from_secs(
-                    config::WINNER_REVEAL_RETRY_SECS,
-                ))
-                .await;
-                continue;
-            };
-
-            let seller_route = {
-                let received_routes = route_manager.lock().await.received_routes.clone();
-                let routes = received_routes.lock().await;
-                seller_pubkey
-                    .as_ref()
-                    .and_then(|seller| routes.get(seller).cloned())
-            };
-
-            let Some(route_id) = seller_route else {
-                if start.elapsed() >= max_wait {
-                    return Err(MarketError::Network(format!(
-                        "Seller route unavailable for listing {listing_key} after waiting {max_wait:?}"
-                    )));
-                }
-                warn!("Seller route not found for listing {listing_key}, retrying reveal send");
-                tokio::time::sleep(tokio::time::Duration::from_secs(
-                    config::WINNER_REVEAL_RETRY_SECS,
-                ))
-                .await;
-                continue;
-            };
-
-            let routing_context = self.mpc.safe_routing_context()?;
-            match routing_context
-                .app_call(Target::RouteId(route_id), data.clone())
-                .await
-            {
-                Ok(_) => {
-                    info!("Sent WinnerBidReveal to seller via MPC route (confirmed)");
-                    return Ok(());
-                }
-                Err(e) => {
-                    if start.elapsed() >= max_wait {
-                        return Err(MarketError::Network(format!(
-                            "Failed to send WinnerBidReveal within {max_wait:?}: {e}"
-                        )));
-                    }
-                    warn!("Failed to send WinnerBidReveal, retrying: {e}");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(
-                        config::WINNER_REVEAL_RETRY_SECS,
-                    ))
-                    .await;
-                }
-            }
-        }
+        self.mpc
+            .send_via_mpc_route(
+                listing_key,
+                &seller_pubkey,
+                data,
+                std::time::Duration::from_secs(config::WINNER_REVEAL_TIMEOUT_SECS),
+                "WinnerBidReveal",
+            )
+            .await
     }
 
     pub(super) async fn handle_decryption_hash_transfer(
