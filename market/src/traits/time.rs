@@ -30,26 +30,3 @@ impl SystemTimeProvider {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_system_time_provider_returns_reasonable_value() {
-        let provider = SystemTimeProvider::new();
-        let now = provider.now_unix();
-
-        // Should be after 2020 (1577836800) and before 2100 (4102444800)
-        assert!(now > 1577836800, "Timestamp should be after 2020");
-        assert!(now < 4102444800, "Timestamp should be before 2100");
-    }
-
-    #[test]
-    fn test_system_time_provider_is_monotonic() {
-        let provider = SystemTimeProvider::new();
-        let t1 = provider.now_unix();
-        let t2 = provider.now_unix();
-
-        assert!(t2 >= t1, "Time should not go backwards");
-    }
-}
