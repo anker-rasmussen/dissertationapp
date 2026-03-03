@@ -46,6 +46,11 @@ fn is_fast_mode() -> bool {
     std::env::var("E2E_FAST_MODE").is_ok()
 }
 
+/// Check if the devnet is managed by the nextest setup script.
+fn is_devnet_managed() -> bool {
+    std::env::var("E2E_DEVNET_MANAGED").is_ok()
+}
+
 // ── DevnetManager ────────────────────────────────────────────────────
 
 /// Manages the Veilid devnet lifecycle for E2E tests.
@@ -60,9 +65,11 @@ pub struct DevnetManager {
 
 impl DevnetManager {
     pub fn new() -> Self {
-        let fast_mode = is_fast_mode();
-        if fast_mode {
+        let fast_mode = is_fast_mode() || is_devnet_managed();
+        if is_fast_mode() {
             eprintln!("[E2E] Fast mode enabled - reusing persistent devnet");
+        } else if is_devnet_managed() {
+            eprintln!("[E2E] Devnet managed by setup script - reusing");
         }
         Self {
             compose_path: docker_compose_path(),

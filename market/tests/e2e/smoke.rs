@@ -866,7 +866,7 @@ async fn test_e2e_full_sequential_auctions() {
         eprintln!("\n[E2E] ═══ AUCTION 1 START (seller=node_a) ═══");
 
         let (listing1_key, _) = node_a
-            .create_listing("Auction 1 Item", "first sale secret content", 100, 15)
+            .create_listing("Auction 1 Item", "first sale secret content", 100, 20)
             .await?;
 
         place_bid_with_retry(&mut node_b, &listing1_key, 250, 30).await?;
@@ -892,7 +892,7 @@ async fn test_e2e_full_sequential_auctions() {
         eprintln!("[E2E] ═══ AUCTION 2 START (seller=node_b, rotated roles) ═══");
 
         let (listing2_key, _) = node_b
-            .create_listing("Auction 2 Item", "second sale rotated seller", 200, 15)
+            .create_listing("Auction 2 Item", "second sale rotated seller", 200, 20)
             .await?;
 
         place_bid_with_retry(&mut node_a, &listing2_key, 500, 30).await?;
@@ -925,7 +925,7 @@ async fn test_e2e_full_sequential_auctions() {
 
 /// Two auctions run at the same time on overlapping participants.
 ///
-/// seller1 creates listing A, seller2 creates listing B (both 30s deadline).
+/// seller1 creates listing A, seller2 creates listing B (both 45s deadline).
 /// Both bidders bid on BOTH listings.  Both MPC executions run concurrently.
 /// Verifies that both winners receive their decryption keys.
 #[tokio::test]
@@ -951,8 +951,8 @@ async fn test_e2e_full_concurrent_auctions() {
         // Both sellers create listings at roughly the same time
         eprintln!("[E2E] Creating two listings concurrently...");
         let (listing_a, listing_b) = tokio::try_join!(
-            node_a.create_listing("Concurrent A", "secret content A", 100, 15),
-            node_b.create_listing("Concurrent B", "secret content B", 100, 15),
+            node_a.create_listing("Concurrent A", "secret content A", 100, 45),
+            node_b.create_listing("Concurrent B", "secret content B", 100, 45),
         )?;
         let (listing_a_key, _) = listing_a;
         let (listing_b_key, _) = listing_b;
