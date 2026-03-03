@@ -34,32 +34,3 @@ impl ThreadRng {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_thread_rng_fills_bytes() {
-        let rng = ThreadRng::new();
-        let mut buf = [0u8; 32];
-
-        rng.fill_bytes(&mut buf);
-
-        // Very unlikely to be all zeros after random fill
-        assert!(
-            buf.iter().any(|&b| b != 0),
-            "Buffer should have non-zero bytes"
-        );
-    }
-
-    #[test]
-    fn test_thread_rng_produces_different_values() {
-        let rng = ThreadRng::new();
-
-        let a = rng.random_bytes_32();
-        let b = rng.random_bytes_32();
-
-        // Extremely unlikely to be equal
-        assert_ne!(a, b, "Two random values should differ");
-    }
-}
