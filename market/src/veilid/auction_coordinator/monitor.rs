@@ -250,13 +250,51 @@ impl AuctionCoordinator {
 
         info!("We bid on this listing, our bid record: {}", our_bid_key);
 
-        // Get local announcements as fallback (delegated to AuctionLogic)
-        let local_announcements = self.logic.get_bid_announcements(listing_key).await;
+        // Retry any bid announcements that failed earlier (e.g. no peer routes
+        // existed when the bid was placed).
+        self.retry_pending_bid_announcements().await;
 
-        let bid_index = self
-            .mpc
-            .discover_bids_from_storage(listing_key, local_announcements.as_ref())
-            .await?;
+        // Discover bids with stabilization — keep polling for a few seconds
+        // so that late-arriving bid announcements are picked up.
+        let bid_index = {
+            let stabilization_secs = config::BID_DISCOVERY_STABILIZATION_SECS;
+            let start = std::time::Instant::now();
+
+            let local = self.logic.get_bid_announcements(listing_key).await;
+            let mut best = self
+                .mpc
+                .discover_bids_from_storage(listing_key, local.as_ref())
+                .await?;
+
+            while start.elapsed().as_secs() < stabilization_secs {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                // Re-read local announcements each iteration (new ones may arrive).
+                let local = self.logic.get_bid_announcements(listing_key).await;
+                match self
+                    .mpc
+                    .discover_bids_from_storage(listing_key, local.as_ref())
+                    .await
+                {
+                    Ok(fresh) if fresh.bids.len() > best.bids.len() => {
+                        info!(
+                            "Bid stabilization: {} → {} bids after {:?}",
+                            best.bids.len(),
+                            fresh.bids.len(),
+                            start.elapsed()
+                        );
+                        best = fresh;
+                    }
+                    // If we already have >= 2 parties and count is stable, stop early.
+                    Ok(_) if best.bids.len() >= 2 => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        debug!("Bid stabilization DHT read error: {}, retrying", e);
+                    }
+                }
+            }
+            best
+        };
 
         // Ensure we have a broadcast route published before MPC route exchange.
         // Avoid forced re-allocation here to reduce route churn during exchange.

@@ -105,13 +105,13 @@ pub const MPC_ROUTE_COLLECTION_TIMEOUT_SECS: u64 = 45;
 pub const MPC_READINESS_BARRIER_TIMEOUT_SECS: u64 = 120;
 
 /// Pause after barrier passes to let slower parties also pass.
-pub const MPC_POST_BARRIER_SETTLE_SECS: u64 = 5;
+pub const MPC_POST_BARRIER_SETTLE_SECS: u64 = 2;
 
 /// Poll interval inside the readiness barrier loop.
 pub const MPC_BARRIER_POLL_SECS: u64 = 1;
 
 /// Wait for peer route refresh announcements after barrier.
-pub const MPC_ROUTE_PROPAGATION_WAIT_SECS: u64 = 8;
+pub const MPC_ROUTE_PROPAGATION_WAIT_SECS: u64 = 4;
 
 /// Per-round timeout for MPC tunnel SYN/ACK (Ping round-trip).
 /// If a round fails, routes are restored and the next round begins.
@@ -152,7 +152,11 @@ pub const WINNER_REVEAL_RETRY_SECS: u64 = 1;
 pub const MONITOR_POLL_INTERVAL_SECS: u64 = 5;
 
 /// Maximum wait for peer route blobs before MPC.
-pub const PEER_ROUTE_WAIT_SECS: u64 = 15;
+pub const PEER_ROUTE_WAIT_SECS: u64 = 5;
+
+/// How long the stabilization loop polls for new bid announcements
+/// after an auction deadline fires.  Covers DHT propagation delay.
+pub const BID_DISCOVERY_STABILIZATION_SECS: u64 = 5;
 
 // --- DHT Retry ---
 

@@ -13,27 +13,46 @@ use super::super::listing_ops::ListingOperations;
 
 impl AuctionCoordinator {
     /// Resolve the expected signing key for a bidder in this listing, if known.
+    ///
+    /// Checks DHT BID_ANNOUNCEMENTS first, then falls back to locally-received
+    /// bid announcements (delivered via `app_message`).  The local fallback is
+    /// critical because BID_ANNOUNCEMENTS DHT propagation can lag behind
+    /// `app_message` delivery, causing signer verification to fail for parties
+    /// whose bids are already known locally.
     pub(super) async fn expected_bidder_signing_key(
         &self,
         listing_key: &RecordKey,
         bidder: &PublicKey,
     ) -> MarketResult<Option<[u8; 32]>> {
-        let Some(registry_data) = self
+        // Try DHT BID_ANNOUNCEMENTS first (authoritative).
+        let bid_record_key = if let Some(registry_data) = self
             .dht
             .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
             .await?
-        else {
-            return Ok(None);
+        {
+            let registry = BidAnnouncementRegistry::from_bytes(&registry_data)?;
+            registry
+                .announcements
+                .iter()
+                .find(|(b, _, _)| b == bidder)
+                .map(|(_, key, _)| key.clone())
+        } else {
+            None
         };
 
-        let registry = BidAnnouncementRegistry::from_bytes(&registry_data)?;
-        let Some(bid_record_key) = registry
-            .announcements
-            .iter()
-            .find(|(b, _, _)| b == bidder)
-            .map(|(_, key, _)| key.clone())
-        else {
-            return Ok(None);
+        // Fallback: check locally-received bid announcements.
+        let bid_record_key = if let Some(k) = bid_record_key {
+            k
+        } else {
+            let local = self.logic.get_bid_announcements(listing_key).await;
+            let Some(k) = local
+                .as_ref()
+                .and_then(|l| l.iter().find(|(b, _)| b == bidder))
+                .map(|(_, key)| key.clone())
+            else {
+                return Ok(None);
+            };
+            k
         };
 
         let bid_ops = BidOperations::new(self.dht.clone());

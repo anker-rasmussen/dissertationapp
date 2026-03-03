@@ -46,11 +46,6 @@ fn is_fast_mode() -> bool {
     std::env::var("E2E_FAST_MODE").is_ok()
 }
 
-/// Check if the devnet is managed by the nextest setup script.
-fn is_devnet_managed() -> bool {
-    std::env::var("E2E_DEVNET_MANAGED").is_ok()
-}
-
 // ── DevnetManager ────────────────────────────────────────────────────
 
 /// Manages the Veilid devnet lifecycle for E2E tests.
@@ -65,11 +60,9 @@ pub struct DevnetManager {
 
 impl DevnetManager {
     pub fn new() -> Self {
-        let fast_mode = is_fast_mode() || is_devnet_managed();
-        if is_fast_mode() {
+        let fast_mode = is_fast_mode();
+        if fast_mode {
             eprintln!("[E2E] Fast mode enabled - reusing persistent devnet");
-        } else if is_devnet_managed() {
-            eprintln!("[E2E] Devnet managed by setup script - reusing");
         }
         Self {
             compose_path: docker_compose_path(),
@@ -778,40 +771,39 @@ impl HeadlessParticipant {
         use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
         use tokio::process::Command;
 
-        // Locate the binary relative to CARGO_MANIFEST_DIR
+        // Locate the binary relative to CARGO_MANIFEST_DIR.
+        // Prefer release builds (much faster MPC execution).
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let binary = manifest_dir
-            .join("target")
-            .join("debug")
-            .join("market-headless");
-
-        if !binary.exists() {
-            // Try standard cargo target dir (workspace root)
-            let workspace_binary = manifest_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("target").join("debug").join("market-headless"));
-            if let Some(ref wb) = workspace_binary {
-                if !wb.exists() {
-                    return Err(MarketError::Config(format!(
-                        "market-headless binary not found at {} or {}. \
-                         Build it first: cargo build --bin market-headless",
-                        binary.display(),
-                        wb.display()
-                    )));
-                }
-            }
-        }
-
-        // Determine which binary path exists
-        let binary_path = if binary.exists() {
-            binary
-        } else {
-            manifest_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("target").join("debug").join("market-headless"))
-                .unwrap_or(binary)
+        let binary_path = {
+            let candidates = [
+                manifest_dir.join("target/release/market-headless"),
+                manifest_dir
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("target/release/market-headless"))
+                    .unwrap_or_default(),
+                manifest_dir.join("target/debug/market-headless"),
+                manifest_dir
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("target/debug/market-headless"))
+                    .unwrap_or_default(),
+            ];
+            candidates
+                .iter()
+                .find(|p| p.exists())
+                .cloned()
+                .ok_or_else(|| {
+                    MarketError::Config(format!(
+                        "market-headless binary not found. Build with: \
+                         cargo build --release --bin market-headless\n\
+                         Searched: {:?}",
+                        candidates
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                    ))
+                })?
         };
 
         eprintln!(
@@ -991,6 +983,24 @@ impl HeadlessParticipant {
 
         let key = resp["data"]["key"].as_str().map(String::from);
         Ok(key)
+    }
+
+    /// Wait until this node's broadcast route is ready.
+    ///
+    /// Must be called before creating listings or placing bids, otherwise
+    /// bid announcements silently fail (no peer routes to deliver to).
+    pub async fn wait_for_routes(&mut self, timeout_secs: u64) -> MarketResult<()> {
+        let resp = self
+            .send(&serde_json::json!({
+                "cmd": "WaitForRoutes",
+                "timeout_secs": timeout_secs,
+            }))
+            .await?;
+        if resp.get("status").and_then(|s| s.as_str()) == Some("Err") {
+            let msg = resp["message"].as_str().unwrap_or("route wait failed");
+            return Err(MarketError::Network(msg.to_string()));
+        }
+        Ok(())
     }
 
     /// Request graceful shutdown.

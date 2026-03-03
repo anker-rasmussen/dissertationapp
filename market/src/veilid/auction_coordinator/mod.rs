@@ -499,6 +499,16 @@ impl AuctionCoordinator {
         self.logic.get_local_bid_count(listing_key).await
     }
 
+    /// Check whether this node's broadcast route has been created.
+    ///
+    /// Used by the headless IPC (`WaitForRoutes`) so E2E tests can wait
+    /// until the monitoring loop has established a route before placing
+    /// bids — otherwise bid announcements silently fail because there
+    /// are no peer routes to deliver them to.
+    pub async fn has_broadcast_route(&self) -> bool {
+        self.broadcast_route_id.lock().await.is_some()
+    }
+
     /// Check if the current node received a decryption key for a listing
     pub async fn get_decryption_key(&self, listing_key: &RecordKey) -> Option<String> {
         self.logic.get_decryption_key(listing_key).await
