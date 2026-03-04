@@ -140,7 +140,14 @@ impl VeilidNode {
             // Two modes:
             //   1. listen_addr/public_addr overridden → tailnet mode (real IPs, no libipspoof)
             //   2. Defaults → localhost mode (fake 1.2.3.X IPs, needs libipspoof)
-            let port = 5160 + devnet.port_offset;
+            // If public_addr is set (e.g. from playground exec), extract port from it.
+            // Otherwise compute from the hardcoded base port.
+            let port = devnet
+                .public_addr
+                .as_ref()
+                .and_then(|a| a.rsplit_once(':'))
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+                .unwrap_or(5160 + devnet.port_offset);
             let listen_addr = devnet.listen_addr.as_ref().map_or_else(
                 || format!("127.0.0.1:{port}"),
                 |addr| format!("{addr}:{port}"),
