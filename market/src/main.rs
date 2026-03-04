@@ -31,7 +31,7 @@ fn get_data_dir() -> PathBuf {
     }
 
     // Use node-specific data directory for devnet
-    let node_offset = std::env::var("MARKET_NODE_OFFSET")
+    let node_offset = std::env::var("VEILID_NODE_OFFSET")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(9);
@@ -42,12 +42,12 @@ fn get_data_dir() -> PathBuf {
 /// Runtime security checks for network-mode specific requirements.
 fn validate_runtime_security() -> MarketResult<()> {
     if std::env::var("MARKET_MODE").as_deref() == Ok("public")
-        && std::env::var(config::MARKET_NETWORK_KEY_ENV).is_err()
+        && std::env::var(config::VEILID_NETWORK_KEY_ENV).is_err()
     {
         return Err(MarketError::Config(format!(
             "Public mode requires an explicit {} env var. \
              Refusing to use default development network key.",
-            config::MARKET_NETWORK_KEY_ENV
+            config::VEILID_NETWORK_KEY_ENV
         )));
     }
     Ok(())

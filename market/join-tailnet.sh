@@ -52,9 +52,9 @@ exec env \
     LD_PRELOAD="${IPSPOOF_SO}" \
     IPSPOOF_TARGET_IP="${SERVER_IP}" \
     VEILID_BASE_PORT=5160 \
-    MARKET_NODE_OFFSET="${OFFSET}" \
-    MARKET_LISTEN_ADDR="0.0.0.0" \
-    MARKET_NETWORK_KEY="development-network-2025" \
-    MARKET_INSECURE_STORAGE=true \
+    VEILID_NODE_OFFSET="${OFFSET}" \
+    VEILID_LISTEN_ADDR="0.0.0.0" \
+    VEILID_NETWORK_KEY="development-network-2025" \
+    VEILID_INSECURE_STORAGE=true \
     RUST_LOG=info,veilid_core=info \
     cargo run --release

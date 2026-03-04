@@ -28,11 +28,11 @@ pub mod bid_subkeys {
 pub const DEFAULT_NETWORK_KEY: &str = "development-network-2025";
 
 /// Environment variable to override the network key.
-pub const MARKET_NETWORK_KEY_ENV: &str = "MARKET_NETWORK_KEY";
+pub const VEILID_NETWORK_KEY_ENV: &str = "VEILID_NETWORK_KEY";
 
 /// Return the network key used for shared-keypair derivation.
 pub fn network_key() -> String {
-    std::env::var(MARKET_NETWORK_KEY_ENV).unwrap_or_else(|_| DEFAULT_NETWORK_KEY.to_string())
+    std::env::var(VEILID_NETWORK_KEY_ENV).unwrap_or_else(|_| DEFAULT_NETWORK_KEY.to_string())
 }
 
 /// Default MP-SPDZ directory path.
@@ -63,15 +63,15 @@ pub const DEFAULT_NODE_OFFSET: u16 = 20;
 pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &["udp://1.2.3.1:5160"];
 
 /// Environment variable to override bootstrap node addresses (comma-separated).
-pub const MARKET_BOOTSTRAP_NODES_ENV: &str = "MARKET_BOOTSTRAP_NODES";
+pub const VEILID_BOOTSTRAP_ENV: &str = "VEILID_BOOTSTRAP";
 
 /// Environment variable to override the listen address (e.g., "0.0.0.0").
 /// When set, the market node listens on this address instead of 127.0.0.1.
-pub const MARKET_LISTEN_ADDR_ENV: &str = "MARKET_LISTEN_ADDR";
+pub const VEILID_LISTEN_ADDR_ENV: &str = "VEILID_LISTEN_ADDR";
 
 /// Environment variable to override the public address advertised to peers.
 /// Format: "ip:port" (e.g., "100.64.0.1:5180"). When unset, computed from offset.
-pub const MARKET_PUBLIC_ADDR_ENV: &str = "MARKET_PUBLIC_ADDR";
+pub const VEILID_PUBLIC_ADDRESS_ENV: &str = "VEILID_PUBLIC_ADDRESS";
 
 /// Default update channel capacity for Veilid updates.
 pub const DEFAULT_UPDATE_CHANNEL_CAPACITY: usize = 4096;
@@ -210,10 +210,10 @@ impl MarketConfig {
     /// Construct configuration from environment variables with sensible defaults.
     ///
     /// Environment variables:
-    /// - `MARKET_NETWORK_KEY`: Network key (default: "development-network-2025")
+    /// - `VEILID_NETWORK_KEY`: Network key (default: "development-network-2025")
     /// - `MP_SPDZ_DIR`: MP-SPDZ directory path
-    /// - `MARKET_NODE_OFFSET`: Port offset for devnet (default: 20)
-    /// - `MARKET_INSECURE_STORAGE`: Set to "true" to enable (default: false)
+    /// - `VEILID_NODE_OFFSET`: Port offset for devnet (default: 20)
+    /// - `VEILID_INSECURE_STORAGE`: Set to "true" to enable (default: false)
     ///
     /// All timeout values use hardcoded defaults unless explicitly overridden
     /// via `with_*` builder methods.
@@ -225,12 +225,12 @@ impl MarketConfig {
             .unwrap_or_else(|_| DEFAULT_MP_SPDZ_DIR.to_string())
             .into();
 
-        let node_offset = match std::env::var("MARKET_NODE_OFFSET") {
+        let node_offset = match std::env::var("VEILID_NODE_OFFSET") {
             Ok(s) => match s.parse::<u16>() {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(
-                        "MARKET_NODE_OFFSET='{}' is not a valid u16 ({}), using default {}",
+                        "VEILID_NODE_OFFSET='{}' is not a valid u16 ({}), using default {}",
                         s, e, DEFAULT_NODE_OFFSET
                     );
                     DEFAULT_NODE_OFFSET
@@ -239,11 +239,11 @@ impl MarketConfig {
             Err(_) => DEFAULT_NODE_OFFSET,
         };
 
-        let insecure_storage = std::env::var("MARKET_INSECURE_STORAGE")
+        let insecure_storage = std::env::var("VEILID_INSECURE_STORAGE")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        let bootstrap_nodes = std::env::var(MARKET_BOOTSTRAP_NODES_ENV)
+        let bootstrap_nodes = std::env::var(VEILID_BOOTSTRAP_ENV)
             .ok()
             .filter(|s| !s.is_empty())
             .map_or_else(
@@ -256,11 +256,11 @@ impl MarketConfig {
                 |s| s.split(',').map(|t| t.trim().to_string()).collect(),
             );
 
-        let listen_addr = std::env::var(MARKET_LISTEN_ADDR_ENV)
+        let listen_addr = std::env::var(VEILID_LISTEN_ADDR_ENV)
             .ok()
             .filter(|s| !s.is_empty());
 
-        let public_addr = std::env::var(MARKET_PUBLIC_ADDR_ENV)
+        let public_addr = std::env::var(VEILID_PUBLIC_ADDRESS_ENV)
             .ok()
             .filter(|s| !s.is_empty());
 
@@ -309,14 +309,14 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Serializes tests that mutate the `MARKET_NETWORK_KEY` env var
+    /// Serializes tests that mutate the `VEILID_NETWORK_KEY` env var
     /// to avoid race conditions from parallel test execution.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_network_key_default() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::remove_var(MARKET_NETWORK_KEY_ENV);
+        std::env::remove_var(VEILID_NETWORK_KEY_ENV);
 
         let key = network_key();
         assert_eq!(key, DEFAULT_NETWORK_KEY);
@@ -325,25 +325,25 @@ mod tests {
     #[test]
     fn test_network_key_from_env() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var(MARKET_NETWORK_KEY_ENV, "custom-network");
+        std::env::set_var(VEILID_NETWORK_KEY_ENV, "custom-network");
 
         let key = network_key();
         assert_eq!(key, "custom-network");
 
         // Clean up
-        std::env::remove_var(MARKET_NETWORK_KEY_ENV);
+        std::env::remove_var(VEILID_NETWORK_KEY_ENV);
     }
 
     #[test]
     fn test_market_config_from_env_defaults() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::remove_var(MARKET_NETWORK_KEY_ENV);
+        std::env::remove_var(VEILID_NETWORK_KEY_ENV);
         std::env::remove_var(MP_SPDZ_DIR_ENV);
-        std::env::remove_var("MARKET_NODE_OFFSET");
-        std::env::remove_var("MARKET_INSECURE_STORAGE");
-        std::env::remove_var(MARKET_BOOTSTRAP_NODES_ENV);
-        std::env::remove_var(MARKET_LISTEN_ADDR_ENV);
-        std::env::remove_var(MARKET_PUBLIC_ADDR_ENV);
+        std::env::remove_var("VEILID_NODE_OFFSET");
+        std::env::remove_var("VEILID_INSECURE_STORAGE");
+        std::env::remove_var(VEILID_BOOTSTRAP_ENV);
+        std::env::remove_var(VEILID_LISTEN_ADDR_ENV);
+        std::env::remove_var(VEILID_PUBLIC_ADDRESS_ENV);
 
         let config = MarketConfig::from_env();
         assert_eq!(config.network_key, DEFAULT_NETWORK_KEY);
@@ -356,16 +356,16 @@ mod tests {
     #[test]
     fn test_market_config_from_env_override() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var(MARKET_NETWORK_KEY_ENV, "test-network");
+        std::env::set_var(VEILID_NETWORK_KEY_ENV, "test-network");
         std::env::set_var(MP_SPDZ_DIR_ENV, "/custom/path");
-        std::env::set_var("MARKET_NODE_OFFSET", "15");
-        std::env::set_var("MARKET_INSECURE_STORAGE", "true");
+        std::env::set_var("VEILID_NODE_OFFSET", "15");
+        std::env::set_var("VEILID_INSECURE_STORAGE", "true");
         std::env::set_var(
-            MARKET_BOOTSTRAP_NODES_ENV,
+            VEILID_BOOTSTRAP_ENV,
             "udp://10.0.0.1:5160,udp://10.0.0.2:5160",
         );
-        std::env::set_var(MARKET_LISTEN_ADDR_ENV, "0.0.0.0");
-        std::env::set_var(MARKET_PUBLIC_ADDR_ENV, "100.64.0.1:5180");
+        std::env::set_var(VEILID_LISTEN_ADDR_ENV, "0.0.0.0");
+        std::env::set_var(VEILID_PUBLIC_ADDRESS_ENV, "100.64.0.1:5180");
 
         let config = MarketConfig::from_env();
         assert_eq!(config.network_key, "test-network");
@@ -380,13 +380,13 @@ mod tests {
         assert_eq!(config.public_addr.as_deref(), Some("100.64.0.1:5180"));
 
         // Clean up
-        std::env::remove_var(MARKET_NETWORK_KEY_ENV);
+        std::env::remove_var(VEILID_NETWORK_KEY_ENV);
         std::env::remove_var(MP_SPDZ_DIR_ENV);
-        std::env::remove_var("MARKET_NODE_OFFSET");
-        std::env::remove_var("MARKET_INSECURE_STORAGE");
-        std::env::remove_var(MARKET_BOOTSTRAP_NODES_ENV);
-        std::env::remove_var(MARKET_LISTEN_ADDR_ENV);
-        std::env::remove_var(MARKET_PUBLIC_ADDR_ENV);
+        std::env::remove_var("VEILID_NODE_OFFSET");
+        std::env::remove_var("VEILID_INSECURE_STORAGE");
+        std::env::remove_var(VEILID_BOOTSTRAP_ENV);
+        std::env::remove_var(VEILID_LISTEN_ADDR_ENV);
+        std::env::remove_var(VEILID_PUBLIC_ADDRESS_ENV);
     }
 
     #[test]
@@ -394,17 +394,17 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap();
 
         for value in ["true", "TRUE", "True", "TrUe"] {
-            std::env::set_var("MARKET_INSECURE_STORAGE", value);
+            std::env::set_var("VEILID_INSECURE_STORAGE", value);
             let config = MarketConfig::from_env();
             assert!(config.insecure_storage, "Failed for value: {}", value);
         }
 
         for value in ["false", "FALSE", "0", "no", ""] {
-            std::env::set_var("MARKET_INSECURE_STORAGE", value);
+            std::env::set_var("VEILID_INSECURE_STORAGE", value);
             let config = MarketConfig::from_env();
             assert!(!config.insecure_storage, "Failed for value: {}", value);
         }
 
-        std::env::remove_var("MARKET_INSECURE_STORAGE");
+        std::env::remove_var("VEILID_INSECURE_STORAGE");
     }
 }

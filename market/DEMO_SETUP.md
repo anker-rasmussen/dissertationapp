@@ -62,13 +62,13 @@ If you prefer to run manually with more control:
 
 ```bash
 # Instance 1
-MARKET_NODE_OFFSET=20 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
+VEILID_NODE_OFFSET=20 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
 
 # Instance 2
-MARKET_NODE_OFFSET=21 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
+VEILID_NODE_OFFSET=21 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
 
 # Instance 3
-MARKET_NODE_OFFSET=22 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
+VEILID_NODE_OFFSET=22 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
 ```
 
 ### Verification
