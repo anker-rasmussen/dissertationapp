@@ -1,153 +1,115 @@
-# Demo Setup Guide
+# Demo Setup
 
-## Running Multiple Market Instances for Demo
+How to run multiple market nodes for a live auction demo.
 
-This guide explains how to run 3 market app instances simultaneously for your dissertation demo.
+## Prerequisites
 
-### Prerequisites
+- Docker (for the 20-node Veilid devnet)
+- Rust toolchain
+- MP-SPDZ built (`make build-mpspdz` from repo root)
+- `libipspoof.so` built (`make build-ipspoof` from repo root)
 
-1. **Devnet must be running** (20 nodes: 1 bootstrap + 19 regular):
-   ```bash
-   cd /home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/compose
-   docker compose -f docker-compose.dev.yml up -d
-   # Wait for all nodes to be healthy
-   docker compose -f docker-compose.dev.yml ps
-   ```
+## One-Command Demo
 
-2. **Verify devnet is healthy** - all 20 nodes should show "healthy" status
-
-### Running 3 Market Instances
-
-Open **3 separate terminals** and run one instance in each:
-
-#### Terminal 1 - Bidder 1 (Node 20)
-```bash
-cd /home/broadcom/Repos/Dissertation/Repos/dissertationapp/market
-./run-demo-instance.sh 20
-```
-- Port: 5180
-- IP: 1.2.3.21
-- Data: ~/.local/share/smpc-auction-node-20
-
-#### Terminal 2 - Bidder 2 (Node 21)
-```bash
-cd /home/broadcom/Repos/Dissertation/Repos/dissertationapp/market
-./run-demo-instance.sh 21
-```
-- Port: 5181
-- IP: 1.2.3.22
-- Data: ~/.local/share/smpc-auction-node-21
-
-#### Terminal 3 - Auctioneer (Node 22)
-```bash
-cd /home/broadcom/Repos/Dissertation/Repos/dissertationapp/market
-./run-demo-instance.sh 22
-```
-- Port: 5182
-- IP: 1.2.3.23
-- Data: ~/.local/share/smpc-auction-node-22
-
-### Cluster Mode (Recommended)
-
-Run all 3 nodes in a single terminal with interleaved output:
+From the repo root:
 
 ```bash
-cd /home/broadcom/Repos/Dissertation/Repos/dissertationapp/market
-./run-demo-instance.sh cluster
+make demo
 ```
 
-### Manual Run (Alternative)
+This handles everything: builds the binary + dependencies, starts a fresh devnet, and launches 3 market nodes with interleaved output. Skip the rest of this doc if that's all you need.
 
-If you prefer to run manually with more control:
+## Manual Setup
+
+### 1. Start the devnet
 
 ```bash
-# Instance 1
-VEILID_NODE_OFFSET=20 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
-
-# Instance 2
-VEILID_NODE_OFFSET=21 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
-
-# Instance 3
-VEILID_NODE_OFFSET=22 LD_PRELOAD=/home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/scripts/libipspoof.so RUST_LOG=info cargo run
+make devnet-up
+# Wait for "healthy" status — takes ~30s
 ```
 
-### Verification
+### 2. Launch market nodes
 
-Each instance should show:
-- **Status**: "Connected" (FullyAttached state)
-- **Peers**: Non-zero count (should see other market instances + devnet nodes)
-- **Node ID**: Different VLD0: identifier for each instance
-- **Warning**: "This node has no valid public dial info" is EXPECTED - you're using LocalNetwork routing domain
+Each node needs a unique `VEILID_NODE_OFFSET` (20+), `LD_PRELOAD` pointing at `libipspoof.so`, and the `MP_SPDZ_DIR` env var. Open 3 terminals:
 
-### Connecting to Public Veilid Network
+**Terminal 1 — Bidder 1 (offset 20, port 5180)**
+```bash
+cd Repos/dissertationapp/market
+VEILID_NODE_OFFSET=20 \
+  LD_PRELOAD=../../veilid/.devcontainer/scripts/libipspoof.so \
+  MP_SPDZ_DIR=../../MP-SPDZ \
+  RUST_LOG=info \
+  cargo run --release
+```
 
-To connect to the real public Veilid network (for testing or production):
+**Terminal 2 — Bidder 2 (offset 21, port 5181)**
+```bash
+cd Repos/dissertationapp/market
+VEILID_NODE_OFFSET=21 \
+  LD_PRELOAD=../../veilid/.devcontainer/scripts/libipspoof.so \
+  MP_SPDZ_DIR=../../MP-SPDZ \
+  RUST_LOG=info \
+  cargo run --release
+```
+
+**Terminal 3 — Auctioneer (offset 22, port 5182)**
+```bash
+cd Repos/dissertationapp/market
+VEILID_NODE_OFFSET=22 \
+  LD_PRELOAD=../../veilid/.devcontainer/scripts/libipspoof.so \
+  MP_SPDZ_DIR=../../MP-SPDZ \
+  RUST_LOG=info \
+  cargo run --release
+```
+
+Or use the helper script if available:
 
 ```bash
-./run-public.sh
+./run-demo-instance.sh 20       # Single node
+./run-demo-instance.sh cluster  # All 3 in one terminal
 ```
 
-This will:
-- Connect to public bootstrap nodes on the internet
-- Make your node discoverable on the public network
-- Use data directory: `~/.local/share/smpc-auction-public`
-- **NOT require LD_PRELOAD or devnet**
+### 3. Verify it's working
 
-### Network Topology
+Each node should show:
+- **Status**: "Connected" (FullyAttached)
+- **Peers**: Non-zero count (devnet nodes + other market instances)
+- **Node ID**: Different `VLD0:` identifier per instance
+
+The warning "This node has no valid public dial info" is expected — you're on the local devnet.
+
+## Network Topology
 
 ```
-Devnet Nodes (Docker, offsets 0-19):
-├── Bootstrap: 1.2.3.1:5160 (offset 0)
-├── Node 1:    1.2.3.2:5161 (offset 1)
-├── ...
-├── Node 18:   1.2.3.19:5178 (offset 18)
-└── Node 19:   1.2.3.20:5179 (offset 19)
+Docker devnet (offsets 0–19):
+  Bootstrap:  1.2.3.1:5160  (offset 0)
+  Nodes 1–19: 1.2.3.2:5161 ... 1.2.3.20:5179
 
-Market Instances (Local, offsets 20+):
-├── Party 0:   1.2.3.21:5180 (offset 20)
-├── Party 1:   1.2.3.22:5181 (offset 21)
-├── Party 2:   1.2.3.23:5182 (offset 22)
-└── Party n:   1.2.3.(n+1):(5160+n) — max ~20 market nodes (LD_PRELOAD translates 40 IPs, devnet uses 20)
+Market nodes (offsets 20+):
+  Node 20:    1.2.3.21:5180  (Bidder 1)
+  Node 21:    1.2.3.22:5181  (Bidder 2)
+  Node 22:    1.2.3.23:5182  (Auctioneer)
+  ...up to offset ~39 (libipspoof translates 40 IPs total)
 ```
 
-All nodes use the same network key: `development-network-2025`
+All nodes share the network key `development-network-2025`.
 
-### Troubleshooting
+The `LD_PRELOAD` shim (`libipspoof.so`) intercepts socket calls to translate fake global IPs (1.2.3.x) to localhost, so all 20+ nodes can run on a single machine.
 
-1. **"Connecting..." stuck**:
-   - Check devnet is running: `docker ps`
-   - Verify capabilities match (SGNL, RLAY, DIAL disabled)
-   - Look for "no routing domain" errors in devnet logs
+## Troubleshooting
 
-2. **Port already in use**:
-   - Kill existing instances
-   - Check with: `lsof -i :5169` (or 5170, 5171)
+**Stuck on "Connecting..."** — Check that devnet is running (`docker ps`). If you just restarted the devnet, clear stale data dirs first: `make clean-data`.
 
-3. **Zero peers**:
-   - Bootstrap is usually fast with warm data dirs; if data was cleaned after a devnet restart, the first attachment may take longer
-   - Check LD_PRELOAD is set correctly
-   - Verify devnet nodes are healthy
+**Port already in use** — Kill leftover instances: `make devnet-down` (also kills market processes).
 
-4. **Data conflicts / stale data**:
-   - Each instance uses separate data directory
-   - Clear data: `rm -rf ~/.local/share/smpc-auction-node-*`
-   - **Important**: Always clean data dirs after restarting the devnet (new node identities)
+**Zero peers after 30s** — Verify `LD_PRELOAD` is set and points to a valid `libipspoof.so`. Without it, the fake IPs don't resolve.
 
-### Stopping Everything
+**Stale data after devnet restart** — The devnet generates new node identities on restart. Always clean data dirs: `rm -rf ~/.local/share/smpc-auction-node-*`
+
+## Teardown
 
 ```bash
-# Stop market instances: Ctrl+C in each terminal
-
-# Stop devnet:
-cd /home/broadcom/Repos/Dissertation/Repos/veilid/.devcontainer/compose
-docker compose -f docker-compose.dev.yml down
+# Ctrl+C in each terminal, then:
+make devnet-down    # Stops docker + kills market processes
+make clean-data     # Optional: wipe node data dirs + docker volumes
 ```
-
-### Architecture Notes
-
-- **LD_PRELOAD**: Translates fake global IPs (1.2.3.x) to localhost (127.0.0.1)
-- **Port-based routing**: Each node identified by its port number
-- **Capabilities**: Market nodes disable SGNL and DIAL; RELAY and TUNNEL left enabled for route construction
-- **Bootstrap**: All nodes connect to 1.2.3.1:5160 for initial peer discovery
-- **Protocol**: Uses UDP for BOOT protocol (TCP requires VL framing)
-- **20-node devnet**: Provides sufficient relay diversity for private route allocation (required for broadcast messaging and MPC routes)
