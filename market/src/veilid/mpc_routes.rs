@@ -24,6 +24,10 @@ pub struct MpcRouteManager {
     party_id: usize,
     my_route_id: Option<RouteId>,
     my_route_blob: Option<RouteBlob>, // Route blob for sharing with other parties
+    /// When true, `my_route_id` is the broadcast route borrowed from the
+    /// coordinator.  Must NOT be released by this manager — the coordinator
+    /// owns its lifecycle.
+    borrowed_route: bool,
     pub(crate) received_routes: Arc<Mutex<HashMap<PublicKey, RouteId>>>,
     /// Raw route blobs keyed by party pubkey — kept for re-import to refresh
     /// the 5-minute expiry timer before tunnel proxy use.
@@ -40,6 +44,7 @@ impl MpcRouteManager {
             party_id,
             my_route_id: None,
             my_route_blob: None,
+            borrowed_route: false,
             received_routes: Arc::new(Mutex::new(HashMap::new())),
             received_blobs: Arc::new(Mutex::new(HashMap::new())),
             ready_parties: Arc::new(Mutex::new(HashMap::new())),
@@ -92,23 +97,12 @@ impl MpcRouteManager {
     /// `exchange_mpc_routes` call starts with fresh routes.  Ready signals
     /// are preserved to avoid losing signals from parties that already
     /// passed the barrier (see race condition comment in Phase 2).
-    pub async fn reset_routes(&mut self) {
-        if let Some(route_id) = self.my_route_id.take() {
-            let _ = self.api.release_private_route(route_id);
-        }
-        self.my_route_blob = None;
-        self.received_routes.lock().await.clear();
-        self.received_blobs.lock().await.clear();
-        info!(
-            "Route manager reset for retry (ready signals preserved: {})",
-            self.ready_parties.lock().await.len()
-        );
-    }
-
     /// Reuse an existing route (e.g., the broadcast route) for MPC traffic.
     ///
     /// The broadcast route is maintained by the coordinator's keepalive task,
     /// so it stays alive much longer than a freshly created MPC route.
+    /// Marked as borrowed so `reset_routes` / `refresh_own_route` won't
+    /// release it (the coordinator owns its lifecycle).
     pub fn use_existing_route(&mut self, route_id: RouteId, blob: Vec<u8>) {
         info!(
             "Using existing (broadcast) route for MPC Party {}: {}",
@@ -116,6 +110,23 @@ impl MpcRouteManager {
         );
         self.my_route_id = Some(route_id.clone());
         self.my_route_blob = Some(RouteBlob { route_id, blob });
+        self.borrowed_route = true;
+    }
+
+    pub async fn reset_routes(&mut self) {
+        if let Some(route_id) = self.my_route_id.take() {
+            if !self.borrowed_route {
+                let _ = self.api.release_private_route(route_id);
+            }
+        }
+        self.my_route_blob = None;
+        self.borrowed_route = false;
+        self.received_routes.lock().await.clear();
+        self.received_blobs.lock().await.clear();
+        info!(
+            "Route manager reset for retry (ready signals preserved: {})",
+            self.ready_parties.lock().await.len()
+        );
     }
 
     /// Import each peer's route blob, send `data` via `app_call` for confirmed
@@ -335,11 +346,14 @@ impl MpcRouteManager {
     /// to `assemble_party_routes`.  Returns the new route blob for
     /// broadcasting to peers.
     pub async fn refresh_own_route(&mut self, my_pubkey: &PublicKey) -> MarketResult<RouteBlob> {
-        // Release old route
+        // Release old route (but not if it's borrowed from the coordinator)
         if let Some(old) = self.my_route_id.take() {
-            let _ = self.api.release_private_route(old);
+            if !self.borrowed_route {
+                let _ = self.api.release_private_route(old);
+            }
         }
         self.my_route_blob = None;
+        self.borrowed_route = false;
 
         let new_id = self.create_route().await?;
         info!("Refreshed own MPC route: {}", new_id);

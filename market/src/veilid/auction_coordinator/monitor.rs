@@ -199,47 +199,34 @@ impl AuctionCoordinator {
                     monitor_self.retry_pending_bid_announcements().await;
                 }
 
-                let expired = monitor_self.logic.get_expired_listings().await;
+                let mut expired: Vec<_> = monitor_self.logic.get_expired_listings().await;
+
+                // Sort deterministically by key so ALL nodes process auctions
+                // in the same order.  This prevents the inter-node deadlock
+                // where Node A blocks on Listing A (waiting for B) while
+                // Node B blocks on Listing B (waiting for A).
+                expired.sort_by(|(a, _), (b, _)| a.cmp(b));
 
                 for (key, listing) in expired {
-                    // Skip listings already being handled by a spawned task.
-                    // active_auctions is set inside handle_auction_end and
-                    // cleared when it finishes (success or failure).
+                    // Skip listings already being handled.
                     if monitor_self.mpc.is_auction_active(&key).await {
                         continue;
                     }
 
                     info!("Auction deadline reached for listing '{}'", listing.title);
 
-                    // Eagerly mark active so the next tick doesn't double-spawn
-                    // before handle_auction_end sets it internally.
                     monitor_self.mpc.mark_auction_active(&key).await;
 
-                    // Spawn each auction as an independent task so concurrent
-                    // auctions can make progress in parallel.  Without this,
-                    // two auctions processed sequentially deadlock: Node A
-                    // blocks on Listing A's route collection (waiting for
-                    // Node B), while Node B blocks on Listing B (waiting for
-                    // Node A).
-                    let coord = monitor_self.clone();
-                    let key_clone = key.clone();
-                    tokio::spawn(async move {
-                        match coord.handle_auction_end_wrapper(&key_clone, &listing).await {
-                            Ok(()) => coord.logic.unwatch_listing(&key_clone).await,
-                            Err(e) => {
-                                // Keep listing watched so it retries on the next tick.
-                                // Transient failures (e.g. bid key not stored yet)
-                                // resolve within a few seconds.
-                                error!(
-                                    "Failed to handle auction end for '{}': {} (will retry)",
-                                    listing.title, e
-                                );
-                            }
+                    match monitor_self.handle_auction_end_wrapper(&key, &listing).await {
+                        Ok(()) => monitor_self.logic.unwatch_listing(&key).await,
+                        Err(e) => {
+                            error!(
+                                "Failed to handle auction end for '{}': {} (will retry)",
+                                listing.title, e
+                            );
                         }
-                        // Clear the early guard; handle_auction_end manages its
-                        // own insert/remove for the actual MPC execution window.
-                        coord.mpc.mark_auction_inactive(&key_clone).await;
-                    });
+                    }
+                    monitor_self.mpc.mark_auction_inactive(&key).await;
                 }
             }
         });
@@ -362,7 +349,7 @@ impl AuctionCoordinator {
         };
 
         // Pass our broadcast route (kept alive by keepalive task) for MPC reuse.
-        // Freshly created MPC routes die within seconds without keepalive.
+        // The route manager marks it as "borrowed" so retries won't release it.
         let broadcast_route = {
             let rid = self.broadcast_route_id.lock().await.clone();
             let blob = self.my_route_blob.lock().await.clone();

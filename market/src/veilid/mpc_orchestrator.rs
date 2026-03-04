@@ -87,6 +87,11 @@ pub struct MpcOrchestrator {
     /// routes immediately.  Routes go stale during MPC (keepalive suppressed)
     /// and peers in a subsequent auction need fresh blobs.
     needs_route_refresh: Arc<std::sync::atomic::AtomicBool>,
+    /// Monotonic counter for assigning non-overlapping TCP port slots to
+    /// concurrent MPC tunnel proxies.  Each session advances by `num_parties`
+    /// so the ports don't collide.  Wraps within the 10-port window allocated
+    /// per node by `base_port_for_offset`.
+    port_slot_counter: std::sync::atomic::AtomicU16,
 }
 
 impl MpcOrchestrator {
@@ -117,6 +122,7 @@ impl MpcOrchestrator {
             active_auctions: Arc::new(Mutex::new(HashSet::new())),
             pending_mpc_messages: Arc::new(Mutex::new(HashMap::new())),
             needs_route_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            port_slot_counter: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
@@ -408,9 +414,11 @@ impl MpcOrchestrator {
             }).clone()
         };
 
-        // Use the broadcast route (maintained by keepalive) if available,
+        // Reuse the broadcast route (maintained by keepalive) if available,
         // otherwise create a fresh MPC-specific route.  Broadcast routes
         // survive much longer because the coordinator refreshes them.
+        // The route is marked as "borrowed" so reset_routes/refresh_own_route
+        // won't release it (the coordinator owns its lifecycle).
         let my_route_id = {
             let mut mgr = route_manager.lock().await;
             if let Some((route_id, blob)) = broadcast_route {
@@ -546,6 +554,14 @@ impl MpcOrchestrator {
         // Session ID = listing key string (deterministic, all parties agree).
         let session_id = listing_key.to_string();
 
+        // Each concurrent auction gets a distinct port slot within the 10-port
+        // window allocated per node, so their TCP tunnel proxies don't collide.
+        #[allow(clippy::cast_possible_truncation)] // num_parties fits in u16
+        let port_slot = self
+            .port_slot_counter
+            .fetch_add(num_parties as u16, std::sync::atomic::Ordering::Relaxed)
+            % 10;
+
         // Start MPC tunnel proxy with the routes
         let tunnel_proxy = MpcTunnelProxy::new(super::mpc::MpcTunnelConfig {
             api: self.api.clone(),
@@ -554,6 +570,7 @@ impl MpcOrchestrator {
             party_routes: routes,
             party_blobs: maps.party_blobs,
             node_offset: self.node_offset,
+            port_slot,
             signing_key: self.signing_key.clone(),
             party_signers: maps.party_signers,
             live_routes: maps.live_routes,
@@ -613,8 +630,10 @@ impl MpcOrchestrator {
         // Compile MPC program for the specific number of parties
         compile_mpc_program(&mp_spdz_dir, num_parties).await?;
 
-        // Spawn MP-SPDZ process and feed bid value via stdin
-        let base_port = super::mpc::base_port_for_offset(self.node_offset);
+        // Spawn MP-SPDZ process and feed bid value via stdin.
+        // Must match the tunnel proxy's port slot so MASCOT connects to the
+        // correct local TCP listeners.
+        let base_port = super::mpc::base_port_for_offset(self.node_offset) + port_slot;
         let result = spawn_mpc_party(
             &mp_spdz_dir,
             party_id,

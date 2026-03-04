@@ -164,6 +164,9 @@ pub struct MpcTunnelConfig {
     pub party_routes: HashMap<usize, RouteId>,
     pub party_blobs: HashMap<usize, Vec<u8>>,
     pub node_offset: u16,
+    /// Offset within the 10-port window to avoid collisions with concurrent
+    /// MPC sessions on the same node.
+    pub port_slot: u16,
     pub signing_key: SigningKey,
     pub party_signers: HashMap<usize, [u8; 32]>,
     pub live_routes: Option<Arc<Mutex<HashMap<PublicKey, RouteId>>>>,
@@ -177,7 +180,7 @@ impl MpcTunnelProxy {
     /// to authenticate incoming MPC messages (the envelope signer must match
     /// the expected party).
     pub fn new(config: MpcTunnelConfig) -> Self {
-        let base_port = base_port_for_offset(config.node_offset);
+        let base_port = base_port_for_offset(config.node_offset) + config.port_slot;
 
         // Build reverse mapping: signer → party_id
         let signer_to_party: HashMap<[u8; 32], usize> = config
@@ -187,9 +190,9 @@ impl MpcTunnelProxy {
             .collect();
 
         info!(
-            "MPC TunnelProxy for Party {} session {}: base port {} (offset {}), {} peers, live_routes={}",
+            "MPC TunnelProxy for Party {} session {}: base port {} (offset {}, slot {}), {} peers, live_routes={}",
             config.party_id, config.session_id, base_port, config.node_offset,
-            signer_to_party.len(), config.live_routes.is_some()
+            config.port_slot, signer_to_party.len(), config.live_routes.is_some()
         );
 
         Self {
