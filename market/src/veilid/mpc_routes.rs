@@ -445,7 +445,22 @@ impl MpcRouteManager {
                 .app_call(Target::RouteId(route_id.clone()), data.clone())
                 .await
             {
-                Ok(_) => sent += 1,
+                Ok(response) => {
+                    sent += 1;
+                    // Parse ack: the responder's own MpcReady echoed back.
+                    // A single round-trip registers BOTH parties as ready.
+                    if let Ok(AuctionMessage::MpcReady {
+                        party_pubkey: ack_pk,
+                        num_parties: ack_np,
+                        timestamp: ack_ts,
+                        ..
+                    }) = AuctionMessage::from_bytes(&response)
+                    {
+                        if self.register_ready(ack_pk, ack_np, ack_ts).await {
+                            info!("MpcReady ack: registered peer {} as ready", pubkey);
+                        }
+                    }
+                }
                 Err(e) => warn!("Failed to send MpcReady via MPC route to {}: {}", pubkey, e),
             }
         }
