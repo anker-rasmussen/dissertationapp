@@ -642,8 +642,27 @@ impl AuctionCoordinator {
         {
             // Try AuctionMessage first (WinnerDecryptionRequest, etc.)
             if let Ok(auction_msg) = AuctionMessage::from_bytes(&payload) {
+                // For MpcReady, the ack carries our own readiness data back
+                // to the sender — a single round-trip registers BOTH parties.
+                let ack = if let AuctionMessage::MpcReady {
+                    ref listing_key,
+                    num_parties,
+                    ..
+                } = auction_msg
+                {
+                    AuctionMessage::mpc_ready(
+                        listing_key.clone(),
+                        self.my_node_id.clone(),
+                        num_parties,
+                        now_unix(),
+                    )
+                    .to_bytes()
+                    .unwrap_or_else(|_| vec![0x01])
+                } else {
+                    vec![0x01]
+                };
                 self.handle_auction_message(auction_msg, signer).await?;
-                return Ok(vec![0x01]);
+                return Ok(ack);
             }
 
             // Not an AuctionMessage — peek-deserialize MpcEnvelope for routing.

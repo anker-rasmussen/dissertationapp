@@ -120,15 +120,8 @@ impl DevnetManager {
             return Ok(());
         }
 
-        // If devnet is already running and all nodes are reachable, reuse it
-        // instead of tearing down and rebuilding (saves ~30-60s per test).
-        if self.is_devnet_running() && self.check_all_nodes_reachable() {
-            eprintln!("[E2E] Devnet already running and healthy — reusing");
-            self.started = true;
-            self.owns_devnet = false;
-            return Ok(());
-        }
-
+        // Always restart with clean data — routing tables degrade after
+        // heavy MPC traffic, causing route death spirals in subsequent tests.
         self.ensure_stopped()?;
         eprintln!("[E2E] Starting devnet...");
 
