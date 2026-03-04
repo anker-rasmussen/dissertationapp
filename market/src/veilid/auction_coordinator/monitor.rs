@@ -202,23 +202,44 @@ impl AuctionCoordinator {
                 let expired = monitor_self.logic.get_expired_listings().await;
 
                 for (key, listing) in expired {
+                    // Skip listings already being handled by a spawned task.
+                    // active_auctions is set inside handle_auction_end and
+                    // cleared when it finishes (success or failure).
+                    if monitor_self.mpc.is_auction_active(&key).await {
+                        continue;
+                    }
+
                     info!("Auction deadline reached for listing '{}'", listing.title);
 
-                    match monitor_self
-                        .handle_auction_end_wrapper(&key, &listing)
-                        .await
-                    {
-                        Ok(()) => monitor_self.logic.unwatch_listing(&key).await,
-                        Err(e) => {
-                            // Keep listing watched so it retries on the next tick.
-                            // Transient failures (e.g. bid key not stored yet) resolve
-                            // within a few seconds.
-                            error!(
-                                "Failed to handle auction end for '{}': {} (will retry)",
-                                listing.title, e
-                            );
+                    // Eagerly mark active so the next tick doesn't double-spawn
+                    // before handle_auction_end sets it internally.
+                    monitor_self.mpc.mark_auction_active(&key).await;
+
+                    // Spawn each auction as an independent task so concurrent
+                    // auctions can make progress in parallel.  Without this,
+                    // two auctions processed sequentially deadlock: Node A
+                    // blocks on Listing A's route collection (waiting for
+                    // Node B), while Node B blocks on Listing B (waiting for
+                    // Node A).
+                    let coord = monitor_self.clone();
+                    let key_clone = key.clone();
+                    tokio::spawn(async move {
+                        match coord.handle_auction_end_wrapper(&key_clone, &listing).await {
+                            Ok(()) => coord.logic.unwatch_listing(&key_clone).await,
+                            Err(e) => {
+                                // Keep listing watched so it retries on the next tick.
+                                // Transient failures (e.g. bid key not stored yet)
+                                // resolve within a few seconds.
+                                error!(
+                                    "Failed to handle auction end for '{}': {} (will retry)",
+                                    listing.title, e
+                                );
+                            }
                         }
-                    }
+                        // Clear the early guard; handle_auction_end manages its
+                        // own insert/remove for the actual MPC execution window.
+                        coord.mpc.mark_auction_inactive(&key_clone).await;
+                    });
                 }
             }
         });
