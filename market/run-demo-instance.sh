@@ -26,9 +26,10 @@ run_single_node() {
     export VEILID_NODE_OFFSET=$NODE_OFFSET
     VEILID_DIR="${VEILID_REPO_PATH:-$(dirname "$(dirname "$SCRIPT_DIR")")/veilid}"
     export LD_PRELOAD="$VEILID_DIR/.devcontainer/scripts/libipspoof.so"
+    export MP_SPDZ_DIR="${MP_SPDZ_DIR:-$(dirname "$(dirname "$SCRIPT_DIR")")/MP-SPDZ}"
     export RUST_LOG=info,veilid_core=info
 
-    cargo run
+    cargo run --release
 }
 
 run_cluster() {
@@ -43,7 +44,7 @@ run_cluster() {
 
     # Build first to avoid concurrent compilation issues
     echo "Building project..."
-    cargo build
+    cargo build --release
     echo ""
 
     # Array to track child PIDs
@@ -74,9 +75,10 @@ run_cluster() {
             export VEILID_NODE_OFFSET=$NODE_OFFSET
             VEILID_DIR="${VEILID_REPO_PATH:-$(dirname "$(dirname "$SCRIPT_DIR")")/veilid}"
             export LD_PRELOAD="$VEILID_DIR/.devcontainer/scripts/libipspoof.so"
+            export MP_SPDZ_DIR="${MP_SPDZ_DIR:-$(dirname "$(dirname "$SCRIPT_DIR")")/MP-SPDZ}"
             export RUST_LOG=info,veilid_core=info
             cd "$SCRIPT_DIR"
-            cargo run 2>&1 | sed "s/^/[Node $NODE_OFFSET] /"
+            cargo run --release 2>&1 | sed "s/^/[Node $NODE_OFFSET] /"
         ) &
         PIDS+=($!)
 
