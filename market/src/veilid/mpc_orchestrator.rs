@@ -299,6 +299,20 @@ impl MpcOrchestrator {
         }
     }
 
+    /// Get a snapshot of the traffic ring buffer for a listing's tunnel proxy.
+    pub async fn get_mpc_traffic_log(
+        &self,
+        listing_key: &RecordKey,
+    ) -> Vec<super::mpc::TrafficEntry> {
+        let session_id = listing_key.to_string();
+        let proxies = self.active_tunnel_proxies.lock().await;
+        if let Some(proxy) = proxies.get(&session_id) {
+            proxy.traffic_log_snapshot().await
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Set the auction phase for a listing (public for coordinator use).
     pub async fn set_auction_phase(&self, listing_key: &RecordKey, phase: AuctionPhase) {
         info!(listing_key = %listing_key, phase = %phase, "Auction phase transition");

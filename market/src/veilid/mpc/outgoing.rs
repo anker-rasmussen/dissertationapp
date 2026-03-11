@@ -167,6 +167,8 @@ impl MpcTunnelProxy {
             self.inner
                 .bytes_sent
                 .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+            self.log_traffic(super::TrafficDir::Sent, target_pid, &buf[..n], n)
+                .await;
 
             // Log progress every 30s to confirm data flow at info level
             if last_progress_log.elapsed()
