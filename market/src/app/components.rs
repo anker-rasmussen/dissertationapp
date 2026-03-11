@@ -8,6 +8,52 @@ use crate::app::state::{SharedAppState, SHARED_STATE};
 use market::actions::{
     create_and_publish_listing, fetch_listing, fetch_registry_listings, submit_bid,
 };
+use market::marketplace::listing::PublicListing;
+
+/// Build a `ListingInfo` from a fetched listing + coordinator state.
+async fn build_listing_info(
+    state: &SharedAppState,
+    listing: &PublicListing,
+    key_str: &str,
+) -> ListingInfo {
+    let status = format!("{:?}", listing.status);
+    let listing_key = listing.key.clone();
+
+    let (bid_count, has_decryption_key, auction_phase, is_seller, mpc_bytes_sent, mpc_bytes_recv) =
+        if let Some(coordinator) = state.coordinator() {
+            let count = coordinator.get_bid_count(&listing_key).await;
+            let has_key = coordinator.get_decryption_key(&listing_key).await.is_some();
+            let phase = coordinator.get_auction_phase(&listing_key).await;
+            let seller = coordinator.is_listing_owner(&listing_key).await;
+            let phase_label = phase.display_label().to_string();
+            let (sent, recv) = coordinator.get_mpc_traffic(&listing_key).await;
+            (count, has_key, phase_label, seller, sent, recv)
+        } else {
+            (0, false, "Unknown".to_string(), false, 0, 0)
+        };
+
+    let your_bid = state
+        .bid_storage
+        .get_bid(&listing_key)
+        .await
+        .map(|(amount, _)| amount);
+
+    ListingInfo {
+        key: key_str.to_string(),
+        title: listing.title.clone(),
+        reserve_price: listing.reserve_price,
+        time_remaining: listing.time_remaining(),
+        status,
+        bid_count,
+        has_decryption_key,
+        decrypted_content: None,
+        auction_phase,
+        your_bid,
+        is_seller,
+        mpc_bytes_sent,
+        mpc_bytes_recv,
+    }
+}
 
 /// Display info for a listing in the browser.
 #[derive(Clone, Default, PartialEq)]
@@ -20,6 +66,24 @@ pub struct ListingInfo {
     pub bid_count: usize,
     pub has_decryption_key: bool,
     pub decrypted_content: Option<String>,
+    pub auction_phase: String,
+    pub your_bid: Option<u64>,
+    pub is_seller: bool,
+    pub mpc_bytes_sent: u64,
+    pub mpc_bytes_recv: u64,
+}
+
+/// Format a byte count as a human-readable string (e.g., "1.2 MB").
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Network status display component.
@@ -224,6 +288,129 @@ pub fn ListingBrowser(
     let bid_amount = use_signal(|| String::from("10"));
     let mut bid_result = use_signal(String::new);
 
+    // Auto-discover listings from registry every 5s.
+    let registry_state = app_state.clone();
+    let _registry_poller = use_resource(move || {
+        let state = registry_state.clone();
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Ok(listings) = fetch_registry_listings(&state).await {
+                    let mut current = known_listings.write();
+                    for (key, title) in &listings {
+                        if !current.iter().any(|(k, _)| k == key) {
+                            current.push((key.clone(), title.clone()));
+                        }
+                    }
+                    // Auto-select first listing if none selected yet
+                    if browse_key.read().is_empty() {
+                        if let Some((key, _)) = listings.first() {
+                            drop(current);
+                            browse_key.set(key.clone());
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Auto-fetch listing details when browse_key changes, countdown timer, live updates.
+    let fetch_state = app_state.clone();
+    let _auto_fetch = use_resource(move || {
+        let state = fetch_state.clone();
+        async move {
+            let mut tick: u64 = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tick += 1;
+                let key_str = browse_key.read().clone();
+                if key_str.is_empty() {
+                    continue;
+                }
+                // Fetch listing details if not yet loaded
+                if current_listing
+                    .read()
+                    .as_ref()
+                    .is_none_or(|l| l.key != key_str)
+                {
+                    if let Some(dht) = state.dht_operations() {
+                        if let Ok(listing) = fetch_listing(&dht, &key_str).await {
+                            let info = build_listing_info(&state, &listing, &key_str).await;
+                            current_listing.set(Some(info));
+                        }
+                    }
+                }
+
+                // Countdown timer — decrement every tick
+                {
+                    let mut cur = current_listing.write();
+                    if let Some(info) = cur.as_mut() {
+                        if info.key == key_str && info.time_remaining > 0 {
+                            info.time_remaining = info.time_remaining.saturating_sub(1);
+                            if info.time_remaining == 0 {
+                                info.status = "Ended".to_string();
+                            }
+                        }
+                    }
+                }
+
+                // Full re-fetch from DHT every 10s (like clicking Fetch)
+                if tick.is_multiple_of(10) {
+                    if let Some(dht) = state.dht_operations() {
+                        if let Ok(listing) = fetch_listing(&dht, &key_str).await {
+                            let info = build_listing_info(&state, &listing, &key_str).await;
+                            // Preserve decrypted_content if already set
+                            let decrypted = current_listing
+                                .read()
+                                .as_ref()
+                                .and_then(|l| l.decrypted_content.clone());
+                            let mut refreshed = info;
+                            refreshed.decrypted_content = decrypted;
+                            current_listing.set(Some(refreshed));
+                        }
+                    }
+                    continue;
+                }
+
+                // Update phase/bid count every tick for MPC visibility
+                let listing_key = match RecordKey::try_from(key_str.as_str()) {
+                    Ok(k) => k,
+                    Err(_) => continue,
+                };
+                if let Some(coordinator) = state.coordinator() {
+                    let count = coordinator.get_bid_count(&listing_key).await;
+                    let has_key = coordinator.get_decryption_key(&listing_key).await.is_some();
+                    let phase = coordinator.get_auction_phase(&listing_key).await;
+                    let seller = coordinator.is_listing_owner(&listing_key).await;
+                    let phase_label = phase.display_label().to_string();
+                    let (sent, recv) = coordinator.get_mpc_traffic(&listing_key).await;
+                    let your_bid = state
+                        .bid_storage
+                        .get_bid(&listing_key)
+                        .await
+                        .map(|(amount, _)| amount);
+                    let mut cur = current_listing.write();
+                    if let Some(info) = cur.as_mut() {
+                        if info.key == key_str {
+                            info.bid_count = count;
+                            info.has_decryption_key = has_key;
+                            info.auction_phase = phase_label;
+                            info.your_bid = your_bid;
+                            info.is_seller = seller;
+                            // Keep last nonzero traffic so totals persist after MPC ends
+                            if sent > 0 {
+                                info.mpc_bytes_sent = sent;
+                            }
+                            if recv > 0 {
+                                info.mpc_bytes_recv = recv;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     let browse_listing = {
         let state = app_state.clone();
         move |_| {
@@ -241,30 +428,7 @@ pub fn ListingBrowser(
                 if let Some(dht) = state.dht_operations() {
                     match fetch_listing(&dht, &key_str).await {
                         Ok(listing) => {
-                            let status = format!("{:?}", listing.status);
-                            let listing_key = listing.key.clone();
-
-                            let (bid_count, has_decryption_key) = if let Some(coordinator) =
-                                state.coordinator()
-                            {
-                                let count = coordinator.get_bid_count(&listing_key).await;
-                                let has_key =
-                                    coordinator.get_decryption_key(&listing_key).await.is_some();
-                                (count, has_key)
-                            } else {
-                                (0, false)
-                            };
-
-                            let info = ListingInfo {
-                                key: key_str.clone(),
-                                title: listing.title.clone(),
-                                reserve_price: listing.reserve_price,
-                                time_remaining: listing.time_remaining(),
-                                status,
-                                bid_count,
-                                has_decryption_key,
-                                decrypted_content: None,
-                            };
+                            let info = build_listing_info(&state, &listing, &key_str).await;
                             current_listing.set(Some(info));
                             browse_result.set("Listing loaded".to_string());
 
@@ -507,6 +671,22 @@ fn ListingDisplay(
                 span { class: "label", "Bids:" }
                 span { "{listing.bid_count}" }
 
+                span { class: "label", "Your Bid:" }
+                span {
+                    class: if listing.your_bid.is_some() { "your-bid active" } else { "your-bid" },
+                    if let Some(amount) = listing.your_bid {
+                        "{amount} units"
+                    } else {
+                        "None"
+                    }
+                }
+
+                span { class: "label", "MPC Phase:" }
+                span {
+                    class: if listing.auction_phase.starts_with("Completed") { "mpc-phase completed" } else if listing.auction_phase.starts_with("Waiting") { "mpc-phase" } else { "mpc-phase in-progress" },
+                    "{listing.auction_phase}"
+                }
+
                 span { class: "label", "Listing ID:" }
                 span {
                     class: "listing-id",
@@ -514,11 +694,52 @@ fn ListingDisplay(
                 }
             }
 
-            // Decrypt button for winners
+            // MPC progress banner when actively executing
+            if !listing.auction_phase.starts_with("Completed") && !listing.auction_phase.starts_with("Waiting") {
+                div {
+                    class: "mpc-banner",
+                    div { class: "mpc-spinner" }
+                    span { class: "mpc-label", "{listing.auction_phase}" }
+                    if listing.mpc_bytes_sent > 0 || listing.mpc_bytes_recv > 0 {
+                        span {
+                            class: "mpc-traffic",
+                            "\u{2191} {format_bytes(listing.mpc_bytes_sent)}  \u{2193} {format_bytes(listing.mpc_bytes_recv)}"
+                        }
+                    }
+                }
+            }
+
+            // MPC traffic summary after completion
+            if listing.auction_phase.starts_with("Completed") && (listing.mpc_bytes_sent > 0 || listing.mpc_bytes_recv > 0) {
+                div {
+                    class: if listing.has_decryption_key || listing.is_seller { "mpc-banner completed" } else { "mpc-banner lost" },
+                    span { class: "mpc-label",
+                        if listing.is_seller {
+                            "MPC complete — seller"
+                        } else if listing.has_decryption_key {
+                            "MPC complete — you won!"
+                        } else {
+                            "MPC complete — lost"
+                        }
+                    }
+                    span {
+                        class: "mpc-traffic",
+                        "\u{2191} {format_bytes(listing.mpc_bytes_sent)}  \u{2193} {format_bytes(listing.mpc_bytes_recv)}"
+                    }
+                }
+            }
+
+            // Decrypt button for winners/sellers
             if listing.has_decryption_key && listing.decrypted_content.is_none() {
                 div {
                     class: "decrypt-section",
-                    h4 { "You won this auction!" }
+                    h4 {
+                        if listing.is_seller {
+                            "You are the seller"
+                        } else {
+                            "You won this auction!"
+                        }
+                    }
                     button {
                         class: "decrypt-btn",
                         onclick: move |_| on_decrypt.call(()),
