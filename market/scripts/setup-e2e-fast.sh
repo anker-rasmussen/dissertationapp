@@ -11,7 +11,7 @@ LIBIPSPOOF="$VEILID_DIR/.devcontainer/scripts/libipspoof.so"
 
 if [ ! -f "$LIBIPSPOOF" ]; then
     echo "[setup-e2e-fast] Error: libipspoof.so not found at $LIBIPSPOOF" >&2
-    echo "[setup-e2e-fast] Please build it with: cd $VEILID_DIR/.devcontainer/scripts && make libipspoof.so" >&2
+    echo "[setup-e2e-fast] Please build it with: $VEILID_DIR/.devcontainer/scripts/build-ipspoof.sh" >&2
     exit 1
 fi
 

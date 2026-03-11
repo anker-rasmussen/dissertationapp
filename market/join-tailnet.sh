@@ -40,10 +40,10 @@ if [ ! -f "$IPSPOOF_SO" ]; then
     exit 1
 fi
 
-PORT=$((5160 + OFFSET))
+PORT=$((5150 + OFFSET))
 
 echo "Joining devnet via Tailscale (LD_PRELOAD mode)"
-echo "  Server:         ${SERVER_IP}:5160 (bootstrap)"
+echo "  Server:         ${SERVER_IP}:5150 (bootstrap)"
 echo "  Node offset:    ${OFFSET} (port ${PORT})"
 echo "  IP translation: 1.2.3.X → ${SERVER_IP}"
 echo ""

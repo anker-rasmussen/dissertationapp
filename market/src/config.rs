@@ -55,12 +55,12 @@ pub fn now_unix() -> u64 {
 }
 
 /// Default node offset for devnet deployments.
-/// Determines port (5160 + offset) and IP (1.2.3.1 + offset).
+/// Determines port (5150 + offset) and IP (1.2.3.1 + offset).
 /// Must be >= 20 to avoid colliding with devnet nodes (offsets 0-19).
 pub const DEFAULT_NODE_OFFSET: u16 = 20;
 
 /// Default bootstrap nodes for devnet.
-pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &["udp://1.2.3.1:5160"];
+pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &["udp://1.2.3.1:5150"];
 
 /// Environment variable to override bootstrap node addresses (comma-separated).
 pub const VEILID_BOOTSTRAP_ENV: &str = "VEILID_BOOTSTRAP";
@@ -178,14 +178,14 @@ use tracing::warn;
 pub struct MarketConfig {
     /// Network key for shared-keypair registry derivation.
     pub network_key: String,
-    /// Bootstrap node addresses (e.g., "udp://1.2.3.1:5160").
+    /// Bootstrap node addresses (e.g., "udp://1.2.3.1:5150").
     pub bootstrap_nodes: Vec<String>,
     /// Path to MP-SPDZ installation directory.
     pub mp_spdz_dir: PathBuf,
     /// Whether to use insecure (unencrypted) protected storage.
     /// Should be `false` in production.
     pub insecure_storage: bool,
-    /// Port offset for devnet deployments (base port = 5160).
+    /// Port offset for devnet deployments (base port = 5150).
     pub node_offset: u16,
     /// Timeout (seconds) for MPC execution.
     pub mpc_execution_timeout_secs: u64,

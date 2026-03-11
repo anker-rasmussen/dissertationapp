@@ -108,15 +108,7 @@ impl DevnetManager {
         }
 
         if self.fast_mode {
-            eprintln!("[E2E] Fast mode: checking devnet is running...");
-            if !self.is_devnet_running() {
-                return Err(MarketError::Config(
-                    "Fast mode requires a running devnet!\n\
-                     Start it with: cargo devnet-start"
-                        .into(),
-                ));
-            }
-            eprintln!("[E2E] Fast mode: devnet already running");
+            eprintln!("[E2E] Fast mode: assuming external devnet is running");
             return Ok(());
         }
 
@@ -175,6 +167,23 @@ impl DevnetManager {
     }
 
     pub fn wait_for_health(&self, timeout_secs: u64) -> MarketResult<()> {
+        if self.fast_mode {
+            eprintln!("[E2E] Fast mode: checking port reachability...");
+            let start = std::time::Instant::now();
+            loop {
+                if self.check_all_nodes_reachable() {
+                    eprintln!("[E2E] All devnet ports reachable!");
+                    return Ok(());
+                }
+                if start.elapsed().as_secs() > timeout_secs {
+                    return Err(MarketError::Timeout(format!(
+                        "Devnet ports not reachable within {} seconds",
+                        timeout_secs
+                    )));
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
         eprintln!("[E2E] Waiting for all 20 devnet nodes to be healthy...");
         let start = std::time::Instant::now();
         loop {
@@ -221,7 +230,7 @@ impl DevnetManager {
     }
 
     fn check_all_nodes_reachable(&self) -> bool {
-        let ports: Vec<u16> = (5160..=5179).collect();
+        let ports: Vec<u16> = (5150..=5169).collect();
         for port in ports {
             let addr = format!("127.0.0.1:{}", port);
             if std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_secs(1))
@@ -615,7 +624,7 @@ pub fn setup_e2e_environment() -> MarketResult<DevnetManager> {
     if !expected_preload.exists() {
         return Err(MarketError::Config(format!(
             "libipspoof.so not found at {}.\n\
-             Please build it with: cd {} && make libipspoof.so",
+             Please build it with: {}/build-ipspoof.sh",
             expected_preload.display(),
             expected_preload.parent().unwrap().display()
         )));
