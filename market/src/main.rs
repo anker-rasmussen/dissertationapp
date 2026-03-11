@@ -3,6 +3,7 @@
 #![recursion_limit = "512"]
 
 mod app;
+mod demo;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +13,12 @@ use market::{config, DevNetConfig, VeilidNode};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+/// Auto-demo role parsed from `--demo-role`.
+enum DemoRole {
+    Seller { duration: u64 },
+    Bidder,
+}
 
 use crate::app::{SharedAppState, SHARED_STATE};
 
@@ -89,6 +96,38 @@ fn ensure_mpspdz_ready() -> MarketResult<()> {
     )))
 }
 
+/// Parse `--demo-role seller|bidder` and `--demo-duration <secs>` from argv.
+fn parse_demo_args() -> Option<DemoRole> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut role = None;
+    let mut duration = 90u64;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--demo-role" => {
+                i += 1;
+                if i < args.len() {
+                    role = Some(args[i].clone());
+                }
+            }
+            "--demo-duration" => {
+                i += 1;
+                if i < args.len() {
+                    duration = args[i].parse().unwrap_or(90);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    role.map(|r| match r.as_str() {
+        "seller" => DemoRole::Seller { duration },
+        _ => DemoRole::Bidder,
+    })
+}
+
 fn main() -> MarketResult<()> {
     init_logging();
     info!("Starting SMPC Auction Marketplace");
@@ -97,6 +136,8 @@ fn main() -> MarketResult<()> {
 
     // Preflight: ensure MP-SPDZ artifacts are ready
     ensure_mpspdz_ready()?;
+
+    let demo_role = parse_demo_args();
 
     // Initialize shared state
     let app_state = SharedAppState::new(market::BidStorage::new());
@@ -109,6 +150,7 @@ fn main() -> MarketResult<()> {
     // Start Veilid node in background thread
     let node_holder = app_state.node_holder.clone();
     let coordinator_holder = app_state.coordinator.clone();
+    let demo_state = app_state.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -215,6 +257,39 @@ fn main() -> MarketResult<()> {
             coordinator.clone().start_monitoring();
             *coordinator_holder.write() = Some(coordinator.clone());
             info!("Auction coordinator started");
+
+            // Spawn auto-demo task if --demo-role was specified
+            if let Some(role) = demo_role {
+                let demo_s = demo_state;
+                tokio::spawn(async move {
+                    // Wait for broadcast route to be established (not a blind sleep)
+                    let deadline =
+                        tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+                    loop {
+                        if let Some(coord) = demo_s.coordinator() {
+                            if coord.has_broadcast_route().await {
+                                info!("Demo: broadcast route established, starting demo");
+                                break;
+                            }
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            tracing::warn!(
+                                "Demo: broadcast route not established after 60s, proceeding anyway"
+                            );
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                    match role {
+                        DemoRole::Seller { duration } => {
+                            demo::demo_seller_task(demo_s, duration).await;
+                        }
+                        DemoRole::Bidder => {
+                            demo::demo_bidder_task(demo_s).await;
+                        }
+                    }
+                });
+            }
 
             // Take update receiver for AppMessages
             let update_rx = node.take_update_receiver();
