@@ -119,7 +119,6 @@ impl MpcTunnelProxy {
         // Read loop: local TCP → Veilid
         let my_pid = self.inner.party_id;
         let mut buf = vec![0u8; 31000];
-        let mut total_bytes_sent: u64 = 0;
         let mut last_progress_log = std::time::Instant::now();
         let send_sem = Arc::new(Semaphore::new(SEND_PIPELINE_DEPTH as usize));
         let mut cancelled = false;
@@ -165,18 +164,24 @@ impl MpcTunnelProxy {
                 drop(permit);
             });
 
-            total_bytes_sent += n as u64;
+            self.inner
+                .bytes_sent
+                .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
 
             // Log progress every 30s to confirm data flow at info level
             if last_progress_log.elapsed()
                 >= std::time::Duration::from_secs(crate::config::MPC_PROGRESS_LOG_INTERVAL_SECS)
             {
+                let total_sent = self
+                    .inner
+                    .bytes_sent
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 info!(
                     "MPC data flow P{}→P{} s{}: {} bytes sent ({} msgs)",
                     my_pid,
                     target_pid,
                     stream_id,
-                    total_bytes_sent,
+                    total_sent,
                     seq + 1
                 );
                 last_progress_log = std::time::Instant::now();

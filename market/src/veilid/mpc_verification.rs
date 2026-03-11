@@ -7,7 +7,7 @@ use veilid_core::{PublicKey, RecordKey};
 use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
 use super::bid_ops::BidOperations;
 use super::mpc_execution::MpcResultContract;
-use super::mpc_orchestrator::MpcOrchestrator;
+use super::mpc_orchestrator::{AuctionPhase, MpcOrchestrator};
 use crate::config::{now_unix, subkeys};
 use crate::error::MarketResult;
 
@@ -100,6 +100,8 @@ impl MpcOrchestrator {
             info!("I lost — cleaning up route manager");
             self.clear_expected_winner(listing_key).await;
             self.cleanup_route_manager(listing_key).await;
+            self.set_auction_phase(listing_key, AuctionPhase::Completed)
+                .await;
         }
     }
 

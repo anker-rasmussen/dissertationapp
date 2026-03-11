@@ -259,6 +259,10 @@ impl MpcTunnelProxy {
                     let mut sessions = self.inner.sessions.lock().await;
                     if let Some(wr) = sessions.get_mut(&session_key) {
                         for payload in to_write {
+                            self.inner.bytes_recv.fetch_add(
+                                payload.len() as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                             if let Err(e) = wr.write_all(&payload).await {
                                 error!(
                                     "Failed to flush buffered data for ({}, {}): {}",
@@ -289,6 +293,11 @@ impl MpcTunnelProxy {
                         "Response relay: read {} bytes from local MP-SPDZ for ({}, {})",
                         n, target_pid, stream_id
                     );
+
+                    proxy
+                        .inner
+                        .bytes_sent
+                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
 
                     let seq = proxy.next_send_seq(target_pid, stream_id).await;
                     let msg = MpcMessage::Data {
@@ -383,6 +392,9 @@ impl MpcTunnelProxy {
                         source_party_id,
                         stream_id
                     );
+                    self.inner
+                        .bytes_recv
+                        .fetch_add(payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     if let Err(e) = wr.write_all(&payload).await {
                         error!(
                             "Failed to write to local MP-SPDZ for ({}, {}): {}",

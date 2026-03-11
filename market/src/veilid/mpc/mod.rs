@@ -152,6 +152,10 @@ pub(super) struct MpcTunnelProxyInner {
     pub(super) syn_ack_received: Mutex<std::collections::HashSet<usize>>,
     /// Notified when a new Ping is received (wakes the SYN/ACK waiter).
     pub(super) syn_ack_notify: Notify,
+    /// Cumulative bytes sent over Veilid routes (outgoing TCP → Veilid).
+    pub(super) bytes_sent: AtomicU64,
+    /// Cumulative bytes received from Veilid routes (Veilid → local TCP).
+    pub(super) bytes_recv: AtomicU64,
 }
 
 /// Configuration for constructing an [`MpcTunnelProxy`].
@@ -216,6 +220,8 @@ impl MpcTunnelProxy {
                 party_pubkeys: config.party_pubkeys,
                 syn_ack_received: Mutex::new(std::collections::HashSet::new()),
                 syn_ack_notify: Notify::new(),
+                bytes_sent: AtomicU64::new(0),
+                bytes_recv: AtomicU64::new(0),
             }),
         }
     }
@@ -409,6 +415,18 @@ impl MpcTunnelProxy {
         if let Ok(mut pending) = self.inner.pending_data.try_lock() {
             pending.clear();
         }
+    }
+
+    /// Get cumulative (bytes_sent, bytes_recv) for this tunnel proxy.
+    pub fn traffic_bytes(&self) -> (u64, u64) {
+        (
+            self.inner
+                .bytes_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.inner
+                .bytes_recv
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Send data to a peer using `app_call` (request/response) for confirmed

@@ -7,6 +7,7 @@
 use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -29,6 +30,44 @@ use crate::marketplace::BidIndex;
 
 pub(crate) type RouteManagerMap = Arc<Mutex<HashMap<RecordKey, Arc<Mutex<MpcRouteManager>>>>>;
 pub(crate) type VerificationMap = Arc<Mutex<HashMap<RecordKey, VerificationState>>>;
+
+/// Current phase of an auction's MPC lifecycle, exposed to the UI.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AuctionPhase {
+    /// Listing is active (bidding open).
+    #[default]
+    Active,
+    /// Collecting MPC route announcements from all parties.
+    CollectingRoutes,
+    /// Waiting for all parties to signal readiness.
+    ReadinessBarrier,
+    /// MASCOT MPC computation is executing.
+    MpcExecuting,
+    /// Post-MPC winner verification in progress.
+    Verifying,
+    /// Auction completed (winner determined, decryption key delivered).
+    Completed,
+}
+
+impl AuctionPhase {
+    /// Human-readable label for the UI.
+    pub const fn display_label(&self) -> &'static str {
+        match self {
+            Self::Active => "Waiting for auction end",
+            Self::CollectingRoutes => "Collecting routes...",
+            Self::ReadinessBarrier => "Readiness barrier...",
+            Self::MpcExecuting => "MPC executing...",
+            Self::Verifying => "MPC complete — verifying...",
+            Self::Completed => "Completed",
+        }
+    }
+}
+
+impl fmt::Display for AuctionPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.display_label())
+    }
+}
 
 /// Intermediate state from building party maps for MPC execution.
 struct MpcPartyState {
@@ -92,6 +131,8 @@ pub struct MpcOrchestrator {
     /// so the ports don't collide.  Wraps within the 10-port window allocated
     /// per node by `base_port_for_offset`.
     port_slot_counter: std::sync::atomic::AtomicU16,
+    /// Current MPC phase per listing, exposed to the UI for live progress.
+    auction_phases: Arc<Mutex<HashMap<RecordKey, AuctionPhase>>>,
 }
 
 impl MpcOrchestrator {
@@ -123,6 +164,7 @@ impl MpcOrchestrator {
             pending_mpc_messages: Arc::new(Mutex::new(HashMap::new())),
             needs_route_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             port_slot_counter: std::sync::atomic::AtomicU16::new(0),
+            auction_phases: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -236,6 +278,36 @@ impl MpcOrchestrator {
             .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Get the current auction phase for a listing.
+    pub async fn get_auction_phase(&self, listing_key: &RecordKey) -> AuctionPhase {
+        self.auction_phases
+            .lock()
+            .await
+            .get(listing_key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get cumulative (bytes_sent, bytes_recv) for the MPC tunnel of a listing.
+    pub async fn get_mpc_traffic(&self, listing_key: &RecordKey) -> (u64, u64) {
+        let session_id = listing_key.to_string();
+        let proxies = self.active_tunnel_proxies.lock().await;
+        if let Some(proxy) = proxies.get(&session_id) {
+            proxy.traffic_bytes()
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Set the auction phase for a listing (public for coordinator use).
+    pub async fn set_auction_phase(&self, listing_key: &RecordKey, phase: AuctionPhase) {
+        info!(listing_key = %listing_key, phase = %phase, "Auction phase transition");
+        self.auction_phases
+            .lock()
+            .await
+            .insert(listing_key.clone(), phase);
+    }
+
     /// Pre-create a route manager for an auction so we can receive route announcements
     /// even before the auction ends.
     pub async fn ensure_route_manager(&self, listing_key: &RecordKey) {
@@ -321,6 +393,8 @@ impl MpcOrchestrator {
             Some(party_id) => {
                 let active_key = listing_key.clone();
                 self.active_auctions.lock().await.insert(active_key.clone());
+                self.set_auction_phase(listing_key, AuctionPhase::CollectingRoutes)
+                    .await;
 
                 info!(
                     "I am Party {} in this {}-party auction",
@@ -362,6 +436,15 @@ impl MpcOrchestrator {
                 .await;
 
                 self.active_auctions.lock().await.remove(&active_key);
+                if result.is_ok() {
+                    // Only transition to Verifying if not already Completed
+                    // (losers set Completed inside handle_bidder_mpc_result).
+                    let current = self.get_auction_phase(listing_key).await;
+                    if current != AuctionPhase::Completed {
+                        self.set_auction_phase(listing_key, AuctionPhase::Verifying)
+                            .await;
+                    }
+                }
                 // Signal the monitoring loop to refresh broadcast routes
                 // immediately — they went stale during MPC execution.
                 self.needs_route_refresh
@@ -481,6 +564,8 @@ impl MpcOrchestrator {
         .await?;
 
         // Phase 2 — Readiness barrier
+        self.set_auction_phase(listing_key, AuctionPhase::ReadinessBarrier)
+            .await;
         self.run_readiness_barrier(
             &route_manager,
             listing_key,
@@ -545,6 +630,8 @@ impl MpcOrchestrator {
             "Executing {}-party MPC auction as Party {}",
             num_parties, party_id
         );
+        self.set_auction_phase(&bid_index.listing_key, AuctionPhase::MpcExecuting)
+            .await;
 
         let listing_key = &bid_index.listing_key;
         let maps = self
