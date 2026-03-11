@@ -29,12 +29,12 @@ pub struct NodeState {
 /// Configuration for connecting to the local Docker devnet.
 ///
 /// Default: 20-node devnet (1 bootstrap + 19 regular), market nodes start at offset 20.
-/// Port formula: `5160 + offset`, IP formula: `1.2.3.(offset + 1)`.
+/// Port formula: `5150 + offset`, IP formula: `1.2.3.(offset + 1)`.
 #[derive(Debug, Clone)]
 pub struct DevNetConfig {
     pub network_key: String,
     pub bootstrap_nodes: Vec<String>,
-    /// Port offset from base port 5160 (0=bootstrap, 1-19=devnet nodes, 20+=market instances)
+    /// Port offset from base port 5150 (0=bootstrap, 1-19=devnet nodes, 20+=market instances)
     pub port_offset: u16,
     /// Routing table limit for over-attached peers.
     pub limit_over_attached: u32,
@@ -147,7 +147,7 @@ impl VeilidNode {
                 .as_ref()
                 .and_then(|a| a.rsplit_once(':'))
                 .and_then(|(_, p)| p.parse::<u16>().ok())
-                .unwrap_or(5160 + devnet.port_offset);
+                .unwrap_or(5150 + devnet.port_offset);
             let listen_addr = devnet.listen_addr.as_ref().map_or_else(
                 || format!("127.0.0.1:{port}"),
                 |addr| format!("{addr}:{port}"),

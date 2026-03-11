@@ -32,7 +32,7 @@ make devnet-up
 
 Each node needs a unique `VEILID_NODE_OFFSET` (20+), `LD_PRELOAD` pointing at `libipspoof.so`, and the `MP_SPDZ_DIR` env var. Open 3 terminals:
 
-**Terminal 1 — Bidder 1 (offset 20, port 5180)**
+**Terminal 1 — Bidder 1 (offset 20, port 5170)**
 ```bash
 cd Repos/dissertationapp/market
 VEILID_NODE_OFFSET=20 \
@@ -42,7 +42,7 @@ VEILID_NODE_OFFSET=20 \
   cargo run --release
 ```
 
-**Terminal 2 — Bidder 2 (offset 21, port 5181)**
+**Terminal 2 — Bidder 2 (offset 21, port 5171)**
 ```bash
 cd Repos/dissertationapp/market
 VEILID_NODE_OFFSET=21 \
@@ -52,7 +52,7 @@ VEILID_NODE_OFFSET=21 \
   cargo run --release
 ```
 
-**Terminal 3 — Auctioneer (offset 22, port 5182)**
+**Terminal 3 — Auctioneer (offset 22, port 5172)**
 ```bash
 cd Repos/dissertationapp/market
 VEILID_NODE_OFFSET=22 \
@@ -82,13 +82,13 @@ The warning "This node has no valid public dial info" is expected — you're on 
 
 ```
 Docker devnet (offsets 0–19):
-  Bootstrap:  1.2.3.1:5160  (offset 0)
-  Nodes 1–19: 1.2.3.2:5161 ... 1.2.3.20:5179
+  Bootstrap:  1.2.3.1:5150  (offset 0)
+  Nodes 1–19: 1.2.3.2:5151 ... 1.2.3.20:5169
 
 Market nodes (offsets 20+):
-  Node 20:    1.2.3.21:5180  (Bidder 1)
-  Node 21:    1.2.3.22:5181  (Bidder 2)
-  Node 22:    1.2.3.23:5182  (Auctioneer)
+  Node 20:    1.2.3.21:5170  (Bidder 1)
+  Node 21:    1.2.3.22:5171  (Bidder 2)
+  Node 22:    1.2.3.23:5172  (Auctioneer)
   ...up to offset ~39 (libipspoof translates 40 IPs total)
 ```
 

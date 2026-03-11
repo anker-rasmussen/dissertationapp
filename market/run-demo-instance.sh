@@ -1,16 +1,17 @@
 #!/bin/bash
 # Helper script to run a market app instance for demo
 # Usage: ./run-demo-instance.sh <node_offset|cluster>
-# Example: ./run-demo-instance.sh 20      (runs on port 5180, IP 1.2.3.21)
+# Example: ./run-demo-instance.sh 20      (runs on port 5170, IP 1.2.3.21)
 # Example: ./run-demo-instance.sh cluster (runs all 3 nodes: 20, 21, 22)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_PORT=5150
 
 run_single_node() {
     local NODE_OFFSET=$1
-    local PORT=$((5160 + NODE_OFFSET))
+    local PORT=$((BASE_PORT + NODE_OFFSET))
     local IP_SUFFIX=$((NODE_OFFSET + 1))
 
     echo "========================================="
@@ -36,9 +37,9 @@ run_cluster() {
     echo "========================================="
     echo "Starting 3-Node Demo Cluster"
     echo "========================================="
-    echo "  Node 20 -> port 5180, IP 1.2.3.21 (Bidder 1)"
-    echo "  Node 21 -> port 5181, IP 1.2.3.22 (Bidder 2)"
-    echo "  Node 22 -> port 5182, IP 1.2.3.23 (Auctioneer)"
+    echo "  Node 20 -> port $((BASE_PORT+20)), IP 1.2.3.21 (Bidder 1)"
+    echo "  Node 21 -> port $((BASE_PORT+21)), IP 1.2.3.22 (Bidder 2)"
+    echo "  Node 22 -> port $((BASE_PORT+22)), IP 1.2.3.23 (Auctioneer)"
     echo "========================================="
     echo ""
 
@@ -66,7 +67,7 @@ run_cluster() {
 
     # Start each node in its own terminal or background
     for NODE_OFFSET in 20 21 22; do
-        local PORT=$((5160 + NODE_OFFSET))
+        local PORT=$((BASE_PORT + NODE_OFFSET))
         local IP_SUFFIX=$((NODE_OFFSET + 1))
 
         echo "Starting node $NODE_OFFSET (port $PORT, IP 1.2.3.$IP_SUFFIX)..."
@@ -96,9 +97,9 @@ run_cluster() {
 
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <node_offset|cluster>"
-    echo "  node_offset 20 -> port 5180, IP 1.2.3.21 (Bidder 1)"
-    echo "  node_offset 21 -> port 5181, IP 1.2.3.22 (Bidder 2)"
-    echo "  node_offset 22 -> port 5182, IP 1.2.3.23 (Auctioneer)"
+    echo "  node_offset 20 -> port $((BASE_PORT+20)), IP 1.2.3.21 (Bidder 1)"
+    echo "  node_offset 21 -> port $((BASE_PORT+21)), IP 1.2.3.22 (Bidder 2)"
+    echo "  node_offset 22 -> port $((BASE_PORT+22)), IP 1.2.3.23 (Auctioneer)"
     echo "  cluster        -> start all 3 nodes at once"
     exit 1
 fi

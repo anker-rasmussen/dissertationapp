@@ -211,7 +211,7 @@ fn check_status() -> Result<(), String> {
         eprintln!();
         eprintln!("[devnet-ctl] WARNING: libipspoof.so not found!");
         eprintln!(
-            "Build with: cd {} && make libipspoof.so",
+            "Build with: {}/build-ipspoof.sh",
             libipspoof
                 .parent()
                 .map_or_else(|| "<unknown>".to_string(), |p| p.display().to_string())
