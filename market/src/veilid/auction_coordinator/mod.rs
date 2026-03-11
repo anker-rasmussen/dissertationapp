@@ -533,6 +533,14 @@ impl AuctionCoordinator {
         self.mpc.get_mpc_traffic(listing_key).await
     }
 
+    /// Get traffic log snapshot for a listing (for the hex display panel).
+    pub async fn get_mpc_traffic_log(
+        &self,
+        listing_key: &RecordKey,
+    ) -> Vec<crate::veilid::mpc::TrafficEntry> {
+        self.mpc.get_mpc_traffic_log(listing_key).await
+    }
+
     /// Check if the current node received a decryption key for a listing
     pub async fn get_decryption_key(&self, listing_key: &RecordKey) -> Option<String> {
         self.logic.get_decryption_key(listing_key).await

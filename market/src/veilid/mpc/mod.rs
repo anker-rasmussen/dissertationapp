@@ -19,6 +19,29 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use veilid_core::{PublicKey, RouteId, Target, VeilidAPI};
 
+/// Maximum entries in the traffic ring buffer.
+const TRAFFIC_LOG_CAP: usize = 100;
+
+/// Direction of a captured MPC traffic chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrafficDir {
+    /// Local TCP → Veilid (outgoing to peer)
+    Sent,
+    /// Veilid → local TCP (incoming from peer)
+    Recv,
+}
+
+/// One captured traffic chunk for the hex display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrafficEntry {
+    pub dir: TrafficDir,
+    pub party_id: usize,
+    pub byte_count: usize,
+    pub preview: [u8; 32],
+    pub preview_len: usize,
+    pub timestamp_ms: u64,
+}
+
 use super::bid_announcement::SignedEnvelope;
 use crate::error::{MarketError, MarketResult};
 
@@ -156,6 +179,8 @@ pub(super) struct MpcTunnelProxyInner {
     pub(super) bytes_sent: AtomicU64,
     /// Cumulative bytes received from Veilid routes (Veilid → local TCP).
     pub(super) bytes_recv: AtomicU64,
+    /// Ring buffer of recent traffic entries for UI hex display.
+    pub(super) traffic_log: Mutex<std::collections::VecDeque<TrafficEntry>>,
 }
 
 /// Configuration for constructing an [`MpcTunnelProxy`].
@@ -222,6 +247,7 @@ impl MpcTunnelProxy {
                 syn_ack_notify: Notify::new(),
                 bytes_sent: AtomicU64::new(0),
                 bytes_recv: AtomicU64::new(0),
+                traffic_log: Mutex::new(std::collections::VecDeque::with_capacity(TRAFFIC_LOG_CAP)),
             }),
         }
     }
@@ -415,6 +441,47 @@ impl MpcTunnelProxy {
         if let Ok(mut pending) = self.inner.pending_data.try_lock() {
             pending.clear();
         }
+    }
+
+    /// Get a snapshot of the traffic ring buffer for the UI hex display.
+    pub async fn traffic_log_snapshot(&self) -> Vec<TrafficEntry> {
+        self.inner
+            .traffic_log
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Push a traffic entry into the ring buffer.
+    pub(super) async fn log_traffic(
+        &self,
+        dir: TrafficDir,
+        party_id: usize,
+        data: &[u8],
+        byte_count: usize,
+    ) {
+        let mut preview = [0u8; 32];
+        let copy_len = byte_count.min(32);
+        preview[..copy_len].copy_from_slice(&data[..copy_len]);
+        #[allow(clippy::cast_possible_truncation)]
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut log = self.inner.traffic_log.lock().await;
+        if log.len() >= TRAFFIC_LOG_CAP {
+            log.pop_front();
+        }
+        log.push_back(TrafficEntry {
+            dir,
+            party_id,
+            byte_count,
+            preview,
+            preview_len: copy_len,
+            timestamp_ms: ts,
+        });
     }
 
     /// Get cumulative (bytes_sent, bytes_recv) for this tunnel proxy.

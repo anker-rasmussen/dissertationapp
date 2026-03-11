@@ -723,3 +723,81 @@ h4 {
 ::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
 }
+
+/* ── MPC Hex Traffic Panel ──────────────────────────────────── */
+
+.mpc-hex-section {
+    border-top: 1px solid var(--border-dim);
+    padding-top: 14px;
+    margin-top: 12px;
+}
+
+.mpc-hex-section h4 {
+    color: var(--text-muted);
+    margin: 0 0 8px 0;
+    font-size: 0.76em;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.mpc-hex-panel {
+    height: 200px;
+    overflow-y: auto;
+    background: var(--bg-base);
+    border: 1px solid var(--border-dim);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    font-family: var(--font-mono);
+    font-size: 0.72em;
+    line-height: 1.65;
+    scroll-behavior: smooth;
+}
+
+.hex-row {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    padding: 1px 0;
+}
+
+.hex-row.hex-sent {
+    color: var(--accent);
+}
+
+.hex-row.hex-recv {
+    color: var(--green);
+}
+
+.hex-dir {
+    width: 12px;
+    flex-shrink: 0;
+    font-weight: 700;
+}
+
+.hex-party {
+    width: 24px;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 0.9em;
+}
+
+.hex-size {
+    width: 52px;
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    text-align: right;
+}
+
+.hex-bytes {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.8;
+    letter-spacing: 0.03em;
+}
+
+.hex-ellipsis {
+    flex-shrink: 0;
+    color: var(--text-muted);
+}

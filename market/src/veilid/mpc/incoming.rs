@@ -263,6 +263,13 @@ impl MpcTunnelProxy {
                                 payload.len() as u64,
                                 std::sync::atomic::Ordering::Relaxed,
                             );
+                            self.log_traffic(
+                                super::TrafficDir::Recv,
+                                source_party_id,
+                                &payload,
+                                payload.len(),
+                            )
+                            .await;
                             if let Err(e) = wr.write_all(&payload).await {
                                 error!(
                                     "Failed to flush buffered data for ({}, {}): {}",
@@ -298,6 +305,9 @@ impl MpcTunnelProxy {
                         .inner
                         .bytes_sent
                         .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    proxy
+                        .log_traffic(super::TrafficDir::Sent, target_pid, &buf[..n], n)
+                        .await;
 
                     let seq = proxy.next_send_seq(target_pid, stream_id).await;
                     let msg = MpcMessage::Data {
@@ -395,6 +405,13 @@ impl MpcTunnelProxy {
                     self.inner
                         .bytes_recv
                         .fetch_add(payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    self.log_traffic(
+                        super::TrafficDir::Recv,
+                        source_party_id,
+                        &payload,
+                        payload.len(),
+                    )
+                    .await;
                     if let Err(e) = wr.write_all(&payload).await {
                         error!(
                             "Failed to write to local MP-SPDZ for ({}, {}): {}",

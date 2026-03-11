@@ -19,18 +19,26 @@ async fn build_listing_info(
     let status = format!("{:?}", listing.status);
     let listing_key = listing.key.clone();
 
-    let (bid_count, has_decryption_key, auction_phase, is_seller, mpc_bytes_sent, mpc_bytes_recv) =
-        if let Some(coordinator) = state.coordinator() {
-            let count = coordinator.get_bid_count(&listing_key).await;
-            let has_key = coordinator.get_decryption_key(&listing_key).await.is_some();
-            let phase = coordinator.get_auction_phase(&listing_key).await;
-            let seller = coordinator.is_listing_owner(&listing_key).await;
-            let phase_label = phase.display_label().to_string();
-            let (sent, recv) = coordinator.get_mpc_traffic(&listing_key).await;
-            (count, has_key, phase_label, seller, sent, recv)
-        } else {
-            (0, false, "Unknown".to_string(), false, 0, 0)
-        };
+    let (
+        bid_count,
+        has_decryption_key,
+        auction_phase,
+        is_seller,
+        mpc_bytes_sent,
+        mpc_bytes_recv,
+        mpc_traffic_log,
+    ) = if let Some(coordinator) = state.coordinator() {
+        let count = coordinator.get_bid_count(&listing_key).await;
+        let has_key = coordinator.get_decryption_key(&listing_key).await.is_some();
+        let phase = coordinator.get_auction_phase(&listing_key).await;
+        let seller = coordinator.is_listing_owner(&listing_key).await;
+        let phase_label = phase.display_label().to_string();
+        let (sent, recv) = coordinator.get_mpc_traffic(&listing_key).await;
+        let log = coordinator.get_mpc_traffic_log(&listing_key).await;
+        (count, has_key, phase_label, seller, sent, recv, log)
+    } else {
+        (0, false, "Unknown".to_string(), false, 0, 0, Vec::new())
+    };
 
     let your_bid = state
         .bid_storage
@@ -52,6 +60,7 @@ async fn build_listing_info(
         is_seller,
         mpc_bytes_sent,
         mpc_bytes_recv,
+        mpc_traffic_log,
     }
 }
 
@@ -71,6 +80,7 @@ pub struct ListingInfo {
     pub is_seller: bool,
     pub mpc_bytes_sent: u64,
     pub mpc_bytes_recv: u64,
+    pub mpc_traffic_log: Vec<market::TrafficEntry>,
 }
 
 /// Format a byte count as a human-readable string (e.g., "1.2 MB").
@@ -83,6 +93,67 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} B")
+    }
+}
+
+/// Format first bytes of a traffic entry as space-separated hex groups.
+fn format_hex_preview(preview: &[u8; 32], actual_len: usize) -> String {
+    let n = actual_len.min(32);
+    preview[..n]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Scrolling MPC hex traffic dump panel.
+#[component]
+fn MpcHexDump(entries: Vec<market::TrafficEntry>) -> Element {
+    let entry_count = entries.len();
+
+    // Auto-scroll to bottom when new entries arrive
+    use_effect(move || {
+        document::eval(
+            r#"const el = document.getElementById('mpc-hex-panel');
+               if (el) el.scrollTop = el.scrollHeight;"#,
+        );
+    });
+
+    rsx! {
+        div {
+            class: "mpc-hex-section",
+            h4 { "MPC Traffic ({entry_count})" }
+            div {
+                class: "mpc-hex-panel",
+                id: "mpc-hex-panel",
+
+                for entry in &entries {
+                    div {
+                        class: if entry.dir == market::TrafficDir::Sent { "hex-row hex-sent" } else { "hex-row hex-recv" },
+
+                        span {
+                            class: "hex-dir",
+                            if entry.dir == market::TrafficDir::Sent { "\u{2191}" } else { "\u{2193}" }
+                        }
+                        span {
+                            class: "hex-party",
+                            "P{entry.party_id}"
+                        }
+                        span {
+                            class: "hex-size",
+                            "{entry.byte_count}B"
+                        }
+                        span {
+                            class: "hex-bytes",
+                            "{format_hex_preview(&entry.preview, entry.preview_len)}"
+                        }
+                        if entry.byte_count > 32 {
+                            span { class: "hex-ellipsis", "\u{2026}" }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -384,6 +455,7 @@ pub fn ListingBrowser(
                     let seller = coordinator.is_listing_owner(&listing_key).await;
                     let phase_label = phase.display_label().to_string();
                     let (sent, recv) = coordinator.get_mpc_traffic(&listing_key).await;
+                    let traffic_log = coordinator.get_mpc_traffic_log(&listing_key).await;
                     let your_bid = state
                         .bid_storage
                         .get_bid(&listing_key)
@@ -403,6 +475,9 @@ pub fn ListingBrowser(
                             }
                             if recv > 0 {
                                 info.mpc_bytes_recv = recv;
+                            }
+                            if !traffic_log.is_empty() {
+                                info.mpc_traffic_log = traffic_log;
                             }
                         }
                     }
@@ -727,6 +802,11 @@ fn ListingDisplay(
                         "\u{2191} {format_bytes(listing.mpc_bytes_sent)}  \u{2193} {format_bytes(listing.mpc_bytes_recv)}"
                     }
                 }
+            }
+
+            // MPC hex traffic dump
+            if !listing.mpc_traffic_log.is_empty() {
+                MpcHexDump { entries: listing.mpc_traffic_log.clone() }
             }
 
             // Decrypt button for winners/sellers

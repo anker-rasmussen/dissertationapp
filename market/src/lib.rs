@@ -50,6 +50,8 @@ pub use veilid::bid_ops::BidOperations;
 pub use veilid::bid_storage::BidStorage;
 pub use veilid::dht::{DHTOperations, OwnedDHTRecord};
 pub use veilid::listing_ops::ListingOperations;
+pub use veilid::mpc::TrafficDir;
+pub use veilid::mpc::TrafficEntry;
 pub use veilid::mpc_orchestrator::AuctionPhase;
 pub use veilid::node::{DevNetConfig, VeilidNode};
 pub use veilid::registry::RegistryOperations;
