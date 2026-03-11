@@ -205,6 +205,12 @@ impl AuctionCoordinator {
             self.mpc.clear_expected_winner(&listing_key).await;
             self.mpc.cleanup_route_manager(&listing_key).await;
         }
+        self.mpc
+            .set_auction_phase(
+                &listing_key,
+                super::super::mpc_orchestrator::AuctionPhase::Completed,
+            )
+            .await;
         Ok(())
     }
 
@@ -384,6 +390,13 @@ impl AuctionCoordinator {
                         .await
                     {
                         error!("Failed to send decryption key to winner: {}", e);
+                    } else {
+                        self.mpc
+                            .set_auction_phase(
+                                &listing_key,
+                                super::super::mpc_orchestrator::AuctionPhase::Completed,
+                            )
+                            .await;
                     }
                 }
                 None => {

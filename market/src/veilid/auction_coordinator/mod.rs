@@ -484,7 +484,14 @@ impl AuctionCoordinator {
     /// Get the number of bids for a listing from DHT registry (authoritative),
     /// falling back to local announcements if the DHT read fails.
     pub async fn get_bid_count(&self, listing_key: &RecordKey) -> usize {
-        // Try DHT bid registry first (authoritative source written by seller)
+        let local_count = self.logic.get_local_bid_count(listing_key).await;
+
+        // Use local count if available (faster, no network I/O).
+        // Fall back to DHT registry for listings this node hasn't seen broadcasts for.
+        if local_count > 0 {
+            return local_count;
+        }
+
         if let Ok(Some(data)) = self
             .dht
             .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
@@ -495,8 +502,7 @@ impl AuctionCoordinator {
             }
         }
 
-        // Fall back to local announcements (delegated to AuctionLogic)
-        self.logic.get_local_bid_count(listing_key).await
+        0
     }
 
     /// Check whether this node's broadcast route has been created.
@@ -507,6 +513,24 @@ impl AuctionCoordinator {
     /// are no peer routes to deliver them to.
     pub async fn has_broadcast_route(&self) -> bool {
         self.broadcast_route_id.lock().await.is_some()
+    }
+
+    /// Check if this node owns (created) the given listing.
+    pub async fn is_listing_owner(&self, listing_key: &RecordKey) -> bool {
+        self.owned_listings.lock().await.contains_key(listing_key)
+    }
+
+    /// Get the current MPC phase for a listing.
+    pub async fn get_auction_phase(
+        &self,
+        listing_key: &RecordKey,
+    ) -> super::mpc_orchestrator::AuctionPhase {
+        self.mpc.get_auction_phase(listing_key).await
+    }
+
+    /// Get cumulative MPC tunnel traffic (bytes_sent, bytes_recv) for a listing.
+    pub async fn get_mpc_traffic(&self, listing_key: &RecordKey) -> (u64, u64) {
+        self.mpc.get_mpc_traffic(listing_key).await
     }
 
     /// Check if the current node received a decryption key for a listing

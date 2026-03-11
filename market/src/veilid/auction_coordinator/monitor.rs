@@ -217,7 +217,10 @@ impl AuctionCoordinator {
 
                     monitor_self.mpc.mark_auction_active(&key).await;
 
-                    match monitor_self.handle_auction_end_wrapper(&key, &listing).await {
+                    match monitor_self
+                        .handle_auction_end_wrapper(&key, &listing)
+                        .await
+                    {
                         Ok(()) => monitor_self.logic.unwatch_listing(&key).await,
                         Err(e) => {
                             error!(
