@@ -71,7 +71,7 @@ impl RegistryOperations {
     /// `BLAKE3(VLD0_bytes || owner_pubkey || schema_compiled)`.
     /// Since the shared keypair is deterministic (derived from the network key),
     /// all nodes on the same network compute the same record key.
-    fn compute_master_registry_key(&self) -> RecordKey {
+    pub(crate) fn compute_master_registry_key(&self) -> RecordKey {
         let owner_key: &[u8] = &self.shared_keypair.value().key();
         // DHTSchema::dflt(1).compile() = FourCC "DFLT" + 1u16 little-endian
         let schema_data: [u8; 6] = [b'D', b'F', b'L', b'T', 1, 0];
@@ -132,10 +132,15 @@ impl RegistryOperations {
         let data = empty.to_cbor().map_err(|e| {
             MarketError::Serialization(format!("Failed to serialize empty registry: {e}"))
         })?;
-        routing_context
+        let write_result = routing_context
             .set_dht_value(key.clone(), 0, data, None)
             .await
-            .map_err(|e| MarketError::Dht(format!("Failed to set initial registry value: {e}")))?;
+            .map_err(|e| MarketError::Dht(format!("Failed to set initial registry value: {e}")));
+
+        // Step 5 — close the plaintext handle (always, even on error).
+        routing_context.close_dht_record(key.clone()).await.ok();
+
+        write_result?;
 
         info!("Created master registry at: {}", key);
         self.master_registry_key = Some(key.clone());
@@ -184,6 +189,10 @@ impl RegistryOperations {
                     }
                 }
 
+                routing_context
+                    .close_dht_record(expected_key.clone())
+                    .await
+                    .ok();
                 return Ok(expected_key);
             }
             Err(e) => {
@@ -250,7 +259,15 @@ impl RegistryOperations {
         let dht_data = routing_context
             .get_dht_value(registry_key.clone(), 0, true)
             .await
-            .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?;
+            .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")));
+
+        let dht_data = match dht_data {
+            Ok(v) => v,
+            Err(e) => {
+                routing_context.close_dht_record(registry_key).await.ok();
+                return Err(e);
+            }
+        };
 
         let mut merged = match dht_data {
             Some(v) if !v.data().is_empty() => {
@@ -260,13 +277,24 @@ impl RegistryOperations {
         };
         merged.merge(&self.local_registry);
 
-        let data = merged.to_cbor().map_err(|e| {
-            MarketError::Serialization(format!("Failed to serialize registry: {e}"))
-        })?;
-        routing_context
-            .set_dht_value(registry_key, 0, data, None)
+        let data = match merged
+            .to_cbor()
+            .map_err(|e| MarketError::Serialization(format!("Failed to serialize registry: {e}")))
+        {
+            Ok(d) => d,
+            Err(e) => {
+                routing_context.close_dht_record(registry_key).await.ok();
+                return Err(e);
+            }
+        };
+
+        let write_result = routing_context
+            .set_dht_value(registry_key.clone(), 0, data, None)
             .await
-            .map_err(|e| MarketError::Dht(format!("Failed to write merged registry: {e}")))?;
+            .map_err(|e| MarketError::Dht(format!("Failed to write merged registry: {e}")));
+
+        routing_context.close_dht_record(registry_key).await.ok();
+        write_result?;
 
         info!(
             sellers = merged.sellers.len(),
@@ -417,35 +445,42 @@ impl RegistryOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to open catalog record: {e}")))?;
 
-        let value_data = routing_context
-            .get_dht_value(record.key.clone(), 0, true)
-            .await
-            .map_err(|e| MarketError::Dht(format!("Failed to get catalog value: {e}")))?;
+        let result = async {
+            let value_data = routing_context
+                .get_dht_value(record.key.clone(), 0, true)
+                .await
+                .map_err(|e| MarketError::Dht(format!("Failed to get catalog value: {e}")))?;
 
-        let mut catalog = match value_data {
-            Some(v) => SellerCatalog::from_cbor(v.data()).map_err(|e| {
-                MarketError::Serialization(format!("Failed to deserialize catalog: {e}"))
-            })?,
-            None => SellerCatalog::default(),
-        };
+            let mut catalog = match value_data {
+                Some(v) => SellerCatalog::from_cbor(v.data()).map_err(|e| {
+                    MarketError::Serialization(format!("Failed to deserialize catalog: {e}"))
+                })?,
+                None => SellerCatalog::default(),
+            };
 
-        catalog.add_listing(entry);
+            catalog.add_listing(entry);
 
-        let data = catalog
-            .to_cbor()
-            .map_err(|e| MarketError::Serialization(format!("Failed to serialize catalog: {e}")))?;
+            let data = catalog.to_cbor().map_err(|e| {
+                MarketError::Serialization(format!("Failed to serialize catalog: {e}"))
+            })?;
+            routing_context
+                .set_dht_value(record.key.clone(), 0, data, None)
+                .await
+                .map_err(|e| MarketError::Dht(format!("Failed to set catalog value: {e}")))?;
+
+            info!(
+                "Added listing to catalog, now has {} listings",
+                catalog.listings.len()
+            );
+            Ok(())
+        }
+        .await;
+
         routing_context
-            .set_dht_value(record.key.clone(), 0, data, None)
+            .close_dht_record(record.key.clone())
             .await
-            .map_err(|e| MarketError::Dht(format!("Failed to set catalog value: {e}")))?;
-
-        let _ = routing_context.close_dht_record(record.key.clone()).await;
-
-        info!(
-            "Added listing to catalog, now has {} listings",
-            catalog.listings.len()
-        );
-        Ok(())
+            .ok();
+        result
     }
 
     // ── Discovery (all nodes) ────────────────────────────────────────
@@ -468,11 +503,14 @@ impl RegistryOperations {
                         MarketError::Dht(format!("Failed to open registry record: {e}"))
                     })?;
 
-                let data = routing_context
-                    .get_dht_value(key, 0, true)
+                let get_result = routing_context
+                    .get_dht_value(key.clone(), 0, true)
                     .await
-                    .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")))?
-                    .map(|v| v.data().to_vec());
+                    .map_err(|e| MarketError::Dht(format!("Failed to get registry value: {e}")));
+
+                routing_context.close_dht_record(key).await.ok();
+
+                let data = get_result?.map(|v| v.data().to_vec());
 
                 if let Some(bytes) = data {
                     if !bytes.is_empty() {
@@ -507,13 +545,17 @@ impl RegistryOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to open catalog record: {e}")))?;
 
-        let data = routing_context
+        let get_result = routing_context
             .get_dht_value(catalog_key.clone(), 0, true)
             .await
-            .map_err(|e| MarketError::Dht(format!("Failed to get catalog value: {e}")))?
-            .map(|v| v.data().to_vec());
+            .map_err(|e| MarketError::Dht(format!("Failed to get catalog value: {e}")));
 
-        let _ = routing_context.close_dht_record(catalog_key.clone()).await;
+        routing_context
+            .close_dht_record(catalog_key.clone())
+            .await
+            .ok();
+
+        let data = get_result?.map(|v| v.data().to_vec());
 
         match data {
             Some(bytes) if !bytes.is_empty() => match SellerCatalog::from_cbor(&bytes) {
