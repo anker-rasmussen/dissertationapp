@@ -109,7 +109,7 @@ impl MpcTunnelProxy {
                         let label = format!("Ack P{}→P{}", self.inner.party_id, source_party_id);
                         let proxy = self.clone();
                         tokio::spawn(async move {
-                            proxy.send_reliable(source_party_id, &data, &label).await;
+                            let _ = proxy.send_reliable(source_party_id, &data, &label).await;
                         });
                     }
                 }
@@ -286,6 +286,7 @@ impl MpcTunnelProxy {
             let proxy = self.clone();
             let target_pid = source_party_id;
             let my_pid = self.inner.party_id;
+            let cancel = self.inner.cancel_token.clone();
 
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 31000];
@@ -326,8 +327,12 @@ impl MpcTunnelProxy {
                         break;
                     };
                     let p = proxy.clone();
+                    let c = cancel.clone();
                     tokio::spawn(async move {
-                        p.send_reliable(target_pid, &data, &label).await;
+                        if p.send_reliable(target_pid, &data, &label).await.is_err() {
+                            error!("{label}: delivery failed — cancelling tunnel proxy");
+                            c.cancel();
+                        }
                         drop(permit);
                     });
                 }

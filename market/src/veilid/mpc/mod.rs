@@ -334,7 +334,7 @@ impl MpcTunnelProxy {
             if let Ok(data) = self.sign_mpc_message(&ping) {
                 for &pid in &missing {
                     let label = format!("Ping P{my_pid}→P{pid}");
-                    self.send_reliable(pid, &data, &label).await;
+                    let _ = self.send_reliable(pid, &data, &label).await;
                 }
             }
 
@@ -498,7 +498,15 @@ impl MpcTunnelProxy {
 
     /// Send data to a peer using `app_call` (request/response) for confirmed
     /// delivery.  Retries with exponential backoff on failure.
-    pub(super) async fn send_reliable(&self, target_pid: usize, data: &[u8], label: &str) {
+    ///
+    /// Returns `Ok(())` on confirmed delivery, or `Err(MarketError::Network(…))`
+    /// after all retries are exhausted.
+    pub(super) async fn send_reliable(
+        &self,
+        target_pid: usize,
+        data: &[u8],
+        label: &str,
+    ) -> Result<(), MarketError> {
         let send_start = std::time::Instant::now();
         let mut backoff_ms = 50u64;
         for attempt in 0u32..MAX_SEND_RETRIES {
@@ -526,7 +534,7 @@ impl MpcTunnelProxy {
                             "{label}: delivered in {:?} ({attempt} retries)",
                             send_start.elapsed()
                         );
-                        return;
+                        return Ok(());
                     }
                     // NACK — peer's tunnel proxy not ready yet; retry
                     debug!("{label} attempt {attempt}: NACK from Party {target_pid} — retrying");
@@ -545,6 +553,9 @@ impl MpcTunnelProxy {
             "{label}: gave up after {MAX_SEND_RETRIES} retries ({:?} elapsed)",
             send_start.elapsed()
         );
+        Err(MarketError::Network(format!(
+            "{label}: delivery failed after {MAX_SEND_RETRIES} retries"
+        )))
     }
 
     /// Deliver a Data payload through the reorder buffer.

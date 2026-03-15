@@ -94,7 +94,7 @@ impl MpcTunnelProxy {
         };
         let data = self.sign_mpc_message(&open_msg)?;
         let label = format!("Open to Party {target_pid} stream {stream_id}");
-        self.send_reliable(target_pid, &data, &label).await;
+        let _ = self.send_reliable(target_pid, &data, &label).await;
         info!("Open sent to Party {} stream {}", target_pid, stream_id);
 
         // Spawn background re-sender: re-send Open every 5s to handle lost messages.
@@ -111,7 +111,7 @@ impl MpcTunnelProxy {
                     if cancel.is_cancelled() {
                         break;
                     }
-                    proxy.send_reliable(target_pid, &data, "Open re-send").await;
+                    let _ = proxy.send_reliable(target_pid, &data, "Open re-send").await;
                 }
             });
         }
@@ -159,8 +159,16 @@ impl MpcTunnelProxy {
                 break; // semaphore closed — shutting down
             };
             let proxy = self.clone();
+            let cancel_on_fail = cancel.clone();
             tokio::spawn(async move {
-                proxy.send_reliable(target_pid, &signed_data, &label).await;
+                if proxy
+                    .send_reliable(target_pid, &signed_data, &label)
+                    .await
+                    .is_err()
+                {
+                    error!("{label}: delivery failed — cancelling tunnel proxy");
+                    cancel_on_fail.cancel();
+                }
                 drop(permit);
             });
 
@@ -204,7 +212,7 @@ impl MpcTunnelProxy {
             };
             if let Ok(close_data) = self.sign_mpc_message(&close_msg) {
                 let label = format!("Close P{my_pid}→P{target_pid} s{stream_id}");
-                self.send_reliable(target_pid, &close_data, &label).await;
+                let _ = self.send_reliable(target_pid, &close_data, &label).await;
             }
         }
 
@@ -259,7 +267,7 @@ impl MpcTunnelProxy {
 
         for pid in peer_pids {
             let label = format!("RouteUpdate P{}→P{}", self.inner.party_id, pid);
-            self.send_reliable(pid, &data, &label).await;
+            let _ = self.send_reliable(pid, &data, &label).await;
         }
         info!(
             "Broadcast RouteUpdate to {} peers",
