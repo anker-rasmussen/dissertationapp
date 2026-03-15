@@ -161,6 +161,8 @@ where
         };
 
         // Fetch each bidder's BidRecord
+        let total_count = bidder_list.len();
+        let mut fetch_failures = 0usize;
         for (bidder, bid_record_key, _) in &bidder_list {
             match bid_ops.fetch_bid(bid_record_key).await {
                 Ok(Some(bid_record)) => {
@@ -172,11 +174,17 @@ where
                         "No bid record found for bidder {} at {}",
                         bidder, bid_record_key
                     );
+                    fetch_failures += 1;
                 }
                 Err(e) => {
                     warn!("Failed to fetch bid for {}: {}", bidder, e);
+                    fetch_failures += 1;
                 }
             }
+        }
+
+        if fetch_failures > 0 {
+            warn!("discover_bids: {fetch_failures}/{total_count} bids failed to fetch");
         }
 
         info!("Built BidIndex with {} bids", bid_index.bids.len());
