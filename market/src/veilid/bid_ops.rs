@@ -33,6 +33,10 @@ impl<D: DhtStore> BidOperations<D> {
         match self.dht.get_value(bid_key).await? {
             Some(data) => {
                 let bid = BidRecord::from_cbor(&data)?;
+                if bid.commitment == [0u8; 32] {
+                    warn!("Rejecting BidRecord with zero commitment at {}", bid_key);
+                    return Ok(None);
+                }
                 debug!("Fetched bid from DHT at {}", bid_key);
                 Ok(Some(bid))
             }
@@ -64,7 +68,14 @@ impl<D: DhtStore> BidOperations<D> {
             match self.dht.get_value(bid_record_key).await {
                 Ok(Some(data)) => match BidRecord::from_cbor(&data) {
                     Ok(bid) => {
-                        index.add_bid(bid);
+                        if bid.commitment == [0u8; 32] {
+                            warn!(
+                                "Skipping BidRecord with zero commitment at {} for bidder {}",
+                                bid_record_key, bidder
+                            );
+                        } else {
+                            index.add_bid(bid);
+                        }
                     }
                     Err(e) => {
                         warn!(

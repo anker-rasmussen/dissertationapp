@@ -657,11 +657,16 @@ impl MpcOrchestrator {
 
         // Each concurrent auction gets a distinct port slot within the 10-port
         // window allocated per node, so their TCP tunnel proxies don't collide.
-        #[allow(clippy::cast_possible_truncation)] // num_parties fits in u16
+        // Clamp the modulus so port_slot + num_parties - 1 <= 9.
+        // num_parties is bounded by the number of bidders in a single auction,
+        // which is always << u16::MAX, so the cast is safe.
+        #[allow(clippy::cast_possible_truncation)]
+        let num_parties_u16 = num_parties as u16;
+        let max_slot = 10u16.saturating_sub(num_parties_u16);
         let port_slot = self
             .port_slot_counter
-            .fetch_add(num_parties as u16, std::sync::atomic::Ordering::Relaxed)
-            % 10;
+            .fetch_add(num_parties_u16, std::sync::atomic::Ordering::Relaxed)
+            % (max_slot + 1).max(1);
 
         // Start MPC tunnel proxy with the routes
         let tunnel_proxy = MpcTunnelProxy::new(super::mpc::MpcTunnelConfig {

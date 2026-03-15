@@ -3,6 +3,7 @@ use ed25519_dalek::{Signer, Verifier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+use tracing::warn;
 use veilid_core::{PublicKey, RecordKey, RouteBlob};
 
 use crate::error::{MarketError, MarketResult};
@@ -135,12 +136,23 @@ impl BidAnnouncementRegistry {
         }
     }
 
+    /// Maximum number of bid announcements stored in one registry.
+    pub const MAX_ANNOUNCEMENTS: usize = 200;
+
     /// Add a bid announcement to the registry
     pub fn add(&mut self, bidder: PublicKey, bid_record_key: RecordKey, timestamp: u64) {
         // Check if already exists (avoid duplicates)
-        if !self.announcements.iter().any(|(b, _, _)| b == &bidder) {
-            self.announcements.push((bidder, bid_record_key, timestamp));
+        if self.announcements.iter().any(|(b, _, _)| b == &bidder) {
+            return;
         }
+        if self.announcements.len() >= Self::MAX_ANNOUNCEMENTS {
+            warn!(
+                "BidAnnouncementRegistry at capacity ({}), dropping announcement",
+                Self::MAX_ANNOUNCEMENTS
+            );
+            return;
+        }
+        self.announcements.push((bidder, bid_record_key, timestamp));
     }
 
     /// Serialize to bytes for DHT storage (CBOR, matching other DHT types)
