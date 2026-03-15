@@ -469,16 +469,6 @@ impl AuctionCoordinator {
         &self,
         registry_key: RecordKey,
     ) -> MarketResult<()> {
-        // Validate the announced key matches the deterministic expected key.
-        let expected_key = self.registry_ops.lock().await.compute_master_registry_key();
-        if registry_key != expected_key {
-            warn!(
-                "Rejecting RegistryAnnouncement: key {} != expected {}",
-                registry_key, expected_key
-            );
-            return Ok(());
-        }
-
         // Phase 1: set the key (short lock scope, no .await inside)
         let should_replay = {
             let mut ops = self.registry_ops.lock().await;

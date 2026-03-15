@@ -71,7 +71,7 @@ impl RegistryOperations {
     /// `BLAKE3(VLD0_bytes || owner_pubkey || schema_compiled)`.
     /// Since the shared keypair is deterministic (derived from the network key),
     /// all nodes on the same network compute the same record key.
-    pub(crate) fn compute_master_registry_key(&self) -> RecordKey {
+    fn compute_master_registry_key(&self) -> RecordKey {
         let owner_key: &[u8] = &self.shared_keypair.value().key();
         // DHTSchema::dflt(1).compile() = FourCC "DFLT" + 1u16 little-endian
         let schema_data: [u8; 6] = [b'D', b'F', b'L', b'T', 1, 0];
