@@ -96,7 +96,8 @@ pub struct AuctionCoordinator {
     /// Tuple: (seller_pubkey, catalog_key, signing_pubkey_hex)
     pub(super) pending_seller_registrations: Arc<Mutex<Vec<(PublicKey, RecordKey, String)>>>,
     /// Bid announcements that failed to broadcast (no routes yet) and need retry.
-    pub(super) pending_bid_announcements: Mutex<Vec<(RecordKey, RecordKey)>>,
+    /// Tuple: (listing_key, bid_record_key, retry_count)
+    pub(super) pending_bid_announcements: Mutex<Vec<(RecordKey, RecordKey, u32)>>,
     /// Our own broadcast private route blob (published to the registry).
     pub(super) my_route_blob: Mutex<Option<Vec<u8>>>,
     /// RouteId of the broadcast route (used as MPC route for keepalive reuse).
