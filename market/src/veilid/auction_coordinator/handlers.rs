@@ -3,6 +3,8 @@
 use tracing::{debug, error, info, warn};
 use veilid_core::{PublicKey, RecordKey, RouteBlob};
 
+use ed25519_dalek::VerifyingKey;
+
 use super::{AuctionCoordinator, BufferedMpcSignal};
 use crate::config::{self, now_unix, subkeys};
 use crate::error::{MarketError, MarketResult};
@@ -421,6 +423,12 @@ impl AuctionCoordinator {
         catalog_key: RecordKey,
         signer: [u8; 32],
     ) -> MarketResult<()> {
+        // Validate that the signer bytes form a valid Ed25519 public key.
+        if VerifyingKey::from_bytes(&signer).is_err() {
+            warn!("Rejecting SellerRegistration: invalid signing key");
+            return Ok(());
+        }
+
         let signing_hex = hex::encode(signer);
         info!(
             "Received SellerRegistration from {} with catalog {} (signer: {})",
@@ -461,6 +469,16 @@ impl AuctionCoordinator {
         &self,
         registry_key: RecordKey,
     ) -> MarketResult<()> {
+        // Validate the announced key matches the deterministic expected key.
+        let expected_key = self.registry_ops.lock().await.compute_master_registry_key();
+        if registry_key != expected_key {
+            warn!(
+                "Rejecting RegistryAnnouncement: key {} != expected {}",
+                registry_key, expected_key
+            );
+            return Ok(());
+        }
+
         // Phase 1: set the key (short lock scope, no .await inside)
         let should_replay = {
             let mut ops = self.registry_ops.lock().await;
