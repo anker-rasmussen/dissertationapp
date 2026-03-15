@@ -1,5 +1,6 @@
 //! Background monitoring, route management, and auction-end orchestration.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use veilid_core::{RecordKey, Sequencing, Stability, CRYPTO_KIND_VLD0};
@@ -121,6 +122,7 @@ impl AuctionCoordinator {
     }
 
     /// Start background deadline monitoring.
+    #[allow(clippy::too_many_lines)]
     pub fn start_monitoring(self: Arc<Self>) {
         info!("Starting auction deadline monitor");
         let token = self.shutdown.clone();
@@ -137,6 +139,7 @@ impl AuctionCoordinator {
             }
 
             let mut broadcast_route_ready = false;
+            let mut auction_retries: HashMap<RecordKey, u32> = HashMap::new();
 
             let mut tick_count: u32 = 0;
             loop {
@@ -213,7 +216,23 @@ impl AuctionCoordinator {
                         continue;
                     }
 
-                    info!("Auction deadline reached for listing '{}'", listing.title);
+                    // Enforce per-listing retry limit.
+                    let count = auction_retries.entry(key.clone()).or_insert(0);
+                    *count += 1;
+                    if *count > config::MAX_AUCTION_RETRIES {
+                        error!(
+                            "Giving up on auction '{}' after {} attempts",
+                            listing.title, count
+                        );
+                        monitor_self.logic.unwatch_listing(&key).await;
+                        auction_retries.remove(&key);
+                        continue;
+                    }
+
+                    info!(
+                        "Auction deadline reached for listing '{}' (attempt {})",
+                        listing.title, count
+                    );
 
                     monitor_self.mpc.mark_auction_active(&key).await;
 
@@ -221,7 +240,10 @@ impl AuctionCoordinator {
                         .handle_auction_end_wrapper(&key, &listing)
                         .await
                     {
-                        Ok(()) => monitor_self.logic.unwatch_listing(&key).await,
+                        Ok(()) => {
+                            auction_retries.remove(&key);
+                            monitor_self.logic.unwatch_listing(&key).await;
+                        }
                         Err(e) => {
                             error!(
                                 "Failed to handle auction end for '{}': {} (will retry)",

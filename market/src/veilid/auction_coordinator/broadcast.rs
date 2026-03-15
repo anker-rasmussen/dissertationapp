@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 use veilid_core::{RecordKey, Target};
 
 use super::AuctionCoordinator;
-use crate::config::now_unix;
+use crate::config::{self, now_unix};
 use crate::error::MarketResult;
 
 use super::super::bid_announcement::AuctionMessage;
@@ -33,10 +33,11 @@ impl AuctionCoordinator {
 
         if sent == 0 {
             warn!("No peers found to send bid announcement, queuing for retry");
-            self.pending_bid_announcements
-                .lock()
-                .await
-                .push((listing_key.clone(), bid_record_key.clone()));
+            self.pending_bid_announcements.lock().await.push((
+                listing_key.clone(),
+                bid_record_key.clone(),
+                0,
+            ));
         } else {
             info!("Broadcast completed: sent to {} peers", sent);
         }
@@ -56,7 +57,7 @@ impl AuctionCoordinator {
 
         info!("Retrying {} pending bid announcement(s)", pending.len());
 
-        for (listing_key, bid_record_key) in pending {
+        for (listing_key, bid_record_key, retries) in pending {
             let announcement = AuctionMessage::bid_announcement(
                 listing_key.clone(),
                 self.my_node_id.clone(),
@@ -73,18 +74,40 @@ impl AuctionCoordinator {
                         );
                     }
                     Ok(_) => {
-                        warn!("Retry failed: still no peers, re-queuing bid announcement");
-                        self.pending_bid_announcements
-                            .lock()
-                            .await
-                            .push((listing_key, bid_record_key));
+                        if retries < config::MAX_BID_ANNOUNCE_RETRIES {
+                            warn!(
+                                "Retry failed: still no peers, re-queuing bid announcement (attempt {})",
+                                retries + 1
+                            );
+                            self.pending_bid_announcements.lock().await.push((
+                                listing_key,
+                                bid_record_key,
+                                retries + 1,
+                            ));
+                        } else {
+                            warn!(
+                                "Dropping bid announcement for {} after {} retries",
+                                listing_key,
+                                retries + 1
+                            );
+                        }
                     }
                     Err(e) => {
-                        warn!("Retry error for bid announcement: {}", e);
-                        self.pending_bid_announcements
-                            .lock()
-                            .await
-                            .push((listing_key, bid_record_key));
+                        if retries < config::MAX_BID_ANNOUNCE_RETRIES {
+                            warn!("Retry error for bid announcement: {}", e);
+                            self.pending_bid_announcements.lock().await.push((
+                                listing_key,
+                                bid_record_key,
+                                retries + 1,
+                            ));
+                        } else {
+                            warn!(
+                                "Dropping bid announcement for {} after {} retries: {}",
+                                listing_key,
+                                retries + 1,
+                                e
+                            );
+                        }
                     }
                 },
                 Err(e) => {

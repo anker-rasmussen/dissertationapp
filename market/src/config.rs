@@ -158,6 +158,16 @@ pub const PEER_ROUTE_WAIT_SECS: u64 = 5;
 /// after an auction deadline fires.  Covers DHT propagation delay.
 pub const BID_DISCOVERY_STABILIZATION_SECS: u64 = 5;
 
+// --- Retry Limits ---
+
+/// Maximum number of times a failed auction (handle_auction_end) will be
+/// retried before the listing is unwatched and given up on.
+pub const MAX_AUCTION_RETRIES: u32 = 3;
+
+/// Maximum number of times a bid announcement broadcast will be retried
+/// before it is silently dropped from the pending queue.
+pub const MAX_BID_ANNOUNCE_RETRIES: u32 = 5;
+
 // --- DHT Retry ---
 
 /// Initial delay for DHT retry with exponential backoff (ms).
@@ -227,7 +237,17 @@ impl MarketConfig {
 
         let node_offset = match std::env::var("VEILID_NODE_OFFSET") {
             Ok(s) => match s.parse::<u16>() {
-                Ok(v) => v,
+                Ok(v) => {
+                    if v > 6000 {
+                        warn!(
+                            "VEILID_NODE_OFFSET={} exceeds max 6000, using default {}",
+                            v, DEFAULT_NODE_OFFSET
+                        );
+                        DEFAULT_NODE_OFFSET
+                    } else {
+                        v
+                    }
+                }
                 Err(e) => {
                     warn!(
                         "VEILID_NODE_OFFSET='{}' is not a valid u16 ({}), using default {}",
