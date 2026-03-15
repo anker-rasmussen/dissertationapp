@@ -88,6 +88,13 @@ impl MpcTunnelProxy {
                 drop(sessions);
                 let mut pending = self.inner.pending_data.lock().await;
                 pending.remove(&session_key);
+                drop(pending);
+                self.inner.recv_state.lock().await.remove(&session_key);
+                self.inner
+                    .send_seqs
+                    .lock()
+                    .await
+                    .remove(&(source_party_id, stream_id));
             }
             MpcMessage::Ping { source_party_id } => {
                 debug!("Received Ping from Party {}", source_party_id);

@@ -441,6 +441,12 @@ impl MpcTunnelProxy {
         if let Ok(mut pending) = self.inner.pending_data.try_lock() {
             pending.clear();
         }
+        if let Ok(mut recv_state) = self.inner.recv_state.try_lock() {
+            recv_state.clear();
+        }
+        if let Ok(mut send_seqs) = self.inner.send_seqs.try_lock() {
+            send_seqs.clear();
+        }
     }
 
     /// Get a snapshot of the traffic ring buffer for the UI hex display.
