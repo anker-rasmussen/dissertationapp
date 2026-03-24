@@ -296,6 +296,51 @@ pub(crate) fn parse_bidder_mpc_output(stdout: &str) -> Option<bool> {
     None
 }
 
+/// Performance metrics extracted from MP-SPDZ stderr output.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MpcPerfMetrics {
+    /// Self-reported computation time (seconds).
+    pub time_secs: Option<f64>,
+    /// Data sent by this party (MB).
+    pub data_sent_mb: Option<f64>,
+    /// Number of communication rounds.
+    pub rounds: Option<u64>,
+    /// Global data sent across all parties (MB).
+    pub global_data_mb: Option<f64>,
+}
+
+/// Parse MP-SPDZ performance metrics from process stderr.
+///
+/// Looks for the standard BaseMachine.cpp output lines:
+///   `Time = 8.312 seconds`
+///   `Data sent = 1.23 MB in ~456 rounds (party 0 only)`
+///   `Global data sent = 3.45 MB (all parties)`
+pub(crate) fn parse_mpc_stderr_metrics(stderr: &str) -> MpcPerfMetrics {
+    let mut m = MpcPerfMetrics::default();
+    for line in stderr.lines() {
+        if let Some(rest) = line.strip_prefix("Time = ") {
+            if let Some(secs_str) = rest.strip_suffix(" seconds") {
+                m.time_secs = secs_str.trim().parse().ok();
+            }
+        }
+        if line.starts_with("Data sent = ") {
+            // "Data sent = 1.23 MB in ~456 rounds ..."
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 7 {
+                m.data_sent_mb = parts[3].parse().ok();
+                m.rounds = parts[6].trim_start_matches('~').parse().ok();
+            }
+        }
+        if line.starts_with("Global data sent = ") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 5 {
+                m.global_data_mb = parts[4].parse().ok();
+            }
+        }
+    }
+    m
+}
+
 /// Parse the MPC attestation value from stdout
 pub(crate) fn parse_attestation(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
