@@ -77,7 +77,7 @@ pub const VEILID_PUBLIC_ADDRESS_ENV: &str = "VEILID_PUBLIC_ADDRESS";
 pub const DEFAULT_UPDATE_CHANNEL_CAPACITY: usize = 4096;
 
 /// Default timeout for MPC execution.
-pub const DEFAULT_MPC_EXECUTION_TIMEOUT_SECS: u64 = 900;
+pub const DEFAULT_MPC_EXECUTION_TIMEOUT_SECS: u64 = 3600;
 
 /// Default Veilid RPC timeout in milliseconds.
 ///
