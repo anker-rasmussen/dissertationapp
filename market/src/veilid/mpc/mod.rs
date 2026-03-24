@@ -105,6 +105,10 @@ pub(super) enum MpcMessage {
         source_party_id: usize,
         route_blob: Vec<u8>,
     },
+    /// Confirmation that a party passed SYN/ACK.  All parties must exchange
+    /// this before any party launches MP-SPDZ, preventing partial starts
+    /// when some parties' routes died after SYN/ACK.
+    SynAckComplete { source_party_id: usize },
 }
 
 /// Manages TCP tunnel proxying between MP-SPDZ parties over Veilid routes
@@ -175,6 +179,10 @@ pub(super) struct MpcTunnelProxyInner {
     pub(super) syn_ack_received: Mutex<std::collections::HashSet<usize>>,
     /// Notified when a new Ping is received (wakes the SYN/ACK waiter).
     pub(super) syn_ack_notify: Notify,
+    /// Parties from which we've received SynAckComplete confirmation.
+    pub(super) syn_ack_complete_received: Mutex<std::collections::HashSet<usize>>,
+    /// Notified when a SynAckComplete is received.
+    pub(super) syn_ack_complete_notify: Notify,
     /// Cumulative bytes sent over Veilid routes (outgoing TCP → Veilid).
     pub(super) bytes_sent: AtomicU64,
     /// Cumulative bytes received from Veilid routes (Veilid → local TCP).
@@ -245,6 +253,8 @@ impl MpcTunnelProxy {
                 party_pubkeys: config.party_pubkeys,
                 syn_ack_received: Mutex::new(std::collections::HashSet::new()),
                 syn_ack_notify: Notify::new(),
+                syn_ack_complete_received: Mutex::new(std::collections::HashSet::new()),
+                syn_ack_complete_notify: Notify::new(),
                 bytes_sent: AtomicU64::new(0),
                 bytes_recv: AtomicU64::new(0),
                 traffic_log: Mutex::new(std::collections::VecDeque::with_capacity(TRAFFIC_LOG_CAP)),
@@ -400,6 +410,59 @@ impl MpcTunnelProxy {
         Err(MarketError::Network(format!(
             "SYN/ACK failed after {max_rounds} rounds: peers {final_missing:?} unreachable",
         )))
+    }
+
+    /// Phase 2 barrier: after SYN/ACK passes locally, broadcast `SynAckComplete`
+    /// and wait for all peers to confirm.  Prevents partial MP-SPDZ starts
+    /// when some parties' routes die between SYN/ACK and MPC launch.
+    pub async fn confirm_all_ready(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MarketResult<()> {
+        let my_pid = self.inner.party_id;
+        let peers: Vec<usize> = self
+            .inner
+            .signer_to_party
+            .values()
+            .filter(|&&pid| pid != my_pid)
+            .copied()
+            .collect();
+
+        info!("Party {my_pid}: broadcasting SynAckComplete to {} peers", peers.len());
+
+        let msg = MpcMessage::SynAckComplete { source_party_id: my_pid };
+        if let Ok(data) = self.sign_mpc_message(&msg) {
+            for &pid in &peers {
+                let label = format!("SynAckComplete P{my_pid}→P{pid}");
+                let _ = self.send_reliable(pid, &data, &label).await;
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let all_received = {
+                let received = self.inner.syn_ack_complete_received.lock().await;
+                peers.iter().all(|p| received.contains(p))
+            };
+            if all_received {
+                info!("Party {my_pid}: all peers confirmed SynAckComplete — launching MPC");
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let missing: Vec<usize> = {
+                    let received = self.inner.syn_ack_complete_received.lock().await;
+                    peers.iter().filter(|p| !received.contains(p)).copied().collect()
+                };
+                return Err(MarketError::Network(format!(
+                    "SynAckComplete timed out after {}s: peers {missing:?} did not confirm",
+                    timeout.as_secs(),
+                )));
+            }
+            tokio::select! {
+                () = self.inner.syn_ack_complete_notify.notified() => {}
+                () = tokio::time::sleep_until(deadline) => {}
+            }
+        }
     }
 
     /// Serialize an MPC message, wrap it in an [`MpcEnvelope`] tagged with
