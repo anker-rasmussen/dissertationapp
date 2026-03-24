@@ -178,14 +178,13 @@ impl VeilidNode {
                 routing_table: VeilidConfigRoutingTable {
                     bootstrap: devnet.bootstrap_nodes.clone(),
                     bootstrap_keys: vec![], // No signature verification for devnet
-                    // Limits for 20-node devnet (1 bootstrap + 19 regular + N market instances).
-                    // Over-attached at 16 peers to ensure enough routing table
-                    // entries for unique safety route construction.
-                    limit_over_attached: devnet.limit_over_attached,
-                    limit_fully_attached: 20,
-                    limit_attached_strong: 16,
-                    limit_attached_good: 8,
-                    limit_attached_weak: 2, // Reach "AttachedWeak" with just 2 good peers
+                    // High over-attached limit so nodes accept all peers in large devnets.
+                    // Lower tiers kept small so nodes reach "attached" quickly.
+                    limit_over_attached: 200,
+                    limit_fully_attached: 64,
+                    limit_attached_strong: 32,
+                    limit_attached_good: 16,
+                    limit_attached_weak: 2,
                     ..Default::default()
                 },
                 protocol: VeilidConfigProtocol {
