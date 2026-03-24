@@ -18,6 +18,10 @@ path = "src/bin/devnet-ctl.rs"
 name = "market-headless"
 path = "src/bin/market-headless.rs"
 
+[[bin]]
+name = "bench-auction"
+path = "src/bin/bench-auction.rs"
+
 [features]
 default = []
 test = []
@@ -67,6 +71,8 @@ parking_lot = "0.12"
 dirs = "6.0"
 hex = "0.4"
 data-encoding = "2.6"
+anyhow = "1"
+futures = "0.3"
 
 [dev-dependencies]
 market = { path = ".", features = ["test"] }

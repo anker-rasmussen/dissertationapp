@@ -3647,6 +3647,7 @@ name = "market"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "anyhow",
  "async-trait",
  "bincode",
  "blake3",
@@ -3655,6 +3656,7 @@ dependencies = [
  "dioxus",
  "dirs",
  "ed25519-dalek",
+ "futures",
  "hex",
  "libc",
  "market",
