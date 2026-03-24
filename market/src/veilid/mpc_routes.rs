@@ -508,6 +508,23 @@ impl MpcRouteManager {
         self.ready_parties.lock().await.len()
     }
 
+    /// Check if any registered peer disagrees on the expected party count.
+    /// Returns `Some(their_count)` on first mismatch, `None` if all agree.
+    pub async fn check_party_count_mismatch(&self, our_num_parties: u32) -> Option<u32> {
+        self.ready_parties
+            .lock()
+            .await
+            .values()
+            .find(|(count, _)| *count != our_num_parties)
+            .map(|(count, _)| *count)
+    }
+
+    /// Clear all ready signals. Used when a party count mismatch is detected
+    /// so stale entries from previous attempts don't poison the next retry.
+    pub async fn clear_ready(&self) {
+        self.ready_parties.lock().await.clear();
+    }
+
     /// Handle dead remote routes reported by `VeilidUpdate::RouteChange`.
     ///
     /// For each dead `RouteId`, finds which party pubkey maps to it in

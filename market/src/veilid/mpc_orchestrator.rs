@@ -19,7 +19,8 @@ use super::bid_storage::BidStorage;
 use super::dht::DHTOperations;
 use super::mpc::MpcTunnelProxy;
 use super::mpc_execution::{
-    compile_mpc_program, spawn_mpc_party, MpcCleanupGuard, MpcResultContract,
+    compile_mpc_program, parse_mpc_stderr_metrics, spawn_mpc_party, MpcCleanupGuard,
+    MpcResultContract,
 };
 use super::mpc_routes::MpcRouteManager;
 pub(crate) use super::mpc_verification::VerificationState;
@@ -349,6 +350,7 @@ impl MpcOrchestrator {
     /// execute `mascot-party.x`, parse output, and (for seller) initiate winner
     /// verification. Sets `needs_route_refresh` on completion.
     #[tracing::instrument(skip_all, fields(listing_key = %listing_key, listing_title, session_id))]
+    #[allow(clippy::too_many_lines)]
     pub async fn handle_auction_end(
         &self,
         listing_key: &RecordKey,
@@ -423,8 +425,10 @@ impl MpcOrchestrator {
                     .map(|b| (b.bidder.clone(), b.bid_key.clone()))
                     .collect();
 
+                let auction_start = std::time::Instant::now();
                 let result = async {
                     // Exchange routes + readiness barrier with other parties
+                    let route_start = std::time::Instant::now();
                     let routes = self
                         .exchange_mpc_routes(
                             listing_key,
@@ -435,6 +439,8 @@ impl MpcOrchestrator {
                             &bid_record_keys,
                         )
                         .await?;
+                    let route_secs = route_start.elapsed().as_secs_f64();
+                    info!("BENCH: {{\"event\":\"phase\",\"name\":\"route_exchange\",\"secs\":{route_secs:.2}}}");
 
                     // Trigger MPC execution
                     self.execute_mpc_auction(
@@ -448,6 +454,11 @@ impl MpcOrchestrator {
                     .await
                 }
                 .await;
+                let total_secs = auction_start.elapsed().as_secs_f64();
+                info!(
+                    "BENCH: {{\"event\":\"auction_complete\",\"total_secs\":{total_secs:.2},\"num_parties\":{}}}",
+                    sorted_bidders.len()
+                );
 
                 self.active_auctions.lock().await.remove(&active_key);
                 if result.is_ok() {
@@ -631,6 +642,7 @@ impl MpcOrchestrator {
     }
 
     /// Execute the MPC auction computation
+    #[allow(clippy::too_many_lines)]
     async fn execute_mpc_auction(
         &self,
         party_id: usize,
@@ -705,6 +717,15 @@ impl MpcOrchestrator {
             )
             .await?;
 
+        // Phase 2 barrier: confirm ALL parties passed SYN/ACK before any
+        // party launches MP-SPDZ.  Prevents partial starts when routes die
+        // between SYN/ACK and MPC launch.
+        tunnel_proxy
+            .confirm_all_ready(std::time::Duration::from_secs(
+                config::MPC_SYN_ACK_ROUND_SECS * u64::from(config::MPC_SYN_ACK_MAX_ROUNDS),
+            ))
+            .await?;
+
         let mp_spdz_dir = std::env::var(config::MP_SPDZ_DIR_ENV)
             .unwrap_or_else(|_| config::DEFAULT_MP_SPDZ_DIR.to_string());
 
@@ -731,6 +752,7 @@ impl MpcOrchestrator {
         );
 
         // RAII guard ensures tunnel proxy cleanup + hosts file removal on all exit paths
+        let tunnel_stats = tunnel_proxy.clone();
         let _cleanup_guard = MpcCleanupGuard::new(tunnel_proxy, hosts_file_path.clone());
 
         // Compile MPC program for the specific number of parties
@@ -740,6 +762,7 @@ impl MpcOrchestrator {
         // Must match the tunnel proxy's port slot so MASCOT connects to the
         // correct local TCP listeners.
         let base_port = super::mpc::base_port_for_offset(self.node_offset) + port_slot;
+        let mpc_start = std::time::Instant::now();
         let result = spawn_mpc_party(
             &mp_spdz_dir,
             party_id,
@@ -750,6 +773,7 @@ impl MpcOrchestrator {
             1800, // 30-minute timeout for MASCOT OT over Veilid routes
         )
         .await;
+        let mpc_wall_secs = mpc_start.elapsed().as_secs_f64();
 
         // On spawn/execution error, also cleanup route manager before propagating
         let process_output = match result {
@@ -760,6 +784,21 @@ impl MpcOrchestrator {
                 return Err(e);
             }
         };
+
+        // Parse MP-SPDZ performance metrics from stderr and emit bench log.
+        let stderr_str = String::from_utf8_lossy(&process_output.stderr);
+        let perf = parse_mpc_stderr_metrics(&stderr_str);
+        let (bytes_sent, bytes_recv) = tunnel_stats.traffic_bytes();
+        let self_secs = perf.time_secs.map_or(-1.0, |v| v);
+        let data_mb = perf.data_sent_mb.map_or(-1.0, |v| v);
+        let rounds = perf.rounds.unwrap_or(0);
+        let global_mb = perf.global_data_mb.map_or(-1.0, |v| v);
+        info!(
+            "BENCH: {{\"event\":\"mpc_complete\",\"mpc_wall_secs\":{mpc_wall_secs:.2},\
+             \"mpc_self_secs\":{self_secs:.2},\"data_sent_mb\":{data_mb:.3},\
+             \"rounds\":{rounds},\"global_data_mb\":{global_mb:.3},\
+             \"tunnel_bytes_sent\":{bytes_sent},\"tunnel_bytes_recv\":{bytes_recv}}}"
+        );
 
         self.process_mpc_result(party_id, &process_output, listing_key, all_parties)
             .await?;
@@ -1026,8 +1065,23 @@ impl MpcOrchestrator {
         let mut barrier_tick: u8 = 0;
 
         loop {
-            let ready = route_manager.lock().await.ready_count().await;
+            let mgr = route_manager.lock().await;
+            let ready = mgr.ready_count().await;
             let expected = bidders.len();
+
+            // Detect bid-set divergence: if any peer reports a different party
+            // count, our G-Set hasn't converged yet.  Fail fast so the retry
+            // re-fetches bid_index from DHT (G-Set merge brings in missing bids).
+            if let Some(their_count) = mgr.check_party_count_mismatch(num_parties).await {
+                // Clear stale ready signals so they don't poison the next retry.
+                mgr.clear_ready().await;
+                drop(mgr);
+                return Err(MarketError::Network(format!(
+                    "Party count mismatch: we expect {num_parties} but a peer reports {their_count} — \
+                     bid set not yet converged, retrying"
+                )));
+            }
+            drop(mgr);
 
             info!("Readiness barrier: {}/{} parties ready", ready, expected);
 

@@ -38,6 +38,9 @@ impl MpcTunnelProxy {
             }
             | MpcMessage::RouteUpdate {
                 source_party_id, ..
+            }
+            | MpcMessage::SynAckComplete {
+                source_party_id, ..
             } => *source_party_id,
         };
         if let Some(&expected_party) = self.inner.signer_to_party.get(&signer) {
@@ -120,6 +123,15 @@ impl MpcTunnelProxy {
                         });
                     }
                 }
+            }
+            MpcMessage::SynAckComplete { source_party_id } => {
+                debug!("Received SynAckComplete from Party {}", source_party_id);
+                self.inner
+                    .syn_ack_complete_received
+                    .lock()
+                    .await
+                    .insert(source_party_id);
+                self.inner.syn_ack_complete_notify.notify_waiters();
             }
             MpcMessage::RouteUpdate {
                 source_party_id,
