@@ -123,9 +123,12 @@ pub struct MpcOrchestrator {
     /// once the corresponding tunnel proxy is activated.
     #[allow(clippy::type_complexity)]
     pub(crate) pending_mpc_messages: Arc<Mutex<HashMap<String, Vec<(Vec<u8>, [u8; 32])>>>>,
-    /// Set after MPC completes so the monitoring loop can refresh broadcast
-    /// routes immediately.  Routes go stale during MPC (keepalive suppressed)
-    /// and peers in a subsequent auction need fresh blobs.
+    /// Set when MPC execution begins so the monitoring loop refreshes
+    /// broadcast routes afterwards.  Routes go stale during MPC (keepalive
+    /// suppressed), and refreshing prevents relay nodes from correlating
+    /// traffic across sessions.  NOT set on route-exchange failure — MPC
+    /// never ran, so the route is still clean and other parties may have
+    /// it cached for retry convergence.
     needs_route_refresh: Arc<std::sync::atomic::AtomicBool>,
     /// Monotonic counter for assigning non-overlapping TCP port slots to
     /// concurrent MPC tunnel proxies.  Each session advances by `num_parties`
@@ -470,14 +473,13 @@ impl MpcOrchestrator {
                             .await;
                     }
                 }
-                // Signal the monitoring loop to refresh broadcast routes
-                // immediately — they went stale during MPC execution.
-                self.needs_route_refresh
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-
                 // On failure (barrier timeout, route collection timeout),
                 // reset stale route state so the next retry starts fresh.
                 // Ready signals are preserved — see Phase 2 race comment.
+                // Do NOT refresh the broadcast route on failure — it's still
+                // valid and other parties may have cached it.  Refreshing it
+                // invalidates their cached copy, preventing route convergence
+                // in concurrent auction scenarios.
                 if result.is_err() {
                     let managers = self.route_managers.lock().await;
                     if let Some(manager) = managers.get(listing_key) {
@@ -658,6 +660,12 @@ impl MpcOrchestrator {
         );
         self.set_auction_phase(&bid_index.listing_key, AuctionPhase::MpcExecuting)
             .await;
+
+        // MPC traffic is about to flow through our broadcast route.
+        // Signal the monitor to refresh it afterwards so relay nodes
+        // can't correlate this session with future ones.
+        self.needs_route_refresh
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         let listing_key = &bid_index.listing_key;
         let maps = self
