@@ -56,7 +56,7 @@ impl BenchConfig {
             party_counts: env_list("BENCH_PARTIES", vec![3, 4, 5, 6, 8, 10]),
             devnet_sizes: env_list("BENCH_DEVNET_SIZES", vec![20]),
             iters: env_or("BENCH_ITERS", 3),
-            auction_duration_secs: env_or("BENCH_AUCTION_DURATION", 30),
+            auction_duration_secs: env_or("BENCH_AUCTION_DURATION", 15),
             out_path: PathBuf::from(
                 std::env::var("BENCH_OUT")
                     .unwrap_or_else(|_| "bench-results/veilid_auction.csv".into()),
@@ -390,6 +390,38 @@ fn parse_bench_lines(lines: &[String]) -> BenchMetrics {
     m
 }
 
+// ── CSV resume support ──────────────────────────────────────────────
+
+/// Count completed iterations per (protocol, devnet_size, party_count) from existing CSV.
+/// Returns a set of (devnet_size, party_count, iteration) tuples already done.
+fn load_completed_iterations(
+    path: &PathBuf,
+    protocol: &str,
+) -> std::collections::HashSet<(u32, usize, usize)> {
+    let mut done = std::collections::HashSet::new();
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return done,
+    };
+    for line in contents.lines().skip(1) {
+        let cols: Vec<&str> = line.split(',').collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        if cols[1] != protocol {
+            continue;
+        }
+        if let (Ok(devnet), Ok(parties), Ok(iter)) = (
+            cols[2].parse::<u32>(),
+            cols[3].parse::<usize>(),
+            cols[4].parse::<usize>(),
+        ) {
+            done.insert((devnet, parties, iter));
+        }
+    }
+    done
+}
+
 // ── CSV output ───────────────────────────────────────────────────────
 
 const CSV_HEADER: &str = "timestamp,protocol,devnet_nodes,num_parties,iteration,total_secs,route_exchange_secs,mpc_wall_secs,mpc_self_secs,data_sent_mb,rounds,global_data_mb,tunnel_bytes_sent,tunnel_bytes_recv";
@@ -567,7 +599,10 @@ fn find_veilid_binary(name: &str, hint: &str) -> PathBuf {
         .unwrap_or_else(|| {
             eprintln!(
                 "[bench] {name} not found. {hint}\nSearched: {:?}",
-                candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+                candidates
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
             );
             std::process::exit(1);
         })
@@ -607,7 +642,9 @@ fn playground_restart(desired_nodes: u32, warmup_secs: u64) -> anyhow::Result<st
     eprintln!("[bench] Restarting playground devnet (desired size: {desired_nodes})...");
 
     // Kill any existing playground / veilid-server processes
-    let _ = Command::new("pkill").args(["-9", "-f", "veilid-server"]).status();
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", "veilid-server"])
+        .status();
     std::thread::sleep(Duration::from_millis(500));
 
     // Clean data dirs
@@ -659,7 +696,9 @@ fn playground_restart(desired_nodes: u32, warmup_secs: u64) -> anyhow::Result<st
                 break;
             }
             if start.elapsed() > Duration::from_secs(60) {
-                anyhow::bail!("Playground node {i} (port {port}) did not become healthy within 60s");
+                anyhow::bail!(
+                    "Playground node {i} (port {port}) did not become healthy within 60s"
+                );
             }
             std::thread::sleep(Duration::from_millis(250));
         }
@@ -698,6 +737,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Load already-completed iterations so we can resume
+    let completed = load_completed_iterations(&cfg.out_path, &mpc_protocol);
+    if !completed.is_empty() {
+        eprintln!(
+            "[bench] Resuming: found {} completed iterations in {}",
+            completed.len(),
+            cfg.out_path.display()
+        );
+    }
+
     // Track playground child process so we can kill/restart it
     let mut playground_child: Option<std::process::Child> = None;
 
@@ -708,6 +757,12 @@ async fn main() -> anyhow::Result<()> {
             }
 
             for iter in 0..cfg.iters {
+                // Skip already-completed iterations
+                if completed.contains(&(devnet_size, parties, iter)) {
+                    eprintln!("[bench] Skipping devnet={devnet_size} N={parties} iter {}/{} (already done)", iter + 1, cfg.iters);
+                    continue;
+                }
+
                 // Restart devnet before every iteration for clean routing state
                 if !cfg.skip_devnet_restart {
                     match cfg.devnet_mode {
@@ -715,7 +770,6 @@ async fn main() -> anyhow::Result<()> {
                             devnet_restart(devnet_size, cfg.warmup_secs)?;
                         }
                         DevnetMode::Playground => {
-                            // Kill previous playground if running
                             if let Some(ref mut child) = playground_child {
                                 let _ = child.kill();
                                 let _ = child.wait();
@@ -732,7 +786,8 @@ async fn main() -> anyhow::Result<()> {
                     cfg.iters
                 );
 
-                let result = run_auction_iteration(&cfg, devnet_size, parties, iter, &mpc_protocol).await;
+                let result =
+                    run_auction_iteration(&cfg, devnet_size, parties, iter, &mpc_protocol).await;
 
                 match result {
                     Ok(()) => {}
@@ -767,12 +822,20 @@ async fn run_auction_iteration(
     mpc_protocol: &str,
 ) -> anyhow::Result<()> {
     // Kill orphaned MPC processes from previous iterations
-    let _ = Command::new("pkill").args(["-9", "-f", "mascot-party.x"]).status();
-    let _ = Command::new("pkill").args(["-9", "-f", "shamir-party.x"]).status();
-    let _ = Command::new("pkill").args(["-9", "-f", "replicated-ring-party.x"]).status();
-    let _ = Command::new("pkill").args(["-9", "-f", "market-headless"]).status();
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", "mascot-party.x"])
+        .status();
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", "shamir-party.x"])
+        .status();
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", "replicated-ring-party.x"])
+        .status();
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", "market-headless"])
+        .status();
     // Wait for processes to fully exit and release ports
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(500));
 
     // Market nodes start after devnet nodes to avoid port/IP collisions
     let base_offset = devnet_nodes as u16;
@@ -830,8 +893,7 @@ async fn run_auction_iteration(
 
     // Poll winner for decryption key
     eprintln!("[bench] Polling for MPC + post-MPC verification (max 600s)...");
-    let winner_key =
-        poll_decryption_key(&mut participants[winner_idx], &listing_key, 600).await;
+    let winner_key = poll_decryption_key(&mut participants[winner_idx], &listing_key, 600).await;
 
     let total_secs = wall_start.elapsed().as_secs_f64();
 
@@ -839,9 +901,7 @@ async fn run_auction_iteration(
         if key == &expected_key {
             eprintln!("[bench] SUCCESS: Winner got correct decryption key in {total_secs:.1}s");
         } else {
-            eprintln!(
-                "[bench] WARNING: Winner key mismatch! expected={expected_key}, got={key}"
-            );
+            eprintln!("[bench] WARNING: Winner key mismatch! expected={expected_key}, got={key}");
         }
     } else {
         eprintln!("[bench] FAILURE: Winner did not receive decryption key within 600s");
@@ -857,7 +917,15 @@ async fn run_auction_iteration(
     }
 
     // Write CSV row
-    append_csv_row(&cfg.out_path, mpc_protocol, devnet_nodes, parties, iter, total_secs, &metrics)?;
+    append_csv_row(
+        &cfg.out_path,
+        mpc_protocol,
+        devnet_nodes,
+        parties,
+        iter,
+        total_secs,
+        &metrics,
+    )?;
     eprintln!(
         "[bench] CSV row written: total={total_secs:.1}s route_exchange={:.1}s mpc_wall={:.1}s mpc_self={:.1}s rounds={}",
         metrics.route_exchange_secs,
