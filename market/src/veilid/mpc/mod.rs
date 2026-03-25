@@ -46,13 +46,16 @@ use super::bid_announcement::SignedEnvelope;
 use crate::error::{MarketError, MarketResult};
 
 /// Calculate the base port for a given node offset.
-/// Formula: `5000 + (node_offset * 10)`
+/// Formula: `5000 + (node_offset * 24)`
+///
+/// Each node gets a 24-port window to support up to 20-party auctions
+/// without colliding with adjacent nodes' port ranges.
 ///
 /// # Panics
-/// Panics if `node_offset > 6000` (would overflow valid port range).
+/// Panics if `node_offset > 2500` (would overflow valid port range).
 pub(crate) const fn base_port_for_offset(node_offset: u16) -> u16 {
-    assert!(node_offset <= 6000, "node_offset too large for port range");
-    5000 + (node_offset * 10)
+    assert!(node_offset <= 2500, "node_offset too large for port range");
+    5000 + (node_offset * 24)
 }
 
 /// Calculate the port for a specific party relative to a base port.
@@ -415,10 +418,7 @@ impl MpcTunnelProxy {
     /// Phase 2 barrier: after SYN/ACK passes locally, broadcast `SynAckComplete`
     /// and wait for all peers to confirm.  Prevents partial MP-SPDZ starts
     /// when some parties' routes die between SYN/ACK and MPC launch.
-    pub async fn confirm_all_ready(
-        &self,
-        timeout: std::time::Duration,
-    ) -> MarketResult<()> {
+    pub async fn confirm_all_ready(&self, timeout: std::time::Duration) -> MarketResult<()> {
         let my_pid = self.inner.party_id;
         let peers: Vec<usize> = self
             .inner
@@ -428,9 +428,14 @@ impl MpcTunnelProxy {
             .copied()
             .collect();
 
-        info!("Party {my_pid}: broadcasting SynAckComplete to {} peers", peers.len());
+        info!(
+            "Party {my_pid}: broadcasting SynAckComplete to {} peers",
+            peers.len()
+        );
 
-        let msg = MpcMessage::SynAckComplete { source_party_id: my_pid };
+        let msg = MpcMessage::SynAckComplete {
+            source_party_id: my_pid,
+        };
         if let Ok(data) = self.sign_mpc_message(&msg) {
             for &pid in &peers {
                 let label = format!("SynAckComplete P{my_pid}→P{pid}");
@@ -451,7 +456,11 @@ impl MpcTunnelProxy {
             if tokio::time::Instant::now() >= deadline {
                 let missing: Vec<usize> = {
                     let received = self.inner.syn_ack_complete_received.lock().await;
-                    peers.iter().filter(|p| !received.contains(p)).copied().collect()
+                    peers
+                        .iter()
+                        .filter(|p| !received.contains(p))
+                        .copied()
+                        .collect()
                 };
                 return Err(MarketError::Network(format!(
                     "SynAckComplete timed out after {}s: peers {missing:?} did not confirm",
@@ -825,22 +834,22 @@ mod tests {
 
     #[test]
     fn test_base_port_calculation() {
-        assert_eq!(base_port_for_offset(5), 5050);
-        assert_eq!(base_port_for_offset(6), 5060);
-        assert_eq!(base_port_for_offset(7), 5070);
         assert_eq!(base_port_for_offset(0), 5000);
+        assert_eq!(base_port_for_offset(5), 5120);
+        assert_eq!(base_port_for_offset(6), 5144);
+        assert_eq!(base_port_for_offset(7), 5168);
     }
 
     #[test]
     fn test_listen_port_calculation() {
-        let base = base_port_for_offset(5); // 5050
-        assert_eq!(party_port(base, 0), 5050);
-        assert_eq!(party_port(base, 1), 5051);
-        assert_eq!(party_port(base, 2), 5052);
+        let base = base_port_for_offset(5); // 5120
+        assert_eq!(party_port(base, 0), 5120);
+        assert_eq!(party_port(base, 1), 5121);
+        assert_eq!(party_port(base, 2), 5122);
 
-        let base = base_port_for_offset(7); // 5070
-        assert_eq!(party_port(base, 0), 5070);
-        assert_eq!(party_port(base, 3), 5073);
+        let base = base_port_for_offset(7); // 5168
+        assert_eq!(party_port(base, 0), 5168);
+        assert_eq!(party_port(base, 3), 5171);
     }
 
     #[test]
