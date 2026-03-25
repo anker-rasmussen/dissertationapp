@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-use veilid_core::{RecordKey, Sequencing, Stability, CRYPTO_KIND_VLD0};
+use veilid_core::{PrivateSpec, RecordKey, Sequencing, Stability, CRYPTO_KIND_VLD0};
 
 use super::AuctionCoordinator;
 use crate::config;
@@ -81,11 +81,12 @@ impl AuctionCoordinator {
     async fn create_and_register_broadcast_route(&self) -> MarketResult<()> {
         let route_blob = self
             .api
-            .new_custom_private_route(
-                &[CRYPTO_KIND_VLD0],
-                Stability::LowLatency,
-                Sequencing::PreferOrdered,
-            )
+            .new_custom_private_route(PrivateSpec {
+                crypto_kinds: vec![CRYPTO_KIND_VLD0],
+                stability: Stability::LowLatency,
+                sequencing: Sequencing::PreferOrdered,
+                ..Default::default()
+            })
             .await
             .map_err(|e| MarketError::Network(format!("Failed to create broadcast route: {e}")))?;
 
@@ -163,12 +164,12 @@ impl AuctionCoordinator {
                 let should_refresh_route =
                     !broadcast_route_ready || tick_count.is_multiple_of(12) || mpc_just_finished;
                 if should_refresh_route {
-                    if monitor_self.mpc.has_active_auctions().await {
-                        debug!(
-                            "Skipping broadcast route refresh at tick {} while MPC is active",
-                            tick_count
-                        );
-                    } else {
+                    // NOTE: keepalive must NOT be suppressed during MPC.
+                    // All parties reuse the broadcast route for MPC traffic;
+                    // if the keepalive stops refreshing it, the route dies
+                    // after ~60-90s, killing long-running MPC sessions
+                    // (e.g., 15-party MASCOT takes ~160s).
+                    {
                         if mpc_just_finished {
                             info!("MPC finished — forcing immediate broadcast route refresh");
                         }

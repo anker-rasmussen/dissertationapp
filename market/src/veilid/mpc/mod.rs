@@ -265,7 +265,8 @@ impl MpcTunnelProxy {
         }
     }
 
-    /// Start the tunnel proxy: spawn one outgoing TCP listener per peer party.
+    /// Start the tunnel proxy: spawn one outgoing TCP listener per peer party
+    /// and a background route-refresh task.
     pub fn run(&self) -> MarketResult<()> {
         info!("Starting MPC TunnelProxy for Party {}", self.inner.party_id);
 
@@ -588,6 +589,9 @@ impl MpcTunnelProxy {
         let send_start = std::time::Instant::now();
         let mut backoff_ms = 50u64;
         for attempt in 0u32..MAX_SEND_RETRIES {
+            // Use 0.5.3 default routing context: Safe + Reliable + PreferOrdered.
+            // Previously overrode with LowLatency, but Reliable picks more
+            // stable relay nodes — better for long-running MPC sessions.
             let ctx = match self.inner.api.routing_context() {
                 Ok(c) => c,
                 Err(e) => {

@@ -96,7 +96,7 @@ pub const DEFAULT_MPC_PROTOCOL: &str = "mascot-party.x";
 // --- MPC Orchestrator ---
 
 /// Delay before first route collection check (allows late parties to publish).
-pub const MPC_ROUTE_ANNOUNCE_DELAY_SECS: u64 = 2;
+pub const MPC_ROUTE_ANNOUNCE_DELAY_SECS: u64 = 1;
 
 /// Maximum wait for all parties to publish MPC routes.
 pub const MPC_ROUTE_COLLECTION_TIMEOUT_SECS: u64 = 45;
@@ -105,16 +105,18 @@ pub const MPC_ROUTE_COLLECTION_TIMEOUT_SECS: u64 = 45;
 pub const MPC_READINESS_BARRIER_TIMEOUT_SECS: u64 = 120;
 
 /// Pause after barrier passes to let slower parties also pass.
-pub const MPC_POST_BARRIER_SETTLE_SECS: u64 = 2;
+pub const MPC_POST_BARRIER_SETTLE_SECS: u64 = 1;
 
 /// Poll interval inside the readiness barrier loop.
 pub const MPC_BARRIER_POLL_SECS: u64 = 1;
 
 /// Wait for peer route refresh announcements after barrier.
-pub const MPC_ROUTE_PROPAGATION_WAIT_SECS: u64 = 4;
+pub const MPC_ROUTE_PROPAGATION_WAIT_SECS: u64 = 1;
 
 /// Per-round timeout for MPC tunnel SYN/ACK (Ping round-trip).
 /// If a round fails, routes are restored and the next round begins.
+/// Reduced from 5s: the unified convergence loop already proved
+/// route liveness, so SYN/ACK is a quick final check.
 pub const MPC_SYN_ACK_ROUND_SECS: u64 = 5;
 
 /// Maximum SYN/ACK rounds before failing (5s × 6 = 30s total).
@@ -127,7 +129,7 @@ pub const MPC_OPEN_RESEND_INTERVAL_SECS: u64 = 5;
 pub const MPC_POST_ACCEPT_DELAY_MS: u64 = 20;
 
 /// Delay between releasing an imported route (ms).
-pub const MPC_ROUTE_RELEASE_DELAY_MS: u64 = 100;
+pub const MPC_ROUTE_RELEASE_DELAY_MS: u64 = 10;
 
 /// Interval for MPC data flow progress logging.
 pub const MPC_PROGRESS_LOG_INTERVAL_SECS: u64 = 30;

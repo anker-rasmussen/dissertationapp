@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use veilid_core::{
-    KeyPair, PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, SafetySpec, Sequencing,
-    Stability, Target, VeilidAPI, CRYPTO_KIND_VLD0,
+    KeyPair, PrivateSpec, PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, SafetySpec,
+    Sequencing, Stability, Target, VeilidAPI, CRYPTO_KIND_VLD0,
 };
 
 use super::bid_announcement::{AuctionMessage, MpcRouteEntry};
@@ -62,11 +62,12 @@ impl MpcRouteManager {
         // (Reliable constrains which nodes can serve as hops).
         let route_blob = self
             .api
-            .new_custom_private_route(
-                &[CRYPTO_KIND_VLD0],
-                Stability::LowLatency,
-                Sequencing::PreferOrdered,
-            )
+            .new_custom_private_route(PrivateSpec {
+                crypto_kinds: vec![CRYPTO_KIND_VLD0],
+                stability: Stability::LowLatency,
+                sequencing: Sequencing::PreferOrdered,
+                ..Default::default()
+            })
             .await
             .map_err(|e| MarketError::Network(format!("Failed to create route: {e}")))?;
 
@@ -132,6 +133,9 @@ impl MpcRouteManager {
     /// Import each peer's route blob, send `data` via `app_call` for confirmed
     /// delivery, then release the imported route.  Returns the number of
     /// successful sends.
+    ///
+    /// Sends are dispatched concurrently via `JoinSet` to avoid O(N) sequential
+    /// round-trips (each `app_call` can take up to the RPC timeout).
     async fn broadcast_via_peer_routes(
         &self,
         data: &[u8],
@@ -148,29 +152,47 @@ impl MpcRouteManager {
                 sequencing: Sequencing::PreferOrdered,
             }))?;
 
-        let mut sent_count = 0;
+        let mut join_set = tokio::task::JoinSet::new();
         for (node_id, blob) in peer_route_blobs {
-            match self.api.import_remote_private_route(blob.clone()) {
+            let api = self.api.clone();
+            let rc = routing_context.clone();
+            let data = data.to_vec();
+            let node_id = node_id.clone();
+            let label = label.to_string();
+            match api.import_remote_private_route(blob.clone()) {
                 Ok(imported_route) => {
-                    match routing_context
-                        .app_call(Target::RouteId(imported_route.clone()), data.to_vec())
-                        .await
-                    {
-                        Ok(_) => {
-                            debug!("Sent {} to peer {}", label, node_id);
-                            sent_count += 1;
-                        }
-                        Err(e) => warn!("Failed to send {} to {}: {}", label, node_id, e),
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        crate::config::MPC_ROUTE_RELEASE_DELAY_MS,
-                    ))
-                    .await;
-                    let _ = self.api.release_private_route(imported_route);
+                    join_set.spawn(async move {
+                        let ok = match rc
+                            .app_call(Target::RouteId(imported_route.clone()), data)
+                            .await
+                        {
+                            Ok(_) => {
+                                debug!("Sent {} to peer {}", label, node_id);
+                                true
+                            }
+                            Err(e) => {
+                                warn!("Failed to send {} to {}: {}", label, node_id, e);
+                                false
+                            }
+                        };
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            crate::config::MPC_ROUTE_RELEASE_DELAY_MS,
+                        ))
+                        .await;
+                        let _ = api.release_private_route(imported_route);
+                        ok
+                    });
                 }
                 Err(e) => {
                     debug!("Failed to import route for {}: {}", node_id, e);
                 }
+            }
+        }
+
+        let mut sent_count = 0;
+        while let Some(result) = join_set.join_next().await {
+            if matches!(result, Ok(true)) {
+                sent_count += 1;
             }
         }
         Ok(sent_count)
@@ -423,7 +445,9 @@ impl MpcRouteManager {
     /// (potentially stale), this sends through the MPC routes collected
     /// during Phase 1 — these are known-good since route collection
     /// succeeded.
-    #[allow(clippy::significant_drop_tightening)]
+    ///
+    /// Sends are dispatched concurrently — the routes snapshot is taken
+    /// under the lock, then the lock is released before `app_call`s fire.
     pub async fn send_ready_via_mpc_routes(
         &self,
         listing_key: &RecordKey,
@@ -449,33 +473,58 @@ impl MpcRouteManager {
                 sequencing: Sequencing::PreferOrdered,
             }))?;
 
-        let routes = self.received_routes.lock().await;
-        let mut sent = 0usize;
-        for (pubkey, route_id) in routes.iter() {
-            if pubkey == my_pubkey {
-                continue; // Don't send to self
-            }
-            match routing_context
-                .app_call(Target::RouteId(route_id.clone()), data.clone())
-                .await
-            {
-                Ok(response) => {
-                    sent += 1;
-                    // Parse ack: the responder's own MpcReady echoed back.
-                    // A single round-trip registers BOTH parties as ready.
-                    if let Ok(AuctionMessage::MpcReady {
-                        party_pubkey: ack_pk,
-                        num_parties: ack_np,
-                        timestamp: ack_ts,
-                        ..
-                    }) = AuctionMessage::from_bytes(&response)
-                    {
-                        if self.register_ready(ack_pk, ack_np, ack_ts).await {
-                            info!("MpcReady ack: registered peer {} as ready", pubkey);
+        // Snapshot routes under the lock, then release it before sending.
+        let route_snapshot: Vec<(PublicKey, RouteId)> = {
+            let routes = self.received_routes.lock().await;
+            routes
+                .iter()
+                .filter(|(pk, _)| *pk != my_pubkey)
+                .map(|(pk, rid)| (pk.clone(), rid.clone()))
+                .collect()
+        };
+
+        let ready_parties = self.ready_parties.clone();
+        let mut join_set = tokio::task::JoinSet::new();
+        for (pubkey, route_id) in route_snapshot {
+            let rc = routing_context.clone();
+            let data = data.clone();
+            let ready_parties = ready_parties.clone();
+            join_set.spawn(async move {
+                match rc
+                    .app_call(Target::RouteId(route_id), data)
+                    .await
+                {
+                    Ok(response) => {
+                        // Parse ack: the responder's own MpcReady echoed back.
+                        // A single round-trip registers BOTH parties as ready.
+                        if let Ok(AuctionMessage::MpcReady {
+                            party_pubkey: ack_pk,
+                            num_parties: ack_np,
+                            timestamp: ack_ts,
+                            ..
+                        }) = AuctionMessage::from_bytes(&response)
+                        {
+                            let mut map = ready_parties.lock().await;
+                            let is_new = !map.contains_key(&ack_pk);
+                            if is_new {
+                                info!("MpcReady ack: registered peer {} as ready", pubkey);
+                            }
+                            map.insert(ack_pk, (ack_np, ack_ts));
                         }
+                        true
+                    }
+                    Err(e) => {
+                        warn!("Failed to send MpcReady via MPC route to {}: {}", pubkey, e);
+                        false
                     }
                 }
-                Err(e) => warn!("Failed to send MpcReady via MPC route to {}: {}", pubkey, e),
+            });
+        }
+
+        let mut sent = 0usize;
+        while let Some(result) = join_set.join_next().await {
+            if matches!(result, Ok(true)) {
+                sent += 1;
             }
         }
         Ok(sent)
