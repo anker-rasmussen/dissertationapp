@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use veilid_core::{
-    KeyPair, PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, SafetySpec, Sequencing,
-    Stability, Target, VeilidAPI, CRYPTO_KIND_VLD0,
+    KeyPair, PrivateSpec, PublicKey, RecordKey, RouteBlob, RouteId, SafetySelection, SafetySpec,
+    Sequencing, Stability, Target, VeilidAPI, CRYPTO_KIND_VLD0,
 };
 
 use super::bid_announcement::{AuctionMessage, MpcRouteEntry};
@@ -62,11 +62,12 @@ impl MpcRouteManager {
         // (Reliable constrains which nodes can serve as hops).
         let route_blob = self
             .api
-            .new_custom_private_route(
-                &[CRYPTO_KIND_VLD0],
-                Stability::LowLatency,
-                Sequencing::PreferOrdered,
-            )
+            .new_custom_private_route(PrivateSpec {
+                crypto_kinds: vec![CRYPTO_KIND_VLD0],
+                stability: Stability::LowLatency,
+                sequencing: Sequencing::PreferOrdered,
+                ..Default::default()
+            })
             .await
             .map_err(|e| MarketError::Network(format!("Failed to create route: {e}")))?;
 

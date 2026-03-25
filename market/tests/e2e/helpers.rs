@@ -32,13 +32,39 @@ pub fn veilid_repo_path() -> PathBuf {
 }
 
 /// Path to libipspoof.so for IP translation in devnet.
+/// Prefers cargo-built `libveilid_ipspoof.so`, falls back to legacy location.
 pub fn libipspoof_path() -> PathBuf {
+    let cargo_built = veilid_repo_path().join("target/release/libveilid_ipspoof.so");
+    if cargo_built.exists() {
+        return cargo_built;
+    }
     veilid_repo_path().join(".devcontainer/scripts/libipspoof.so")
 }
 
-/// Path to docker-compose file for devnet.
-fn docker_compose_path() -> PathBuf {
-    veilid_repo_path().join(".devcontainer/compose/docker-compose.dev.yml")
+/// Find the `veilid-playground` binary.
+fn find_playground_binary() -> Option<PathBuf> {
+    let release = veilid_repo_path().join("target/release/veilid-playground");
+    if release.exists() {
+        return Some(release);
+    }
+    let debug = veilid_repo_path().join("target/debug/veilid-playground");
+    if debug.exists() {
+        return Some(debug);
+    }
+    // Check PATH
+    let output = Command::new("which")
+        .arg("veilid-playground")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    None
 }
 
 /// Check if running in fast mode (persistent devnet).
@@ -46,11 +72,15 @@ fn is_fast_mode() -> bool {
     std::env::var("E2E_FAST_MODE").is_ok()
 }
 
+const PLAYGROUND_DATA_DIR: &str = "/tmp/veilid-playground";
+const DEVNET_NODE_COUNT: u16 = 20;
+
 // ── DevnetManager ────────────────────────────────────────────────────
 
 /// Manages the Veilid devnet lifecycle for E2E tests.
+/// Uses `veilid-playground` to launch devnet nodes as local processes.
 pub struct DevnetManager {
-    compose_path: PathBuf,
+    child: Option<std::process::Child>,
     started: bool,
     fast_mode: bool,
     /// True if we started the devnet ourselves (vs found it pre-existing).
@@ -65,7 +95,7 @@ impl DevnetManager {
             eprintln!("[E2E] Fast mode enabled - reusing persistent devnet");
         }
         Self {
-            compose_path: docker_compose_path(),
+            child: None,
             started: false,
             fast_mode,
             owns_devnet: false,
@@ -73,36 +103,47 @@ impl DevnetManager {
     }
 
     pub fn infrastructure_available(&self) -> bool {
-        self.compose_path.exists() && libipspoof_path().exists()
+        find_playground_binary().is_some() && libipspoof_path().exists()
+    }
+
+    fn kill_existing_processes() {
+        let _ = Command::new("pkill")
+            .args(["-f", "veilid-playground.*start"])
+            .status();
+        let _ = Command::new("pkill")
+            .args(["-f", "veilid-server.*subnode-index"])
+            .status();
     }
 
     fn ensure_stopped(&self) -> MarketResult<()> {
         eprintln!("[E2E] Ensuring devnet is stopped before starting...");
-        let output = Command::new("docker")
-            .args([
-                "compose",
-                "-f",
-                self.compose_path.to_str().unwrap(),
-                "down",
-                "-v",
-                "--remove-orphans",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("[E2E] Note: docker compose down returned: {}", stderr);
+        Self::kill_existing_processes();
+        // Give processes time to exit cleanly
+        std::thread::sleep(Duration::from_secs(2));
+        // Clean data dir for fresh routing tables
+        let data_dir = PathBuf::from(PLAYGROUND_DATA_DIR);
+        if data_dir.exists() {
+            let _ = std::fs::remove_dir_all(&data_dir);
         }
         Ok(())
     }
 
     pub fn start(&mut self) -> MarketResult<()> {
         if !self.infrastructure_available() {
+            let binary_status = if find_playground_binary().is_some() {
+                "found"
+            } else {
+                "NOT found"
+            };
+            let ipspoof_status = if libipspoof_path().exists() {
+                "found"
+            } else {
+                "NOT found"
+            };
             return Err(MarketError::Config(format!(
-                "Devnet infrastructure not found. Expected:\n  - {}\n  - {}",
-                self.compose_path.display(),
+                "Devnet infrastructure not found.\n  \
+                 - veilid-playground: {binary_status}\n  \
+                 - libipspoof: {ipspoof_status} (at {})",
                 libipspoof_path().display()
             )));
         }
@@ -112,131 +153,63 @@ impl DevnetManager {
             return Ok(());
         }
 
-        // Always restart with clean data — routing tables degrade after
-        // heavy MPC traffic, causing route death spirals in subsequent tests.
+        // Always restart the devnet for a fresh routing table.  Reusing a
+        // devnet from a previous test leaves stale market-node entries in
+        // the routing tables, causing route delivery failures and timeouts.
         self.ensure_stopped()?;
-        eprintln!("[E2E] Starting devnet...");
+        eprintln!("[E2E] Starting devnet via veilid-playground...");
 
-        let output = Command::new("docker")
+        let binary = find_playground_binary().expect("already checked");
+        let ipspoof = libipspoof_path();
+
+        let child = Command::new(&binary)
             .args([
-                "compose",
-                "-f",
-                self.compose_path.to_str().unwrap(),
-                "up",
-                "-d",
+                "start",
+                &DEVNET_NODE_COUNT.to_string(),
+                "--ipspoof",
+                ipspoof.to_str().unwrap(),
             ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                MarketError::Process(format!("Failed to start veilid-playground: {}", e))
+            })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(MarketError::Process(format!(
-                "Failed to start devnet: {}",
-                stderr
-            )));
-        }
-
+        eprintln!("[E2E] Playground started (pid={})", child.id());
+        self.child = Some(child);
         self.started = true;
         self.owns_devnet = true;
-        eprintln!("[E2E] Devnet containers started");
         Ok(())
     }
 
-    fn is_devnet_running(&self) -> bool {
-        let output = Command::new("docker")
-            .args([
-                "compose",
-                "-f",
-                self.compose_path.to_str().unwrap(),
-                "ps",
-                "--format",
-                "{{.Service}}",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout.lines().count() >= 1
-            }
-            Err(_) => false,
-        }
-    }
-
     pub fn wait_for_health(&self, timeout_secs: u64) -> MarketResult<()> {
-        if self.fast_mode {
-            eprintln!("[E2E] Fast mode: checking port reachability...");
-            let start = std::time::Instant::now();
-            loop {
-                if self.check_all_nodes_reachable() {
-                    eprintln!("[E2E] All devnet ports reachable!");
-                    return Ok(());
-                }
-                if start.elapsed().as_secs() > timeout_secs {
-                    return Err(MarketError::Timeout(format!(
-                        "Devnet ports not reachable within {} seconds",
-                        timeout_secs
-                    )));
-                }
-                std::thread::sleep(Duration::from_secs(2));
-            }
-        }
-        eprintln!("[E2E] Waiting for all 20 devnet nodes to be healthy...");
+        eprintln!(
+            "[E2E] Waiting for {} devnet nodes to become reachable...",
+            DEVNET_NODE_COUNT
+        );
         let start = std::time::Instant::now();
         loop {
-            let output = Command::new("docker")
-                .args([
-                    "compose",
-                    "-f",
-                    self.compose_path.to_str().unwrap(),
-                    "ps",
-                    "--format",
-                    "{{.Service}}\t{{.Health}}",
-                ])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()?;
-
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let healthy_count = stdout
-                    .lines()
-                    .filter(|line| line.contains("healthy"))
-                    .count();
-
-                eprintln!("[E2E] Health check: {}/20 nodes healthy", healthy_count);
-
-                if healthy_count >= 20 && self.check_all_nodes_reachable() {
-                    eprintln!("[E2E] All devnet nodes are healthy and reachable!");
-                    return Ok(());
-                }
+            if self.check_all_nodes_reachable() {
+                eprintln!("[E2E] All devnet nodes reachable!");
+                return Ok(());
             }
-
             if start.elapsed().as_secs() > timeout_secs {
-                let _ = Command::new("docker")
-                    .args(["compose", "-f", self.compose_path.to_str().unwrap(), "ps"])
-                    .status();
                 return Err(MarketError::Timeout(format!(
-                    "Devnet failed to become healthy within {} seconds",
+                    "Devnet not reachable within {} seconds",
                     timeout_secs
                 )));
             }
-
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_secs(2));
         }
     }
 
     fn check_all_nodes_reachable(&self) -> bool {
-        let ports: Vec<u16> = (5150..=5169).collect();
-        for port in ports {
+        for port in 5150..5150 + DEVNET_NODE_COUNT {
             let addr = format!("127.0.0.1:{}", port);
             if std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_secs(1))
                 .is_err()
             {
-                eprintln!("[E2E] Port {} not yet reachable", port);
                 return false;
             }
         }
@@ -255,25 +228,26 @@ impl DevnetManager {
             return Ok(());
         }
         eprintln!("[E2E] Stopping devnet...");
-        let output = Command::new("docker")
-            .args([
-                "compose",
-                "-f",
-                self.compose_path.to_str().unwrap(),
-                "down",
-                "-v",
-                "--remove-orphans",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("[E2E] Warning: Failed to stop devnet cleanly: {}", stderr);
-        } else {
-            eprintln!("[E2E] Devnet stopped and cleaned up");
+        // Send SIGTERM to the playground process (it cleans up children)
+        if let Some(ref child) = self.child {
+            let pid = child.id().to_string();
+            let _ = Command::new("kill").args(["-TERM", &pid]).status();
         }
+
+        // Wait for graceful shutdown, then force-kill stragglers
+        std::thread::sleep(Duration::from_secs(3));
+        Self::kill_existing_processes();
+
+        // Reap child process
+        if let Some(ref mut child) = self.child {
+            let _ = child.wait();
+        }
+
+        // Clean up data dir
+        let _ = std::fs::remove_dir_all(PLAYGROUND_DATA_DIR);
+
+        eprintln!("[E2E] Devnet stopped and cleaned up");
         self.started = false;
         Ok(())
     }
@@ -650,7 +624,7 @@ pub fn setup_e2e_environment() -> MarketResult<DevnetManager> {
     }
 
     devnet.start()?;
-    devnet.wait_for_health(60)?;
+    devnet.wait_for_health(90)?;
     Ok(devnet)
 }
 
