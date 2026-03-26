@@ -318,8 +318,9 @@ pub(crate) struct MpcPerfMetrics {
 pub(crate) fn parse_mpc_stderr_metrics(stderr: &str) -> MpcPerfMetrics {
     let mut m = MpcPerfMetrics::default();
     for line in stderr.lines() {
-        if let Some(rest) = line.strip_prefix("Time = ") {
-            if let Some(secs_str) = rest.strip_suffix(" seconds") {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Time = ") {
+            if let Some(secs_str) = rest.strip_suffix("seconds") {
                 m.time_secs = secs_str.trim().parse().ok();
             }
         }

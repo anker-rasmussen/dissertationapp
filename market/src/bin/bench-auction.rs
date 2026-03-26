@@ -784,9 +784,36 @@ async fn run_auction_iteration(
         eprintln!("[bench] FAILURE: Winner did not receive decryption key within 600s");
     }
 
-    // Parse BENCH: lines from seller's stderr
-    let seller_lines = participants[0].take_stderr_lines();
-    let metrics = parse_bench_lines(&seller_lines);
+    // Parse BENCH: lines from ALL participants, not just seller.
+    // MPC wall time = MAX across all parties (last to finish defines true completion).
+    // Tunnel bytes = SUM across all parties (total network cost).
+    // Route exchange + protocol metadata come from the seller (party 0).
+    let seller_metrics = parse_bench_lines(&participants[0].take_stderr_lines());
+    let mut mpc_wall_max = seller_metrics.mpc_wall_secs;
+    let mut mpc_self_max = seller_metrics.mpc_self_secs;
+    let mut tunnel_sent_total = seller_metrics.tunnel_bytes_sent;
+    let mut tunnel_recv_total = seller_metrics.tunnel_bytes_recv;
+    for p in participants.iter().skip(1) {
+        let m = parse_bench_lines(&p.take_stderr_lines());
+        if m.mpc_wall_secs > mpc_wall_max {
+            mpc_wall_max = m.mpc_wall_secs;
+        }
+        if m.mpc_self_secs > mpc_self_max {
+            mpc_self_max = m.mpc_self_secs;
+        }
+        tunnel_sent_total += m.tunnel_bytes_sent;
+        tunnel_recv_total += m.tunnel_bytes_recv;
+    }
+    let metrics = BenchMetrics {
+        route_exchange_secs: seller_metrics.route_exchange_secs,
+        mpc_wall_secs: mpc_wall_max,
+        mpc_self_secs: mpc_self_max,
+        data_sent_mb: seller_metrics.data_sent_mb,
+        rounds: seller_metrics.rounds,
+        global_data_mb: seller_metrics.global_data_mb,
+        tunnel_bytes_sent: tunnel_sent_total,
+        tunnel_bytes_recv: tunnel_recv_total,
+    };
 
     // Shutdown all participants
     for p in &mut participants {

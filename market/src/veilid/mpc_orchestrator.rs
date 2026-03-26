@@ -802,7 +802,7 @@ impl MpcOrchestrator {
         let rounds = perf.rounds.unwrap_or(0);
         let global_mb = perf.global_data_mb.map_or(-1.0, |v| v);
         info!(
-            "BENCH: {{\"event\":\"mpc_complete\",\"mpc_wall_secs\":{mpc_wall_secs:.2},\
+            "BENCH: {{\"event\":\"mpc_complete\",\"party_id\":{party_id},\"mpc_wall_secs\":{mpc_wall_secs:.2},\
              \"mpc_self_secs\":{self_secs:.2},\"data_sent_mb\":{data_mb:.3},\
              \"rounds\":{rounds},\"global_data_mb\":{global_mb:.3},\
              \"tunnel_bytes_sent\":{bytes_sent},\"tunnel_bytes_recv\":{bytes_recv}}}"
