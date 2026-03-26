@@ -154,7 +154,7 @@ impl MpcTunnelProxy {
             let signed_data = self.sign_mpc_message(&msg)?;
             let label = format!("Data P{my_pid}→P{target_pid} s{stream_id} seq{seq}");
 
-            // Acquire pipeline slot, then send concurrently
+            // Acquire pipeline slot, then send concurrently.
             let Ok(permit) = Arc::clone(&send_sem).acquire_owned().await else {
                 break; // semaphore closed — shutting down
             };

@@ -860,7 +860,7 @@ async fn run_auction_iteration(
     // Wait for routes
     eprintln!("[bench] Waiting for routes...");
     for p in &mut participants {
-        p.wait_for_routes(30).await?;
+        p.wait_for_routes(120).await?;
     }
     eprintln!("[bench] All routes ready");
 
@@ -891,9 +891,11 @@ async fn run_auction_iteration(
     // The highest bidder is the last one (highest amount)
     let winner_idx = parties - 1; // index into participants[]
 
-    // Poll winner for decryption key
-    eprintln!("[bench] Polling for MPC + post-MPC verification (max 600s)...");
-    let winner_key = poll_decryption_key(&mut participants[winner_idx], &listing_key, 600).await;
+    // Poll winner for decryption key.
+    // 1800s (30min) accommodates large party counts: 15-party MASCOT needs
+    // ~300s for MP-SPDZ connection setup over Veilid + ~200s MPC computation.
+    eprintln!("[bench] Polling for MPC + post-MPC verification (max 1800s)...");
+    let winner_key = poll_decryption_key(&mut participants[winner_idx], &listing_key, 1800).await;
 
     let total_secs = wall_start.elapsed().as_secs_f64();
 

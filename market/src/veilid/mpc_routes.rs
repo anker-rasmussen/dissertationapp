@@ -490,10 +490,7 @@ impl MpcRouteManager {
             let data = data.clone();
             let ready_parties = ready_parties.clone();
             join_set.spawn(async move {
-                match rc
-                    .app_call(Target::RouteId(route_id), data)
-                    .await
-                {
+                match rc.app_call(Target::RouteId(route_id), data).await {
                     Ok(response) => {
                         // Parse ack: the responder's own MpcReady echoed back.
                         // A single round-trip registers BOTH parties as ready.

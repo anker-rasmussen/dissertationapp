@@ -148,6 +148,8 @@ pub(super) const SEND_PIPELINE_DEPTH: u32 = 8;
 
 pub(super) struct MpcTunnelProxyInner {
     pub(super) api: VeilidAPI,
+    /// Cached routing context — avoids creating a new one per send.
+    pub(super) routing_ctx: veilid_core::RoutingContext,
     pub(super) party_id: usize,
     /// Session identifier (listing key string) for MPC envelope tagging.
     pub(super) session_id: String,
@@ -235,9 +237,17 @@ impl MpcTunnelProxy {
             config.port_slot, signer_to_party.len(), config.live_routes.is_some()
         );
 
+        // Cache routing context — creating one per send is expensive.
+        #[allow(clippy::expect_used)]
+        let routing_ctx = config
+            .api
+            .routing_context()
+            .expect("VeilidAPI unavailable during tunnel proxy creation");
+
         Self {
             inner: Arc::new(MpcTunnelProxyInner {
                 api: config.api,
+                routing_ctx,
                 party_id: config.party_id,
                 session_id: config.session_id,
                 party_routes: Mutex::new(config.party_routes),
@@ -322,6 +332,22 @@ impl MpcTunnelProxy {
             peers.len(),
             round_timeout.as_secs(),
         );
+
+        // Reimport all peer route blobs to refresh Veilid's route cache.
+        // The blobs were imported during convergence but handles may have
+        // expired from Veilid's LRU by the time SYN/ACK starts.
+        {
+            let blobs = self.inner.party_blobs.lock().await;
+            let mut routes = self.inner.party_routes.lock().await;
+            for (&pid, blob) in blobs.iter() {
+                if pid == my_pid {
+                    continue;
+                }
+                if let Ok(new_route) = self.inner.api.import_remote_private_route(blob.clone()) {
+                    routes.insert(pid, new_route);
+                }
+            }
+        }
 
         for round in 0..max_rounds {
             // Check which peers haven't responded yet.
@@ -588,19 +614,8 @@ impl MpcTunnelProxy {
     ) -> Result<(), MarketError> {
         let send_start = std::time::Instant::now();
         let mut backoff_ms = 50u64;
+        let ctx = &self.inner.routing_ctx;
         for attempt in 0u32..MAX_SEND_RETRIES {
-            // Use 0.5.3 default routing context: Safe + Reliable + PreferOrdered.
-            // Previously overrode with LowLatency, but Reliable picks more
-            // stable relay nodes — better for long-running MPC sessions.
-            let ctx = match self.inner.api.routing_context() {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("{label} attempt {attempt}: no routing context: {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(1000);
-                    continue;
-                }
-            };
             let Some(route) = self.get_party_route(target_pid).await else {
                 warn!("{label} attempt {attempt}: no route for Party {target_pid}");
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;

@@ -511,6 +511,7 @@ impl MpcOrchestrator {
     /// finished one phase, the fastest party's routes had expired, requiring
     /// yet another refresh round.
     #[tracing::instrument(skip_all, fields(listing_key = %listing_key))]
+    #[allow(clippy::too_many_lines)]
     pub async fn exchange_mpc_routes(
         &self,
         listing_key: &RecordKey,
@@ -520,7 +521,10 @@ impl MpcOrchestrator {
         broadcast_route: Option<&(RouteId, Vec<u8>)>,
         bid_record_keys: &HashMap<PublicKey, RecordKey>,
     ) -> MarketResult<HashMap<usize, RouteId>> {
-        info!(num_parties = bidders.len(), "Exchanging MPC routes (unified convergence)");
+        info!(
+            num_parties = bidders.len(),
+            "Exchanging MPC routes (unified convergence)"
+        );
 
         // Get existing route manager or create a new one
         let key = listing_key.clone();
@@ -590,15 +594,15 @@ impl MpcOrchestrator {
         // Register self as ready immediately.
         #[allow(clippy::cast_possible_truncation)]
         let num_parties = bidders.len() as u32;
-        {
-            let mgr = route_manager.lock().await;
-            mgr.register_ready(
+        route_manager
+            .lock()
+            .await
+            .register_ready(
                 bidders[my_party_id].clone(),
                 num_parties,
                 crate::config::now_unix(),
             )
             .await;
-        }
 
         // ── Unified convergence loop ────────────────────────────────────
         // Combines route collection + readiness barrier + liveness check.
@@ -628,9 +632,7 @@ impl MpcOrchestrator {
             };
 
             let expected = bidders.len();
-            info!(
-                "Convergence: {have_routes}/{expected} routes, {have_ready}/{expected} ready",
-            );
+            info!("Convergence: {have_routes}/{expected} routes, {have_ready}/{expected} ready",);
 
             if have_routes >= expected && have_ready >= expected {
                 info!("All parties converged — routes collected and ready");
@@ -658,47 +660,50 @@ impl MpcOrchestrator {
             tick = tick.wrapping_add(1);
 
             // Every tick: poll DHT for missing peer routes.
-            self.poll_dht_for_peer_routes(
-                &route_manager,
-                bidders,
-                bid_record_keys,
-                true,
-            )
-            .await;
+            self.poll_dht_for_peer_routes(&route_manager, bidders, bid_record_keys, true)
+                .await;
 
             // Every tick: send MpcReady via collected MPC routes.
             // This serves as both readiness signal AND liveness ping —
             // the ack carries the responder's readiness back.
-            {
-                let mgr = route_manager.lock().await;
-                let _ = mgr
-                    .send_ready_via_mpc_routes(listing_key, my_pubkey, num_parties, &self.signing_key)
-                    .await;
-            }
+            drop(
+                route_manager
+                    .lock()
+                    .await
+                    .send_ready_via_mpc_routes(
+                        listing_key,
+                        my_pubkey,
+                        num_parties,
+                        &self.signing_key,
+                    )
+                    .await,
+            );
 
             // Every 3rd tick: re-broadcast route via broadcast routes
             // (reaches peers who haven't collected our MPC route yet).
             if tick.is_multiple_of(3) && !peer_route_blobs.is_empty() {
                 let mgr = route_manager.lock().await;
-                let _ = mgr
-                    .broadcast_route_announcement(
+                drop(
+                    mgr.broadcast_route_announcement(
                         listing_key,
                         my_pubkey,
                         peer_route_blobs,
                         &self.signing_key,
                     )
-                    .await;
+                    .await,
+                );
                 // Also send readiness via broadcast routes for peers
                 // still in early collection (haven't imported our MPC route).
-                let _ = mgr
-                    .broadcast_mpc_ready(
+                drop(
+                    mgr.broadcast_mpc_ready(
                         listing_key,
                         my_pubkey,
                         num_parties,
                         peer_route_blobs,
                         &self.signing_key,
                     )
-                    .await;
+                    .await,
+                );
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(
@@ -714,10 +719,7 @@ impl MpcOrchestrator {
             mgr.assemble_party_routes(bidders).await?
         };
 
-        info!(
-            "Route exchange complete: {} routes assembled",
-            routes.len()
-        );
+        info!("Route exchange complete: {} routes assembled", routes.len());
 
         Ok(routes)
     }
