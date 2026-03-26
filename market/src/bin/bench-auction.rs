@@ -27,7 +27,6 @@ struct BenchConfig {
     warmup_secs: u64,
 }
 
-
 impl BenchConfig {
     fn from_env() -> Self {
         Self {
@@ -655,8 +654,7 @@ async fn main() -> anyhow::Result<()> {
                         let _ = child.kill();
                         let _ = child.wait();
                     }
-                    playground_child =
-                        Some(playground_restart(devnet_size, cfg.warmup_secs)?);
+                    playground_child = Some(playground_restart(devnet_size, cfg.warmup_secs)?);
                 }
 
                 eprintln!(
