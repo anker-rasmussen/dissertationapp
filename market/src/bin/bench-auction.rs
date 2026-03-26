@@ -24,31 +24,9 @@ struct BenchConfig {
     auction_duration_secs: u64,
     out_path: PathBuf,
     skip_devnet_restart: bool,
-    devnet_mode: DevnetMode,
     warmup_secs: u64,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum DevnetMode {
-    Docker,
-    Playground,
-}
-
-impl DevnetMode {
-    fn from_env() -> Self {
-        match std::env::var("BENCH_DEVNET_MODE").as_deref() {
-            Ok("playground") => Self::Playground,
-            _ => Self::Docker,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Docker => "docker",
-            Self::Playground => "playground",
-        }
-    }
-}
 
 impl BenchConfig {
     fn from_env() -> Self {
@@ -62,8 +40,7 @@ impl BenchConfig {
                     .unwrap_or_else(|_| "bench-results/veilid_auction.csv".into()),
             ),
             skip_devnet_restart: std::env::var("BENCH_SKIP_DEVNET_RESTART").is_ok(),
-            devnet_mode: DevnetMode::from_env(),
-            warmup_secs: env_or("BENCH_WARMUP_SECS", 30),
+            warmup_secs: env_or("BENCH_WARMUP_SECS", 20),
         }
     }
 }
@@ -478,96 +455,6 @@ fn append_csv_row(
 
 // ── Devnet management ────────────────────────────────────────────────
 
-fn compose_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("veilid/.devcontainer/compose/docker-compose.dev.yml")
-}
-
-fn devnet_restart(desired_nodes: u32, warmup_secs: u64) -> anyhow::Result<()> {
-    let compose = compose_path();
-    let compose_str = compose.display().to_string();
-
-    eprintln!("[bench] Restarting devnet (desired size: {desired_nodes})...");
-
-    // Clean data dirs
-    for offset in 0..100 {
-        let dir = format!("/tmp/market-headless-{offset}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    // Also clean persistent data
-    if let Some(home) = dirs::home_dir() {
-        for entry in std::fs::read_dir(home.join(".local/share"))
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("smpc-auction-node-"))
-            {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
-        }
-    }
-
-    let status = Command::new("docker")
-        .args(["compose", "-f", &compose_str, "down", "-v"])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("docker compose down failed");
-    }
-
-    let status = Command::new("docker")
-        .args(["compose", "-f", &compose_str, "up", "-d"])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("docker compose up failed");
-    }
-
-    // Wait for healthy
-    eprintln!("[bench] Waiting for devnet to be healthy...");
-    let start = Instant::now();
-    loop {
-        let output = Command::new("docker")
-            .args(["compose", "-f", &compose_str, "ps"])
-            .output()?;
-        let ps_output = String::from_utf8_lossy(&output.stdout);
-        if ps_output.contains("healthy") {
-            break;
-        }
-        if start.elapsed() > Duration::from_secs(60) {
-            anyhow::bail!("Devnet did not become healthy within 60s");
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
-
-    // Stop nodes beyond the desired count (devnet always starts 20)
-    if desired_nodes < 20 {
-        eprintln!("[bench] Stopping nodes {desired_nodes}..19 to simulate smaller devnet...");
-        for idx in desired_nodes..20 {
-            let _ = Command::new("docker")
-                .args([
-                    "compose",
-                    "-f",
-                    &compose_str,
-                    "stop",
-                    &format!("veilid-dev-node-{idx}"),
-                ])
-                .status();
-        }
-    }
-
-    eprintln!("[bench] Devnet healthy ({desired_nodes} nodes). Warming up ({warmup_secs}s)...");
-    std::thread::sleep(Duration::from_secs(warmup_secs));
-
-    Ok(())
-}
-
 // ── Playground devnet management ─────────────────────────────────────
 
 /// Search paths for veilid workspace binaries: submodule (Repos/veilid inside
@@ -719,12 +606,11 @@ async fn main() -> anyhow::Result<()> {
 
     eprintln!("[bench] Veilid MPC Auction Benchmark");
     eprintln!(
-        "[bench] party_counts={:?}, devnet_sizes={:?}, iters={}, protocol={}, mode={}, warmup={}s, auction_duration={}s, out={}",
+        "[bench] party_counts={:?}, devnet_sizes={:?}, iters={}, protocol={}, warmup={}s, auction_duration={}s, out={}",
         cfg.party_counts,
         cfg.devnet_sizes,
         cfg.iters,
         mpc_protocol,
-        cfg.devnet_mode.label(),
         cfg.warmup_secs,
         cfg.auction_duration_secs,
         cfg.out_path.display()
@@ -765,19 +651,12 @@ async fn main() -> anyhow::Result<()> {
 
                 // Restart devnet before every iteration for clean routing state
                 if !cfg.skip_devnet_restart {
-                    match cfg.devnet_mode {
-                        DevnetMode::Docker => {
-                            devnet_restart(devnet_size, cfg.warmup_secs)?;
-                        }
-                        DevnetMode::Playground => {
-                            if let Some(ref mut child) = playground_child {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                            }
-                            playground_child =
-                                Some(playground_restart(devnet_size, cfg.warmup_secs)?);
-                        }
+                    if let Some(ref mut child) = playground_child {
+                        let _ = child.kill();
+                        let _ = child.wait();
                     }
+                    playground_child =
+                        Some(playground_restart(devnet_size, cfg.warmup_secs)?);
                 }
 
                 eprintln!(
