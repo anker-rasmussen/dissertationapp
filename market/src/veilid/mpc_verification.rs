@@ -107,8 +107,10 @@ impl MpcOrchestrator {
 
     /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style)
     ///
-    /// This method is constant-time in its control flow: all verification steps are
-    /// performed regardless of intermediate failures to prevent timing side-channels.
+    /// Steps 1-2 (local data lookup) may return early on mismatches.  Steps 3-4
+    /// (DHT fetch + commitment check) always execute together when step 2 passes.
+    /// The early returns are not a remote timing side-channel: Veilid `app_call`
+    /// round-trip variance (~50-2000ms) dominates local verification time (~µs).
     pub async fn verify_winner_reveal(
         &self,
         listing_key: &RecordKey,

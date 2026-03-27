@@ -70,11 +70,18 @@ fn parse_offset() -> u16 {
     for i in 0..args.len() {
         if args[i] == "--offset" {
             if let Some(val) = args.get(i + 1) {
-                return val.parse().expect("--offset must be a u16");
+                match val.parse() {
+                    Ok(v) => return v,
+                    Err(e) => {
+                        eprintln!("ERROR: --offset must be a u16: {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
         }
     }
-    panic!("Usage: market-headless --offset <u16>");
+    eprintln!("Usage: market-headless --offset <u16>");
+    std::process::exit(1);
 }
 
 fn init_logging_stderr() {
@@ -112,7 +119,10 @@ async fn main() {
     // Clean + create data dir
     let dir = data_dir(offset);
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("Failed to create data dir");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("ERROR: Failed to create data dir {}: {e}", dir.display());
+        std::process::exit(1);
+    }
 
     // Create + start Veilid node
     let market_config = config::MarketConfig {
@@ -163,12 +173,43 @@ async fn main() {
 
     // Build coordinator
     let node_state = node.state();
-    let node_id_str = node_state.node_ids.first().expect("Node should have an ID");
-    let my_node_id =
-        veilid_core::PublicKey::try_from(node_id_str.as_str()).expect("Invalid node ID");
+    let node_id_str = match node_state.node_ids.first() {
+        Some(id) => id,
+        None => {
+            emit_json(&TestResponse::Err {
+                message: "Node has no ID after attachment".into(),
+            });
+            std::process::exit(1);
+        }
+    };
+    let my_node_id = match veilid_core::PublicKey::try_from(node_id_str.as_str()) {
+        Ok(pk) => pk,
+        Err(e) => {
+            emit_json(&TestResponse::Err {
+                message: format!("Invalid node ID: {e}"),
+            });
+            std::process::exit(1);
+        }
+    };
 
-    let dht = node.dht_operations().expect("DHT not available");
-    let api = node.api().expect("API not available").clone();
+    let dht = match node.dht_operations() {
+        Some(d) => d,
+        None => {
+            emit_json(&TestResponse::Err {
+                message: "DHT not available".into(),
+            });
+            std::process::exit(1);
+        }
+    };
+    let api = match node.api() {
+        Some(a) => a.clone(),
+        None => {
+            emit_json(&TestResponse::Err {
+                message: "API not available".into(),
+            });
+            std::process::exit(1);
+        }
+    };
     let bid_storage = BidStorage::new();
     let shutdown = CancellationToken::new();
     let network_key = config::network_key();
@@ -221,8 +262,14 @@ async fn main() {
     // Command loop with signal handling
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("SIGTERM handler");
+    let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ERROR: Failed to install SIGTERM handler: {e}");
+            std::process::exit(1);
+        }
+    };
 
     loop {
         let line = tokio::select! {
@@ -278,12 +325,16 @@ async fn main() {
                 match result {
                     Ok(r) => {
                         // Retrieve the decryption key from the coordinator
-                        let dec_key = coordinator
-                            .get_decryption_key(
-                                &veilid_core::RecordKey::try_from(r.key.as_str())
-                                    .expect("valid key"),
-                            )
-                            .await;
+                        let listing_rk = match veilid_core::RecordKey::try_from(r.key.as_str()) {
+                            Ok(k) => k,
+                            Err(e) => {
+                                emit_json(&TestResponse::Err {
+                                    message: format!("Invalid listing key: {e}"),
+                                });
+                                continue;
+                            }
+                        };
+                        let dec_key = coordinator.get_decryption_key(&listing_rk).await;
                         emit_json(&TestResponse::Ok {
                             data: Some(serde_json::json!({
                                 "listing_key": r.key,
@@ -304,13 +355,17 @@ async fn main() {
                 let result = submit_bid(&app_state, &dht, &listing_key, amount).await;
                 match result {
                     Ok(_) => {
-                        let bid_key = app_state
-                            .bid_storage
-                            .get_bid_key(
-                                &veilid_core::RecordKey::try_from(listing_key.as_str())
-                                    .expect("valid key"),
-                            )
-                            .await;
+                        let listing_rk =
+                            match veilid_core::RecordKey::try_from(listing_key.as_str()) {
+                                Ok(k) => k,
+                                Err(e) => {
+                                    emit_json(&TestResponse::Err {
+                                        message: format!("Invalid listing key: {e}"),
+                                    });
+                                    continue;
+                                }
+                            };
+                        let bid_key = app_state.bid_storage.get_bid_key(&listing_rk).await;
                         emit_json(&TestResponse::Ok {
                             data: Some(serde_json::json!({
                                 "bid_key": bid_key.map(|k| k.to_string()),
