@@ -615,13 +615,6 @@ async fn main() -> anyhow::Result<()> {
         cfg.out_path.display()
     );
 
-    for &party_count in &cfg.party_counts {
-        if party_count < 3 {
-            eprintln!("[bench] Skipping N={party_count} (need >= 3: 1 seller + 2+ bidders)");
-            continue;
-        }
-    }
-
     // Load already-completed iterations so we can resume
     let completed = load_completed_iterations(&cfg.out_path, &mpc_protocol);
     if !completed.is_empty() {

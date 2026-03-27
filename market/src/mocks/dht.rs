@@ -303,7 +303,9 @@ impl DhtStore for MockDht {
             return Err(MarketError::Dht("MockDht: simulated delete failure".into()));
         }
 
-        self.inner.storage.write().await.remove(&key.to_string());
+        let key_str = key.to_string();
+        self.inner.storage.write().await.remove(&key_str);
+        self.inner.record_owners.write().await.remove(&key_str);
         Ok(())
     }
 }

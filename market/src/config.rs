@@ -205,7 +205,7 @@ pub struct MarketConfig {
     pub limit_over_attached: u32,
     /// Maximum seconds to wait for network attachment.
     pub max_attachment_wait_secs: u64,
-    /// Veilid RPC timeout in milliseconds (default: 10_000).
+    /// Veilid RPC timeout in milliseconds (default: 5_000).
     /// Controls how long app_call waits for a response before timing out.
     pub rpc_timeout_ms: u32,
     /// Override listen address for Veilid protocol sockets (e.g., "0.0.0.0" for tailnet).

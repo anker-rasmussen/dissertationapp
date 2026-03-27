@@ -80,20 +80,18 @@ pub async fn create_and_publish_listing(
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to ensure master registry: {e}")))?;
 
-        // Ensure seller has a catalog DHT record
+        // Ensure seller has a catalog, add listing, and register — all under one lock
+        // to prevent interleaving from concurrent tasks.
         let catalog_key = {
+            let signing_hex = coordinator.signing_pubkey_hex();
             let mut ops = coordinator.registry_ops().lock().await;
-            ops.get_or_create_seller_catalog(&seller.to_string())
-                .await
-                .map_err(|e| MarketError::Dht(format!("Failed to create seller catalog: {e}")))?
-        };
 
-        // Add listing to seller's own catalog
-        coordinator
-            .registry_ops()
-            .lock()
-            .await
-            .add_listing_to_catalog(CatalogEntry {
+            let catalog_key = ops
+                .get_or_create_seller_catalog(&seller.to_string())
+                .await
+                .map_err(|e| MarketError::Dht(format!("Failed to create seller catalog: {e}")))?;
+
+            ops.add_listing_to_catalog(CatalogEntry {
                 listing_key: record.key.to_string(),
                 title: title.to_string(),
                 reserve_price,
@@ -102,17 +100,16 @@ pub async fn create_and_publish_listing(
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to add listing to catalog: {e}")))?;
 
-        // Register seller directly in the master registry (shared keypair)
-        {
-            let signing_hex = coordinator.signing_pubkey_hex();
-            let mut ops = coordinator.registry_ops().lock().await;
             if let Err(e) = ops
-                .register_seller(&seller.to_string(), &catalog_key.to_string(), &signing_hex)
+                .register_seller(&seller.to_string(), &record.key.to_string(), &signing_hex)
                 .await
             {
                 tracing::warn!("Failed to register seller in master registry: {}", e);
             }
-        }
+            drop(ops);
+
+            catalog_key
+        };
 
         // Broadcast registry key AFTER DHT writes complete, so peers can read
         // the populated registry immediately upon learning the key
