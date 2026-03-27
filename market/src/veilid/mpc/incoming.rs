@@ -246,8 +246,17 @@ impl MpcTunnelProxy {
             );
             let (mut rd, wr) = stream.into_split();
 
+            // Atomic check-and-insert: another concurrent Open may have won the
+            // race while we were connecting.  Drop the duplicate connection.
             let session_count = {
                 let mut sessions = self.inner.sessions.lock().await;
+                if sessions.contains_key(&session_key) {
+                    warn!(
+                        "Open: race detected — session ({}, {}) already inserted by concurrent Open, dropping duplicate TCP connection",
+                        source_party_id, stream_id
+                    );
+                    return Ok(());
+                }
                 sessions.insert(session_key, wr);
                 sessions.len()
             };
@@ -312,7 +321,32 @@ impl MpcTunnelProxy {
                 let reply_sem = Arc::new(Semaphore::new(SEND_PIPELINE_DEPTH as usize));
                 loop {
                     let n = match rd.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
+                        Ok(0) => {
+                            info!(
+                                "Response relay: local MP-SPDZ closed connection for ({}, {})",
+                                target_pid, stream_id
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            error!(
+                                "Response relay: TCP read error for ({}, {}): {} — \
+                                 sending Close to remote peer",
+                                target_pid, stream_id, e
+                            );
+                            // Notify remote peer so its MP-SPDZ doesn't hang
+                            let close_msg = MpcMessage::Close {
+                                source_party_id: my_pid,
+                                stream_id,
+                            };
+                            if let Ok(close_data) = proxy.sign_mpc_message(&close_msg) {
+                                let label = format!(
+                                    "Close (on error) P{my_pid}→P{target_pid} s{stream_id}"
+                                );
+                                let _ = proxy.send_reliable(target_pid, &close_data, &label).await;
+                            }
+                            break;
+                        }
                         Ok(n) => n,
                     };
 

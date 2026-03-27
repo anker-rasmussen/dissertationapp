@@ -94,7 +94,12 @@ impl MpcTunnelProxy {
         };
         let data = self.sign_mpc_message(&open_msg)?;
         let label = format!("Open to Party {target_pid} stream {stream_id}");
-        let _ = self.send_reliable(target_pid, &data, &label).await;
+        if let Err(e) = self.send_reliable(target_pid, &data, &label).await {
+            warn!(
+                "Initial Open send to Party {} stream {} failed: {} — re-sender will retry",
+                target_pid, stream_id, e
+            );
+        }
         info!("Open sent to Party {} stream {}", target_pid, stream_id);
 
         // Spawn background re-sender: re-send Open every 5s to handle lost messages.
