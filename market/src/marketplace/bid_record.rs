@@ -31,6 +31,12 @@ pub struct BidRecord {
 }
 
 impl BidRecord {
+    /// Returns true if the signing pubkey is set (not all-zeros).
+    /// A zero signing key indicates legacy data or missing authentication.
+    pub fn has_valid_signing_key(&self) -> bool {
+        self.signing_pubkey != [0u8; 32]
+    }
+
     /// Serialize to CBOR for DHT storage
     pub fn to_cbor(&self) -> Result<Vec<u8>, MarketError> {
         let mut data = Vec::new();
@@ -104,7 +110,13 @@ impl BidIndex {
             result.extend(non_seller_bids.into_iter().map(|b| b.bidder.clone()));
             result
         } else {
-            // No seller bid found, just sort all by pubkey
+            // No seller bid found — this violates the invariant that the seller's
+            // auto-bid is always present.  Party 0 will not be the seller, which
+            // breaks the MPC protocol assumption.  Log a warning for diagnostics.
+            tracing::warn!(
+                "sorted_bidders: seller {} has no bid in index — party 0 may be misassigned",
+                seller
+            );
             let mut all_bids: Vec<_> = self.bids.iter().collect();
             all_bids.sort_by(|a, b| a.bidder.cmp(&b.bidder));
             all_bids.into_iter().map(|b| b.bidder.clone()).collect()

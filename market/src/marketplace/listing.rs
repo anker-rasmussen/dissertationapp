@@ -55,8 +55,10 @@ pub struct Listing {
     /// AES-256-GCM nonce (12 bytes) - required for decryption
     pub content_nonce: ContentNonce,
 
-    /// Hex-encoded AES-256 key for decryption (sent to winner after auction)
-    /// The seller keeps this private and only reveals it to the auction winner
+    /// Hex-encoded AES-256 key for decryption (sent to winner after auction).
+    /// The seller keeps this private and only reveals it to the auction winner.
+    /// Skipped during serialization to prevent accidental key leakage to DHT.
+    #[serde(skip)]
     pub decryption_key: String,
 
     /// Reserve price (in atomic units) - seller automatically bids this amount
@@ -504,7 +506,11 @@ mod tests {
         assert_eq!(original.title, restored.title);
         assert_eq!(original.encrypted_content, restored.encrypted_content);
         assert_eq!(original.content_nonce, restored.content_nonce);
-        assert_eq!(original.decryption_key, restored.decryption_key);
+        // decryption_key is #[serde(skip)] — not serialized to prevent DHT leakage
+        assert!(
+            restored.decryption_key.is_empty(),
+            "decryption_key must not survive serialization round-trip"
+        );
         assert_eq!(original.reserve_price, restored.reserve_price);
         assert_eq!(original.auction_end, restored.auction_end);
         assert_eq!(original.created_at, restored.created_at);

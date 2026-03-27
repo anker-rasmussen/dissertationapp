@@ -31,19 +31,20 @@ pub struct Bid {
     /// Secret nonce used in commitment (revealed after auction ends)
     /// Only set when bid is revealed.  Skipped during serialization to
     /// prevent accidental leakage over the wire.
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub(crate) reveal_nonce: Option<[u8; 32]>,
 }
 
 impl Bid {
     /// Create a new sealed bid with commitment using default providers
     pub fn new(listing_key: RecordKey, bidder: PublicKey, amount: u64) -> Self {
+        use rand::rngs::OsRng;
         use rand::RngCore;
         use sha2::{Digest, Sha256};
         assert!(amount > 0, "Bid amount must be greater than zero");
 
         let mut nonce = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut nonce);
+        OsRng.fill_bytes(&mut nonce);
 
         let mut hasher = Sha256::new();
         hasher.update(amount.to_le_bytes());
