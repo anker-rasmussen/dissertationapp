@@ -212,8 +212,8 @@ impl AuctionCoordinator {
                 expired.sort_by(|(a, _), (b, _)| a.cmp(b));
 
                 for (key, listing) in expired {
-                    // Skip listings already being handled.
-                    if monitor_self.mpc.is_auction_active(&key).await {
+                    // Atomically check-and-mark: skip if already being handled.
+                    if !monitor_self.mpc.try_mark_auction_active(&key).await {
                         continue;
                     }
 
@@ -227,6 +227,7 @@ impl AuctionCoordinator {
                         );
                         monitor_self.logic.unwatch_listing(&key).await;
                         auction_retries.remove(&key);
+                        monitor_self.mpc.mark_auction_inactive(&key).await;
                         continue;
                     }
 
@@ -234,8 +235,6 @@ impl AuctionCoordinator {
                         "Auction deadline reached for listing '{}' (attempt {})",
                         listing.title, count
                     );
-
-                    monitor_self.mpc.mark_auction_active(&key).await;
 
                     match monitor_self
                         .handle_auction_end_wrapper(&key, &listing)
@@ -257,9 +256,11 @@ impl AuctionCoordinator {
             }
         });
 
-        // Store the handle for potential awaiting on shutdown
-        if let Ok(mut guard) = self.monitor_handle.lock() {
-            *guard = Some(handle);
+        // Store the handle for potential awaiting on shutdown.
+        // Use unwrap_or_else to handle poisoned mutex gracefully.
+        match self.monitor_handle.lock() {
+            Ok(mut guard) => *guard = Some(handle),
+            Err(poisoned) => *poisoned.into_inner() = Some(handle),
         }
     }
 

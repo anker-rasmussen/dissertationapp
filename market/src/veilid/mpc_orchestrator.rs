@@ -257,17 +257,17 @@ impl MpcOrchestrator {
         !self.active_auctions.lock().await.is_empty()
     }
 
-    /// Returns true if a specific auction is already being handled.
-    pub async fn is_auction_active(&self, listing_key: &RecordKey) -> bool {
-        self.active_auctions.lock().await.contains(listing_key)
-    }
-
-    /// Mark an auction as active (prevents double-spawning from monitor loop).
-    pub async fn mark_auction_active(&self, listing_key: &RecordKey) {
-        self.active_auctions
-            .lock()
-            .await
-            .insert(listing_key.clone());
+    /// Atomically check whether an auction is already active and, if not, mark
+    /// it active.  Returns `true` if successfully marked (was not active),
+    /// `false` if it was already active.  This eliminates the TOCTOU window
+    /// between a separate `is_auction_active` check and `mark_auction_active`.
+    pub async fn try_mark_auction_active(&self, listing_key: &RecordKey) -> bool {
+        let mut set = self.active_auctions.lock().await;
+        if set.contains(listing_key) {
+            return false;
+        }
+        set.insert(listing_key.clone());
+        true
     }
 
     /// Remove an auction from the active set.
@@ -677,16 +677,16 @@ impl MpcOrchestrator {
 
         // Each concurrent auction gets a distinct port slot within the 24-port
         // window allocated per node, so their TCP tunnel proxies don't collide.
-        // Clamp the modulus so port_slot + num_parties - 1 <= 23.
-        // num_parties is bounded by the number of bidders in a single auction,
-        // which is always << u16::MAX, so the cast is safe.
+        // Each slot claims `num_parties` ports; we cycle through non-overlapping
+        // slot offsets within the 24-port window.
         #[allow(clippy::cast_possible_truncation)]
         let num_parties_u16 = num_parties as u16;
-        let max_slot = 24u16.saturating_sub(num_parties_u16);
-        let port_slot = self
+        let num_slots = (24u16 / num_parties_u16.max(1)).max(1);
+        let slot_index = self
             .port_slot_counter
-            .fetch_add(num_parties_u16, std::sync::atomic::Ordering::Relaxed)
-            % (max_slot + 1).max(1);
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[allow(clippy::cast_possible_truncation)]
+        let port_slot = (u64::from(slot_index) % u64::from(num_slots)) as u16 * num_parties_u16;
 
         // Start MPC tunnel proxy with the routes
         let tunnel_proxy = MpcTunnelProxy::new(super::mpc::MpcTunnelConfig {
@@ -834,31 +834,49 @@ impl MpcOrchestrator {
         bid_record_keys: &HashMap<PublicKey, RecordKey>,
         only_missing: bool,
     ) -> usize {
-        let mgr = route_manager.lock().await;
-        let mut found = 0;
-        for bidder in bidders {
-            if only_missing && mgr.has_route_for(bidder).await {
-                continue;
+        // 1. Collect the list of bidders to query (lock briefly, then release).
+        let to_query: Vec<(PublicKey, RecordKey)> = {
+            let mgr = route_manager.lock().await;
+            let mut list = Vec::new();
+            for bidder in bidders {
+                if only_missing && mgr.has_route_for(bidder).await {
+                    continue;
+                }
+                if let Some(bid_key) = bid_record_keys.get(bidder) {
+                    list.push((bidder.clone(), bid_key.clone()));
+                }
             }
-            if let Some(bid_key) = bid_record_keys.get(bidder) {
-                match MpcRouteManager::read_route_from_dht(&self.dht, bid_key).await {
-                    Ok(Some(blob)) => {
-                        match mgr
-                            .register_route_announcement_from_blob(bidder.clone(), &blob)
-                            .await
-                        {
-                            Ok(true) => {
-                                info!("Got route for {} via DHT fallback", bidder);
-                                found += 1;
-                            }
-                            Ok(false) => {} // Same route, no change
-                            Err(e) => {
-                                debug!("DHT route import failed for {}: {}", bidder, e);
-                            }
-                        }
+            drop(mgr);
+            list
+        };
+
+        // 2. Do DHT reads without holding the route manager lock.
+        let mut discovered: Vec<(PublicKey, Vec<u8>)> = Vec::new();
+        for (bidder, bid_key) in &to_query {
+            match MpcRouteManager::read_route_from_dht(&self.dht, bid_key).await {
+                Ok(Some(blob)) => discovered.push((bidder.clone(), blob)),
+                Ok(None) => {} // Not yet published
+                Err(e) => debug!("DHT route read failed for {}: {}", bidder, e),
+            }
+        }
+
+        // 3. Re-acquire lock and batch-insert discovered routes.
+        let mut found = 0;
+        if !discovered.is_empty() {
+            let mgr = route_manager.lock().await;
+            for (bidder, blob) in discovered {
+                match mgr
+                    .register_route_announcement_from_blob(bidder.clone(), &blob)
+                    .await
+                {
+                    Ok(true) => {
+                        info!("Got route for {} via DHT fallback", bidder);
+                        found += 1;
                     }
-                    Ok(None) => {} // Not yet published
-                    Err(e) => debug!("DHT route read failed for {}: {}", bidder, e),
+                    Ok(false) => {} // Same route, no change
+                    Err(e) => {
+                        debug!("DHT route import failed for {}: {}", bidder, e);
+                    }
                 }
             }
         }
