@@ -331,9 +331,9 @@ impl VeilidNode {
             .api
             .as_ref()
             .ok_or_else(|| MarketError::InvalidState("Veilid node not started".into()))?;
-        info!("Attaching to Veilid network...");
+        debug!("Attaching to Veilid network...");
         api.attach().await?;
-        info!("Attached to network");
+        debug!("Attached to network");
         Ok(())
     }
 
@@ -342,9 +342,9 @@ impl VeilidNode {
             .api
             .as_ref()
             .ok_or_else(|| MarketError::InvalidState("Veilid node not started".into()))?;
-        info!("Detaching from Veilid network...");
+        debug!("Detaching from Veilid network...");
         api.detach().await?;
-        info!("Detached from network");
+        debug!("Detached from network");
         Ok(())
     }
 

@@ -92,12 +92,6 @@ impl MpcRouteManager {
         Ok(route_id)
     }
 
-    /// Reset route state for a retry attempt.
-    ///
-    /// Clears stale route IDs, blobs, and own route so that the next
-    /// `exchange_mpc_routes` call starts with fresh routes.  Ready signals
-    /// are preserved to avoid losing signals from parties that already
-    /// passed the barrier (see race condition comment in Phase 2).
     /// Reuse an existing route (e.g., the broadcast route) for MPC traffic.
     ///
     /// The broadcast route is maintained by the coordinator's keepalive task,
@@ -114,6 +108,12 @@ impl MpcRouteManager {
         self.borrowed_route = true;
     }
 
+    /// Reset route state for a retry attempt.
+    ///
+    /// Clears stale route IDs, blobs, and own route so that the next
+    /// `exchange_mpc_routes` call starts with fresh routes.  Ready signals
+    /// are preserved to avoid losing signals from parties that already
+    /// passed the barrier (see race condition comment in Phase 2).
     pub async fn reset_routes(&mut self) {
         if let Some(route_id) = self.my_route_id.take() {
             if !self.borrowed_route {
@@ -212,7 +212,7 @@ impl MpcRouteManager {
         let sent = self
             .broadcast_via_peer_routes(&data, peer_route_blobs, "route announcement")
             .await?;
-        info!("Broadcasted route to {} peers", sent);
+        debug!("Broadcasted route to {} peers", sent);
         Ok(())
     }
 
@@ -293,7 +293,7 @@ impl MpcRouteManager {
         }
         drop(routes);
         if count > 0 {
-            info!("Refreshed {} route handles", count);
+            debug!("Refreshed {} route handles", count);
         }
         count
     }
@@ -357,7 +357,7 @@ impl MpcRouteManager {
         self.borrowed_route = false;
 
         let new_id = self.create_route().await?;
-        info!("Refreshed own MPC route: {}", new_id);
+        debug!("Refreshed own MPC route: {}", new_id);
 
         let blob = self
             .my_route_blob
@@ -413,7 +413,7 @@ impl MpcRouteManager {
         let sent = self
             .broadcast_via_peer_routes(&data, peer_route_blobs, "MpcReady")
             .await?;
-        info!("Broadcasted MpcReady to {} peers", sent);
+        debug!("Broadcasted MpcReady to {} peers", sent);
         Ok(())
     }
 
@@ -472,7 +472,7 @@ impl MpcRouteManager {
                     }) = AuctionMessage::from_bytes(&response)
                     {
                         if self.register_ready(ack_pk, ack_np, ack_ts).await {
-                            info!("MpcReady ack: registered peer {} as ready", pubkey);
+                            debug!("MpcReady ack: registered peer {} as ready", pubkey);
                         }
                     }
                 }

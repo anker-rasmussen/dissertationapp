@@ -1,4 +1,4 @@
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use veilid_core::RecordKey;
 
 use crate::config::subkeys;
@@ -24,7 +24,7 @@ impl<D: DhtStore> BidOperations<D> {
         let data = bid.to_cbor()?;
         self.dht.set_value(&record, data).await?;
         let key = D::record_key(&record);
-        info!("Published bid to DHT at {}", key);
+        debug!("Published bid to DHT at {}", key);
         Ok(record)
     }
 

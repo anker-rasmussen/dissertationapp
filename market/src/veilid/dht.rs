@@ -245,7 +245,7 @@ impl DHTOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to delete DHT record: {e}")))?;
 
-        info!("Deleted DHT record: {}", key);
+        debug!("Deleted DHT record: {}", key);
         Ok(())
     }
 }

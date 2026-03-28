@@ -234,8 +234,6 @@ async fn main() {
     // Spawn Veilid update loop
     let update_rx = {
         let holder = app_state.node_holder.read();
-        // take_update_receiver needs &mut, but we've already stored it.
-        // We need to take before storing. Let me restructure.
         drop(holder);
         let mut holder = app_state.node_holder.write();
         holder.as_mut().and_then(|n| n.take_update_receiver())

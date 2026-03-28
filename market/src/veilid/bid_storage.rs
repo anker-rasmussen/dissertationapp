@@ -113,17 +113,7 @@ impl Default for BidStorage {
 mod tests {
     use super::*;
 
-    /// Helper to create a test RecordKey from an id.
-    fn make_test_record_key(id: u64) -> RecordKey {
-        let mut key_bytes = [0u8; 32];
-        key_bytes[..8].copy_from_slice(&id.to_le_bytes());
-        for i in 8..32 {
-            key_bytes[i] = ((id >> ((i % 8) * 8)) & 0xFF) as u8;
-        }
-        let encoded = data_encoding::BASE64URL_NOPAD.encode(&key_bytes);
-        let key_str = format!("VLD0:{}", encoded);
-        RecordKey::try_from(key_str.as_str()).expect("Should create valid RecordKey")
-    }
+    use crate::mocks::make_test_record_key;
 
     #[tokio::test]
     async fn test_store_and_get_bid() {

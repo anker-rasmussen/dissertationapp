@@ -8,19 +8,11 @@ use crate::traits::TimeProvider;
 /// A bid record published to the DHT for auction participation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BidRecord {
-    /// The listing this bid is for
     pub listing_key: RecordKey,
-
-    /// Bidder's node ID (public key)
     pub bidder: PublicKey,
-
-    /// Commitment to the bid value (hash of bid + nonce)
+    /// SHA256(bid_value || 32-byte nonce)
     pub commitment: [u8; 32],
-
-    /// Timestamp when bid was submitted
     pub timestamp: u64,
-
-    /// DHT key where this bid record is stored
     pub bid_key: RecordKey,
 
     /// Ed25519 signing public key for message authentication.
@@ -37,7 +29,6 @@ impl BidRecord {
         self.signing_pubkey != [0u8; 32]
     }
 
-    /// Serialize to CBOR for DHT storage
     pub fn to_cbor(&self) -> Result<Vec<u8>, MarketError> {
         let mut data = Vec::new();
         ciborium::ser::into_writer(self, &mut data).map_err(|e| {
@@ -46,7 +37,6 @@ impl BidRecord {
         Ok(data)
     }
 
-    /// Deserialize from CBOR
     pub fn from_cbor(data: &[u8]) -> Result<Self, MarketError> {
         crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }

@@ -39,7 +39,7 @@ impl AuctionCoordinator {
                 0,
             ));
         } else {
-            info!("Broadcast completed: sent to {} peers", sent);
+            debug!("Broadcast completed: sent to {} peers", sent);
         }
 
         Ok(())
@@ -55,7 +55,7 @@ impl AuctionCoordinator {
             std::mem::take(&mut *queue)
         };
 
-        info!("Retrying {} pending bid announcement(s)", pending.len());
+        debug!("Retrying {} pending bid announcement(s)", pending.len());
 
         for (listing_key, bid_record_key, retries) in pending {
             let announcement = AuctionMessage::bid_announcement(
@@ -176,7 +176,7 @@ impl AuctionCoordinator {
         );
         let data = msg.to_signed_bytes(&self.signing_key)?;
         let sent = self.broadcast_message(&data).await?;
-        info!("Sent SellerRegistration to {} peers", sent);
+        debug!("Sent SellerRegistration to {} peers", sent);
         Ok(())
     }
 
@@ -199,7 +199,7 @@ impl AuctionCoordinator {
         let msg = AuctionMessage::registry_announcement(registry_key, now_unix());
         let data = msg.to_signed_bytes(&self.signing_key)?;
         let sent = self.broadcast_message(&data).await?;
-        info!("Sent RegistryAnnouncement to {} peers", sent);
+        debug!("Sent RegistryAnnouncement to {} peers", sent);
         Ok(())
     }
 }

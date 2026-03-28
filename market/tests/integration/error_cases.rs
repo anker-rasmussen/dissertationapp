@@ -76,13 +76,10 @@ async fn test_duplicate_listing_watch() {
 }
 
 #[tokio::test]
-async fn test_execute_auction_with_zero_bids() {
+async fn test_no_bid_stored_for_unregistered_listing() {
     let harness = MultiPartyHarness::new(3).await;
-
-    // Create a listing key but don't create an actual listing or place any bids
     let listing_key = make_test_record_key(99);
 
-    // No bids stored — all parties return None for bid value
     for (i, party) in [harness.party(0), harness.party(1), harness.party(2)]
         .iter()
         .enumerate()

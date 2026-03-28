@@ -335,7 +335,7 @@ impl MpcOrchestrator {
         if !managers.contains_key(&key) {
             let route_manager = Arc::new(Mutex::new(MpcRouteManager::new(
                 self.api.clone(),
-                0, // Placeholder party ID, will be determined when auction ends
+                0, // Party ID unknown until auction ends; used only in log messages
             )));
             managers.insert(key.clone(), route_manager);
             drop(managers);
@@ -638,7 +638,7 @@ impl MpcOrchestrator {
         };
         match MpcRouteManager::write_route_to_dht(&self.dht, bid_key, &bid_owner, &blob_bytes).await
         {
-            Ok(()) => info!("Wrote MPC route blob to DHT bid record {}", bid_key),
+            Ok(()) => debug!("Wrote MPC route blob to DHT bid record {}", bid_key),
             Err(e) => warn!("Failed to write MPC route to DHT (non-fatal): {}", e),
         }
     }
@@ -870,7 +870,7 @@ impl MpcOrchestrator {
                     .await
                 {
                     Ok(true) => {
-                        info!("Got route for {} via DHT fallback", bidder);
+                        debug!("Got route for {} via DHT fallback", bidder);
                         found += 1;
                     }
                     Ok(false) => {} // Same route, no change
@@ -912,7 +912,7 @@ impl MpcOrchestrator {
 
             let expected = bidders.len();
 
-            info!("Route collection: have {}/{} routes", received, expected);
+            debug!("Route collection: have {}/{} routes", received, expected);
 
             if received >= expected {
                 break;
@@ -1109,7 +1109,7 @@ impl MpcOrchestrator {
             }
             drop(mgr);
 
-            info!("Readiness barrier: {}/{} parties ready", ready, expected);
+            debug!("Readiness barrier: {}/{} parties ready", ready, expected);
 
             if ready >= expected {
                 info!("All parties ready, proceeding to MPC execution");
@@ -1572,17 +1572,14 @@ impl MpcOrchestrator {
         Ok(bid_index)
     }
 
-    /// Get the node ID for this orchestrator
     pub const fn my_node_id(&self) -> &PublicKey {
         &self.my_node_id
     }
 
-    /// Get the bid storage
     pub const fn bid_storage(&self) -> &BidStorage {
         &self.bid_storage
     }
 
-    /// Get the DHT operations handle
     pub const fn dht(&self) -> &DHTOperations {
         &self.dht
     }

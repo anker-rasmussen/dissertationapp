@@ -112,9 +112,7 @@ impl AuctionCoordinator {
             );
             return Ok(());
         };
-        info!("Challenge handling has local bid material for listing {listing_key}");
-
-        info!("Responding to seller's challenge with bid reveal (value: {bid_value})");
+        debug!("Responding to challenge with bid reveal (value: {bid_value})");
         if let Err(e) = self
             .send_bid_reveal_to_seller(&listing_key, bid_value, nonce)
             .await
@@ -135,7 +133,7 @@ impl AuctionCoordinator {
         let listing_ops = super::super::listing_ops::ListingOperations::new(self.dht.clone());
         let seller_pubkey = match listing_ops.get_listing(listing_key).await {
             Ok(Some(listing)) => {
-                info!("Resolved seller pubkey from listing for {listing_key}");
+                debug!("Resolved seller pubkey from listing for {listing_key}");
                 listing.seller
             }
             Ok(None) => {

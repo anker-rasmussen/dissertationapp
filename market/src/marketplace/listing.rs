@@ -39,38 +39,18 @@ impl std::fmt::Display for ListingStatus {
 /// A marketplace listing for a sealed-bid auction
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listing {
-    /// DHT record key where this listing is stored
     pub key: RecordKey,
-
-    /// Public key of the seller
     pub seller: PublicKey,
-
-    /// Title of the item (publicly visible)
     pub title: String,
-
-    /// AES-256-GCM encrypted text content (will be decrypted via MPC for winner)
-    /// The plaintext is UTF-8 text that describes the item/service being auctioned
+    /// AES-256-GCM ciphertext of the listing description
     pub encrypted_content: Vec<u8>,
-
-    /// AES-256-GCM nonce (12 bytes) - required for decryption
     pub content_nonce: ContentNonce,
-
-    /// Hex-encoded AES-256 key for decryption (sent to winner after auction).
-    /// The seller keeps this private and only reveals it to the auction winner.
-    /// Skipped during serialization to prevent accidental key leakage to DHT.
+    /// Hex-encoded AES-256 key. Skipped during serialization to prevent DHT leakage.
     #[serde(skip)]
     pub decryption_key: String,
-
-    /// Reserve price (in atomic units) - seller automatically bids this amount
     pub reserve_price: u64,
-
-    /// Unix timestamp when the auction ends
     pub auction_end: u64,
-
-    /// Unix timestamp when the listing was created
     pub created_at: u64,
-
-    /// Current status of the auction
     pub status: ListingStatus,
 }
 
@@ -153,7 +133,6 @@ impl PublicListing {
         )
     }
 
-    /// Serialize the listing to CBOR bytes
     pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
         let mut buffer = Vec::new();
         ciborium::into_writer(self, &mut buffer)?;
@@ -205,14 +184,12 @@ impl Listing {
         )
     }
 
-    /// Serialize the listing to CBOR bytes
     pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
         let mut buffer = Vec::new();
         ciborium::into_writer(self, &mut buffer)?;
         Ok(buffer)
     }
 
-    /// Deserialize a listing from CBOR bytes
     pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
         crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }

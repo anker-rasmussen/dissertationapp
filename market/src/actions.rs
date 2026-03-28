@@ -9,7 +9,7 @@ use crate::{
     encrypt_content, generate_key, Bid, BidOperations, BidRecord, CatalogEntry, DHTOperations,
     DhtStore, Listing, ListingOperations, PublicListing,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use veilid_core::RecordKey;
 
 /// Result of creating a listing.
@@ -128,8 +128,6 @@ pub async fn create_and_publish_listing(
         // Register owned listing with coordinator (for bid tracking / MPC)
         if let Err(e) = coordinator.register_owned_listing(record.clone()).await {
             tracing::warn!("Failed to register owned listing with coordinator: {}", e);
-        } else {
-            tracing::info!("Registered owned listing with auction coordinator");
         }
     }
 
@@ -193,7 +191,7 @@ pub async fn submit_bid(
             .bid_storage
             .store_bid(&listing_record_key, amount, nonce)
             .await;
-        info!("Stored bid value locally for MPC execution");
+        debug!("Stored bid value locally for MPC execution");
     }
 
     // Create BidRecord and publish to DHT
@@ -231,7 +229,7 @@ pub async fn submit_bid(
         .bid_storage
         .store_bid_key(&listing_record_key, &bid_record.bid_key)
         .await;
-    info!("Stored bid key locally for MPC coordination");
+    debug!("Stored bid key locally for MPC coordination");
 
     // Broadcast bid announcement
     if let Some(coordinator) = state.coordinator() {
@@ -242,13 +240,11 @@ pub async fn submit_bid(
                 bid_record.bid_key.clone(),
             )
             .await;
-        info!("Registered bid announcement locally");
-
         match coordinator
             .broadcast_bid_announcement(&listing_record_key, &bid_record.bid_key)
             .await
         {
-            Ok(()) => info!("Broadcasted bid announcement to peers"),
+            Ok(()) => debug!("Broadcasted bid announcement to peers"),
             Err(e) => warn!("Failed to broadcast bid announcement: {}", e),
         }
 
@@ -270,7 +266,6 @@ pub async fn submit_bid(
     if let Some(listing) = listing_ops.get_listing(&listing_record_key).await? {
         if let Some(coordinator) = state.coordinator() {
             coordinator.watch_listing(listing).await;
-            info!("Watching listing for auction deadline");
         }
     }
 

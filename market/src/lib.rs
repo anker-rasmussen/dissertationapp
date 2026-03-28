@@ -7,7 +7,7 @@
 //! encrypted with AES-256-GCM until the winner is verified.
 
 #![recursion_limit = "256"]
-// ── Clippy lint configuration (strict, like Airbnb for Rust) ──
+// Clippy lint configuration
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 #![warn(clippy::cargo)]

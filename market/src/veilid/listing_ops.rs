@@ -1,4 +1,4 @@
-use tracing::info;
+use tracing::{debug, info};
 use veilid_core::RecordKey;
 
 use crate::error::{MarketError, MarketResult};
@@ -55,7 +55,7 @@ impl<D: DhtStore> ListingOperations<D> {
         // Update the value in the DHT
         self.dht.set_value(record, listing_data).await?;
 
-        info!("Updated listing '{}' in DHT", listing.title);
+        debug!("Updated listing '{}' in DHT", listing.title);
 
         Ok(())
     }
@@ -76,7 +76,7 @@ impl<D: DhtStore> ListingOperations<D> {
                     ))
                 })?;
 
-                info!("Retrieved listing '{}' from DHT", listing.title);
+                debug!("Retrieved listing '{}' from DHT", listing.title);
                 Ok(Some(listing))
             }
             None => Ok(None),

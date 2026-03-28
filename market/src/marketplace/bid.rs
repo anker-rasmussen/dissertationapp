@@ -12,16 +12,9 @@ use crate::traits::{RandomSource, TimeProvider};
 /// A sealed bid for an auction listing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bid {
-    /// The listing this bid is for
     pub listing_key: RecordKey,
-
-    /// Public key of the bidder
     pub bidder: PublicKey,
-
-    /// Bid amount in atomic units
     pub amount: u64,
-
-    /// Unix timestamp when bid was submitted
     pub timestamp: u64,
 
     /// Hash commitment for sealed-bid (SHA256 of amount + secret nonce)
@@ -107,14 +100,12 @@ impl Bid {
         }
     }
 
-    /// Serialize the bid to CBOR bytes
     pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
         let mut buffer = Vec::new();
         ciborium::into_writer(self, &mut buffer)?;
         Ok(buffer)
     }
 
-    /// Deserialize a bid from CBOR bytes
     pub fn from_cbor(data: &[u8]) -> crate::error::MarketResult<Self> {
         crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }

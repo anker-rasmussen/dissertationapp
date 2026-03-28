@@ -15,10 +15,9 @@ impl AuctionCoordinator {
     /// Resolve the expected signing key for a bidder in this listing, if known.
     ///
     /// Checks DHT BID_ANNOUNCEMENTS first, then falls back to locally-received
-    /// bid announcements (delivered via `app_message`).  The local fallback is
-    /// critical because BID_ANNOUNCEMENTS DHT propagation can lag behind
-    /// `app_message` delivery, causing signer verification to fail for parties
-    /// whose bids are already known locally.
+    /// bid announcements. The local fallback is needed because DHT propagation
+    /// can lag behind real-time delivery, causing signer verification to fail
+    /// for parties whose bids are already known locally.
     pub(super) async fn expected_bidder_signing_key(
         &self,
         listing_key: &RecordKey,

@@ -357,9 +357,6 @@ fn parse_bench_lines(lines: &[String]) -> BenchMetrics {
                 m.tunnel_bytes_sent = v["tunnel_bytes_sent"].as_u64().unwrap_or(0);
                 m.tunnel_bytes_recv = v["tunnel_bytes_recv"].as_u64().unwrap_or(0);
             }
-            Some("auction_complete") => {
-                // We use our own wall clock for total_secs, but could cross-check here
-            }
             _ => {}
         }
     }
@@ -451,8 +448,6 @@ fn append_csv_row(
 
     Ok(())
 }
-
-// ── Devnet management ────────────────────────────────────────────────
 
 // ── Playground devnet management ─────────────────────────────────────
 

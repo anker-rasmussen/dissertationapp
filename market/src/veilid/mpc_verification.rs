@@ -1,7 +1,7 @@
 //! Post-MPC verification: bid commitment checks and winner communication.
 
 use sha2::{Digest, Sha256};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use veilid_core::{PublicKey, RecordKey};
 
 use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
@@ -63,7 +63,7 @@ impl MpcOrchestrator {
                     verified: None,
                 },
             );
-            info!("Stored pending verification for winner {}", winner_pubkey);
+            debug!("Stored pending verification for winner {}", winner_pubkey);
 
             // Send WinnerDecryptionRequest to winner via their MPC route (challenge)
             info!(
@@ -105,11 +105,11 @@ impl MpcOrchestrator {
         }
     }
 
-    /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style)
+    /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style).
     ///
-    /// Steps 1-2 (local data lookup) may return early on mismatches.  Steps 3-4
-    /// (DHT fetch + commitment check) always execute together when step 2 passes.
-    /// The early returns are not a remote timing side-channel: Veilid `app_call`
+    /// Steps 1-2 look up local MPC data and compare the bid value. Steps 3-4
+    /// fetch the BidRecord from DHT and verify the SHA256 commitment.
+    /// Early returns are not a remote timing side-channel: Veilid `app_call`
     /// round-trip variance (~50-2000ms) dominates local verification time (~µs).
     pub async fn verify_winner_reveal(
         &self,

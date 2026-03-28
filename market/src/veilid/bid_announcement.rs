@@ -72,7 +72,6 @@ impl SignedEnvelope {
         Ok((envelope.payload, envelope.signer))
     }
 
-    /// Serialize the envelope to bytes for transmission.
     pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
         bincode::options()
             .with_limit(MAX_BINCODE_SIZE)
@@ -104,7 +103,6 @@ pub struct MpcRouteEntry {
 }
 
 impl MpcRouteEntry {
-    /// Serialize to CBOR bytes for DHT storage.
     pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf).map_err(|e| {
@@ -113,7 +111,6 @@ impl MpcRouteEntry {
         Ok(buf)
     }
 
-    /// Deserialize from CBOR bytes.
     pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
         crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
@@ -155,7 +152,6 @@ impl BidAnnouncementRegistry {
         self.announcements.push((bidder, bid_record_key, timestamp));
     }
 
-    /// Serialize to bytes for DHT storage (CBOR, matching other DHT types)
     pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf).map_err(|e| {
@@ -164,7 +160,6 @@ impl BidAnnouncementRegistry {
         Ok(buf)
     }
 
-    /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
         crate::util::cbor_from_limited_reader(data, crate::util::MAX_DHT_VALUE_SIZE)
     }
@@ -437,7 +432,6 @@ impl AuctionMessage {
         }
     }
 
-    /// Serialize to bytes for transmission
     pub fn to_bytes(&self) -> MarketResult<Vec<u8>> {
         bincode::options()
             .with_limit(MAX_BINCODE_SIZE)
@@ -447,7 +441,6 @@ impl AuctionMessage {
             })
     }
 
-    /// Deserialize from bytes (with size limit to prevent OOM from crafted payloads).
     pub fn from_bytes(data: &[u8]) -> MarketResult<Self> {
         bincode_deserialize_limited(data).map_err(|e| {
             MarketError::Serialization(format!("Failed to deserialize auction message: {e}"))

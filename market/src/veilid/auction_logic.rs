@@ -97,7 +97,7 @@ where
             .await
         {
             let count = self.bid_announcements.count(listing_key).await;
-            info!("Registered bid announcement, total: {}", count);
+            debug!("Registered bid announcement, total: {}", count);
         }
     }
 
@@ -120,7 +120,7 @@ where
             .lock()
             .await
             .insert(listing_key.clone(), key);
-        info!("Stored decryption key for listing {}", listing_key);
+        debug!("Stored decryption key for listing {}", listing_key);
     }
 
     /// Get a stored decryption key.
@@ -166,7 +166,7 @@ where
         for (bidder, bid_record_key, _) in &bidder_list {
             match bid_ops.fetch_bid(bid_record_key).await {
                 Ok(Some(bid_record)) => {
-                    info!("Fetched bid record for bidder {}", bidder);
+                    debug!("Fetched bid record for bidder {}", bidder);
                     bid_index.add_bid(bid_record);
                 }
                 Ok(None) => {
@@ -187,7 +187,7 @@ where
             warn!("discover_bids: {fetch_failures}/{total_count} bids failed to fetch");
         }
 
-        info!("Built BidIndex with {} bids", bid_index.bids.len());
+        debug!("Built BidIndex with {} bids", bid_index.bids.len());
         Ok(bid_index)
     }
 

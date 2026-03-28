@@ -34,27 +34,26 @@ impl AuctionCoordinator {
 
         // Refresh route managers (MPC coordination routes)
         let mut new_route_blob: Option<Vec<u8>> = None;
-        let managers = self.mpc.route_managers().lock().await;
-        for (_, manager) in managers.iter() {
-            let mut mgr = manager.lock().await;
-            if !dead_remote_routes.is_empty() {
-                mgr.handle_dead_remote_routes(&dead_remote_routes).await;
-            }
-            if !dead_routes.is_empty() || !dead_remote_routes.is_empty() {
-                if let Some(blob) = mgr
-                    .handle_dead_own_route(&dead_routes, &dead_remote_routes)
-                    .await
-                {
-                    new_route_blob = Some(blob.blob);
+        {
+            let managers = self.mpc.route_managers().lock().await;
+            for manager in managers.values() {
+                let mut mgr = manager.lock().await;
+                if !dead_remote_routes.is_empty() {
+                    mgr.handle_dead_remote_routes(&dead_remote_routes).await;
+                }
+                if !dead_routes.is_empty() || !dead_remote_routes.is_empty() {
+                    if let Some(blob) = mgr
+                        .handle_dead_own_route(&dead_routes, &dead_remote_routes)
+                        .await
+                    {
+                        new_route_blob = Some(blob.blob);
+                    }
                 }
             }
-            drop(mgr);
         }
-        drop(managers);
 
         // Refresh all active MPC tunnel proxy routes.
-        // app_message to a dead route silently succeeds (fire-and-forget),
-        // so we proactively reimport all party blobs on any route death.
+        // Proactively reimport all party blobs on any route death.
         let all_dead: Vec<_> = dead_routes
             .iter()
             .chain(dead_remote_routes.iter())

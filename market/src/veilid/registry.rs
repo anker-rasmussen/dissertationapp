@@ -205,7 +205,7 @@ impl RegistryOperations {
 
     /// Set the master registry key (received from a peer broadcast).
     pub fn set_master_registry_key(&mut self, key: RecordKey) {
-        info!("Set master registry key: {}", key);
+        debug!("Set master registry key: {}", key);
         self.master_registry_key = Some(key);
     }
 
@@ -222,7 +222,7 @@ impl RegistryOperations {
             .iter()
             .any(|e| e.seller_pubkey == seller_pubkey)
         {
-            info!("Seller already in local replica, skipping");
+            debug!("Seller already in local replica, skipping");
             return Ok(());
         }
 

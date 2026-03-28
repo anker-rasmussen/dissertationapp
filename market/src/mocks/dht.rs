@@ -9,10 +9,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use veilid_core::{PublicKey, RecordKey};
 
-/// A mock DHT record with a unique key.
 #[derive(Debug, Clone)]
 pub struct MockOwnedRecord {
-    /// The record key.
     pub key: RecordKey,
 }
 
@@ -95,9 +93,7 @@ struct MockDhtInner {
 /// For multi-party integration tests, use `SharedDhtHandle` to create views.
 #[derive(Debug, Clone)]
 pub struct MockDht {
-    /// The underlying shared storage.
     inner: Arc<MockDhtInner>,
-    /// The node ID of the party using this DHT view.
     node_id: PublicKey,
 }
 
@@ -111,7 +107,6 @@ pub struct SharedDhtHandle {
 }
 
 impl SharedDhtHandle {
-    /// Create a new shared DHT handle.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(MockDhtInner {
@@ -154,17 +149,14 @@ impl MockDht {
         }
     }
 
-    /// Get the node ID for this DHT view.
     pub fn node_id(&self) -> PublicKey {
         self.node_id.clone()
     }
 
-    /// Set failure mode for testing error handling.
     pub async fn set_fail_mode(&self, mode: Option<MockDhtFailure>) {
         *self.inner.fail_mode.write().await = mode;
     }
 
-    /// Check if current operation should fail.
     async fn should_fail(&self, is_write: bool) -> bool {
         let mode = self.inner.fail_mode.read().await;
         match &*mode {
@@ -175,13 +167,11 @@ impl MockDht {
         }
     }
 
-    /// Check if a specific record exists.
     pub async fn has_record(&self, key: &RecordKey) -> bool {
         let storage = self.inner.storage.read().await;
         storage.contains_key(&key.to_string())
     }
 
-    /// Get the number of records stored.
     pub async fn record_count(&self) -> usize {
         self.inner.storage.read().await.len()
     }
