@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Decentralized P2P SMPC Sealed-Bid Auction Marketplace"
 authors = ["Anker Rasmussen"]
+license = "MPL-2.0"
 default-run = "market"
 
 [[bin]]
