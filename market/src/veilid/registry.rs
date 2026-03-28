@@ -398,6 +398,8 @@ impl RegistryOperations {
         let routing_context = self.dht.routing_context()?;
         let schema = DHTSchema::dflt(1)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
+
+        // Step 1 — allocate the record (generates a random encryption key).
         let descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, None)
             .await
@@ -410,7 +412,27 @@ impl RegistryOperations {
             MarketError::Dht("Seller catalog record missing owner keypair".into())
         })?;
 
-        // Initialize with empty catalog
+        // Step 2 — close the encrypted handle so we can re-open in plaintext.
+        // create_dht_record generates a random per-record encryption key.
+        // The catalog must be readable by any node, so store it unencrypted.
+        routing_context
+            .close_dht_record(key.clone())
+            .await
+            .map_err(|e| {
+                MarketError::Dht(format!("Failed to close encrypted catalog handle: {e}"))
+            })?;
+
+        // Step 3 — re-open without encryption key.
+        let _ = routing_context
+            .open_dht_record(key.clone(), Some(owner.clone()))
+            .await
+            .map_err(|e| {
+                MarketError::Dht(format!(
+                    "Failed to re-open catalog without encryption: {e}"
+                ))
+            })?;
+
+        // Step 4 — write initial data in plaintext.
         let empty = SellerCatalog {
             seller_pubkey: seller_pubkey.to_string(),
             listings: Vec::new(),
@@ -568,7 +590,7 @@ impl RegistryOperations {
                     Ok(catalog)
                 }
                 Err(e) => {
-                    warn!("Catalog data corrupted, returning empty: {}", e);
+                    debug!("Catalog not yet readable, returning empty: {}", e);
                     Ok(SellerCatalog::default())
                 }
             },
