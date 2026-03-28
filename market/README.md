@@ -88,7 +88,7 @@ The two-tier split keeps the auction state machine testable — `AuctionLogic` r
 
 ## Demo
 
-See [DEMO_SETUP.md](DEMO_SETUP.md) for the full walkthrough, or from the repo root:
+From the repo root:
 
 ```bash
 make demo    # Build everything, start devnet, launch 3 market nodes
