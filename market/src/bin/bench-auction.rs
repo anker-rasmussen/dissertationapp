@@ -498,7 +498,7 @@ fn playground_binary_path() -> PathBuf {
 
 fn playground_ipspoof_path() -> PathBuf {
     find_veilid_binary(
-        if cfg!(target_os = "macos") { "libveilid_ipspoof.dylib" } else { "libveilid_ipspoof.so" },
+        "libveilid_ipspoof.so",
         "Build with: cd Repos/veilid && cargo build --release -p veilid-ipspoof",
     )
 }

@@ -31,28 +31,14 @@ pub fn veilid_repo_path() -> PathBuf {
         .join("veilid")
 }
 
-/// Path to libipspoof for IP translation in devnet.
-/// Prefers cargo-built library, falls back to legacy location.
+/// Path to libipspoof.so for IP translation in devnet.
+/// Prefers cargo-built `libveilid_ipspoof.so`, falls back to legacy location.
 pub fn libipspoof_path() -> PathBuf {
-    let lib_name = if cfg!(target_os = "macos") {
-        "libveilid_ipspoof.dylib"
-    } else {
-        "libveilid_ipspoof.so"
-    };
-    let cargo_built = veilid_repo_path().join("target/release").join(lib_name);
+    let cargo_built = veilid_repo_path().join("target/release/libveilid_ipspoof.so");
     if cargo_built.exists() {
         return cargo_built;
     }
     veilid_repo_path().join(".devcontainer/scripts/libipspoof.so")
-}
-
-/// The environment variable used to preload shared libraries on this platform.
-pub fn preload_env_var() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "DYLD_INSERT_LIBRARIES"
-    } else {
-        "LD_PRELOAD"
-    }
 }
 
 /// Find the `veilid-playground` binary.
@@ -606,15 +592,13 @@ pub fn setup_e2e_environment() -> MarketResult<DevnetManager> {
         .arg("shamir-party.x")
         .status();
 
-    let env_var = preload_env_var();
-    let preload = std::env::var(env_var).unwrap_or_default();
+    let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
     let expected_preload = libipspoof_path();
 
     if !expected_preload.exists() {
         return Err(MarketError::Config(format!(
-            "{} not found at {}.\n\
+            "libipspoof.so not found at {}.\n\
              Please build it with: {}/build-ipspoof.sh",
-            expected_preload.file_name().unwrap().to_string_lossy(),
             expected_preload.display(),
             expected_preload.parent().unwrap().display()
         )));
@@ -622,8 +606,8 @@ pub fn setup_e2e_environment() -> MarketResult<DevnetManager> {
 
     if !preload.contains(expected_preload.to_str().unwrap()) {
         return Err(MarketError::Config(format!(
-            "{env_var} not set. E2E tests require IP spoofing.\n\
-             Run with: {env_var}={} cargo nextest run --profile e2e --ignored",
+            "LD_PRELOAD not set. E2E tests require IP spoofing.\n\
+             Run with: LD_PRELOAD={} cargo nextest run --profile e2e --ignored",
             expected_preload.display()
         )));
     }
