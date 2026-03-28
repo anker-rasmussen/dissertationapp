@@ -8,10 +8,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MARKET_DIR="$(dirname "$SCRIPT_DIR")"
 VEILID_DIR="${VEILID_REPO_PATH:-$(dirname "$(dirname "$MARKET_DIR")")/veilid}"
 
+# Platform-specific library extension and preload variable
+if [ "$(uname -s)" = "Darwin" ]; then
+    IPSPOOF_LIB="libveilid_ipspoof.dylib"
+    PRELOAD_VAR="DYLD_INSERT_LIBRARIES"
+else
+    IPSPOOF_LIB="libveilid_ipspoof.so"
+    PRELOAD_VAR="LD_PRELOAD"
+fi
+
 # Find libipspoof — prefer cargo-built, fall back to legacy location
 LIBIPSPOOF=""
-if [ -f "$VEILID_DIR/target/release/libveilid_ipspoof.so" ]; then
-    LIBIPSPOOF="$VEILID_DIR/target/release/libveilid_ipspoof.so"
+if [ -f "$VEILID_DIR/target/release/$IPSPOOF_LIB" ]; then
+    LIBIPSPOOF="$VEILID_DIR/target/release/$IPSPOOF_LIB"
 elif [ -f "$VEILID_DIR/.devcontainer/scripts/libipspoof.so" ]; then
     LIBIPSPOOF="$VEILID_DIR/.devcontainer/scripts/libipspoof.so"
 else
@@ -26,9 +35,9 @@ if [ -z "${NEXTEST_ENV:-}" ]; then
     exit 0
 fi
 
-# Write LD_PRELOAD to NEXTEST_ENV so tests receive it
-echo "LD_PRELOAD=$LIBIPSPOOF" >> "$NEXTEST_ENV"
-echo "[setup-e2e] Exported LD_PRELOAD=$LIBIPSPOOF"
+# Write preload var to NEXTEST_ENV so tests receive it
+echo "$PRELOAD_VAR=$LIBIPSPOOF" >> "$NEXTEST_ENV"
+echo "[setup-e2e] Exported $PRELOAD_VAR=$LIBIPSPOOF"
 
 # MASCOT (mascot-party.x) is the default MPC protocol — dishonest majority,
 # malicious security.  Override via MPC_PROTOCOL env var if needed.

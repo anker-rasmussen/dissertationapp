@@ -35,7 +35,7 @@ dioxus = { version = "0.7.2", features = ["desktop"] }
 veilid-core = { path = "../../veilid/veilid-core", default-features = false, features = ["default-tokio"] }
 
 # Async Runtime
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "io-util", "io-std", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "io-util", "io-std", "net", "signal", "process"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
