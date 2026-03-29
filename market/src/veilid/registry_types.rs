@@ -8,7 +8,7 @@ use crate::traits::TimeProvider;
 
 // ── Data structures ──────────────────────────────────────────────────
 
-/// Entry in the master registry — one per node's broadcast route.
+/// Entry in the master registry, one per node's broadcast route.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
     /// Node's public key (string form).
@@ -19,7 +19,7 @@ pub struct RouteEntry {
     pub registered_at: u64,
 }
 
-/// Entry in the master registry — one per seller.
+/// Entry in the master registry, one per seller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SellerEntry {
     /// Seller's public key (string form).
@@ -74,7 +74,7 @@ impl MarketRegistry {
     /// G-Set merge: union sellers and routes from `other` into `self`.
     ///
     /// Pure add-only, dedup by key field, commutative + associative + idempotent.
-    /// Does not use `version` — version is only bumped by individual `add_*` calls
+    /// Does not use `version` since it is only bumped by individual `add_*` calls
     /// for DHT conflict detection.
     pub fn merge(&mut self, other: &Self) {
         for seller in &other.sellers {
@@ -105,24 +105,26 @@ impl MarketRegistry {
         }
     }
 
-    /// Add a seller, deduplicating by pubkey.
-    /// Caps the registry at 200 sellers to prevent unbounded growth.
+    /// Add or update a seller entry, keyed by pubkey.
+    ///
+    /// If the seller already exists (e.g. stale DHT entry from a previous
+    /// session), replace it so the fresh catalog key takes effect.
     pub fn add_seller(&mut self, entry: SellerEntry) {
-        if self.sellers.len() >= 200 {
-            return; // Cap at 200 sellers (must fit in 32KB DHT value)
-        }
-        if !self
+        if let Some(existing) = self
             .sellers
-            .iter()
-            .any(|e| e.seller_pubkey == entry.seller_pubkey)
+            .iter_mut()
+            .find(|e| e.seller_pubkey == entry.seller_pubkey)
         {
+            *existing = entry;
+            self.version += 1;
+        } else if self.sellers.len() < 200 {
             self.sellers.push(entry);
             self.version += 1;
         }
     }
 }
 
-/// Entry in a seller's catalog — one per listing.
+/// Entry in a seller's catalog, one per listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogEntry {
     /// DHT key of the listing.

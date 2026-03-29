@@ -80,7 +80,7 @@ pub async fn create_and_publish_listing(
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to ensure master registry: {e}")))?;
 
-        // Ensure seller has a catalog, add listing, and register — all under one lock
+        // Ensure seller has a catalog, add listing, and register, all under one lock
         // to prevent interleaving from concurrent tasks.
         let catalog_key = {
             let signing_hex = coordinator.signing_pubkey_hex();
@@ -101,7 +101,7 @@ pub async fn create_and_publish_listing(
             .map_err(|e| MarketError::Dht(format!("Failed to add listing to catalog: {e}")))?;
 
             if let Err(e) = ops
-                .register_seller(&seller.to_string(), &record.key.to_string(), &signing_hex)
+                .register_seller(&seller.to_string(), &catalog_key.to_string(), &signing_hex)
                 .await
             {
                 tracing::warn!("Failed to register seller in master registry: {}", e);
@@ -205,7 +205,7 @@ pub async fn submit_bid(
         bidder: bidder.clone(),
         commitment: bid.commitment,
         timestamp,
-        // Placeholder — will be updated with the actual DHT key after publish
+        // Placeholder (will be updated with the actual DHT key after publish)
         bid_key: listing_record_key.clone(),
         signing_pubkey,
     };

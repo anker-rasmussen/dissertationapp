@@ -48,7 +48,7 @@ pub struct RegistryOperations {
     master_registry_key: Option<RecordKey>,
     /// This seller's catalog DHT record (sellers only).
     seller_catalog_record: Option<OwnedDHTRecord>,
-    /// Local G-Set replica — rebuilt from DHT on startup, gossip fills gaps.
+    /// Local G-Set replica rebuilt from DHT on startup; gossip fills gaps.
     local_registry: MarketRegistry,
 }
 
@@ -102,13 +102,13 @@ impl RegistryOperations {
         let schema = DHTSchema::dflt(1)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
 
-        // Step 1 — allocate the record (generates a random encryption key).
+        // Step 1: allocate the record (generates a random encryption key).
         let descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(self.shared_keypair.clone()))
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to create master registry: {e}")))?;
 
-        // Step 2 — close the encrypted handle.
+        // Step 2: close the encrypted handle.
         routing_context
             .close_dht_record(descriptor.key())
             .await
@@ -116,7 +116,7 @@ impl RegistryOperations {
                 MarketError::Dht(format!("Failed to close encrypted registry handle: {e}"))
             })?;
 
-        // Step 3 — re-open with the deterministic key (no encryption key).
+        // Step 3: re-open with the deterministic key (no encryption key).
         let key = self.compute_master_registry_key();
         let _ = routing_context
             .open_dht_record(key.clone(), Some(self.shared_keypair.clone()))
@@ -127,7 +127,7 @@ impl RegistryOperations {
                 ))
             })?;
 
-        // Step 4 — write initial data in plaintext.
+        // Step 4: write initial data in plaintext.
         let empty = MarketRegistry::default();
         let data = empty.to_cbor().map_err(|e| {
             MarketError::Serialization(format!("Failed to serialize empty registry: {e}"))
@@ -137,7 +137,7 @@ impl RegistryOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to set initial registry value: {e}")));
 
-        // Step 5 — close the plaintext handle (always, even on error).
+        // Step 5: close the plaintext handle (always, even on error).
         routing_context.close_dht_record(key.clone()).await.ok();
 
         write_result?;
@@ -239,7 +239,7 @@ impl RegistryOperations {
     /// Flush the local G-Set replica to the DHT.
     ///
     /// Opens the shared registry record, reads the current DHT state, merges our
-    /// local replica on top, and writes the merged result back.  Best-effort — a
+    /// local replica on top, and writes the merged result back.  Best-effort: a
     /// failure here does not lose data because the local replica is the source of
     /// truth and will be flushed again on the next write.
     async fn flush_registry_to_dht(&self) -> MarketResult<()> {
@@ -269,13 +269,18 @@ impl RegistryOperations {
             }
         };
 
-        let mut merged = match dht_data {
-            Some(v) if !v.data().is_empty() => {
-                MarketRegistry::from_cbor(v.data()).unwrap_or_default()
+        // Start from local replica (authoritative for entries this node owns),
+        // then merge DHT data on top.  This ensures a fresh catalog key from
+        // register_seller() is never overwritten by a stale DHT entry with the
+        // same seller_pubkey from a previous session.
+        let mut merged = self.local_registry.clone();
+        if let Some(v) = dht_data {
+            if !v.data().is_empty() {
+                if let Ok(remote) = MarketRegistry::from_cbor(v.data()) {
+                    merged.merge(&remote);
+                }
             }
-            _ => MarketRegistry::default(),
-        };
-        merged.merge(&self.local_registry);
+        }
 
         let data = match merged
             .to_cbor()
@@ -398,6 +403,7 @@ impl RegistryOperations {
         let routing_context = self.dht.routing_context()?;
         let schema = DHTSchema::dflt(1)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
+
         let descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, None)
             .await
@@ -410,7 +416,8 @@ impl RegistryOperations {
             MarketError::Dht("Seller catalog record missing owner keypair".into())
         })?;
 
-        // Initialize with empty catalog
+        // Initialize with empty catalog; record stays open so the seller can
+        // always read its own catalog from the local cache (no DHT round-trip).
         let empty = SellerCatalog {
             seller_pubkey: seller_pubkey.to_string(),
             listings: Vec::new(),
@@ -488,7 +495,7 @@ impl RegistryOperations {
     /// Fetch the registry, returning the local G-Set replica.
     ///
     /// When `force_refresh` is `true`, the DHT is read first and merged into
-    /// the local replica before returning — this is the "catch-up" path for
+    /// the local replica before returning; this is the "catch-up" path for
     /// discovery.  When `false`, the local replica is returned directly (no
     /// network round-trip).
     pub async fn fetch_registry(&mut self, force_refresh: bool) -> MarketResult<MarketRegistry> {
@@ -535,6 +542,9 @@ impl RegistryOperations {
     }
 
     /// Fetch a single seller's catalog from DHT.
+    ///
+    /// If this is our own catalog, open with the owner keypair so the local
+    /// encrypted cache is readable. Other nodes open read-only (no keypair).
     pub async fn fetch_seller_catalog(
         &self,
         catalog_key: &RecordKey,
@@ -568,7 +578,7 @@ impl RegistryOperations {
                     Ok(catalog)
                 }
                 Err(e) => {
-                    warn!("Catalog data corrupted, returning empty: {}", e);
+                    debug!("Catalog not yet readable (propagating): {}", e);
                     Ok(SellerCatalog::default())
                 }
             },
@@ -694,17 +704,18 @@ mod tests {
         assert_eq!(reg.sellers.len(), 1);
         assert_eq!(reg.version, 1);
 
-        // Duplicate — should be ignored
+        // Same pubkey, different catalog: should replace (not duplicate)
         reg.add_seller(SellerEntry {
             seller_pubkey: "pk1".to_string(),
-            catalog_key: "ck1".to_string(),
+            catalog_key: "ck1_updated".to_string(),
             registered_at: 2000,
             signing_pubkey: String::new(),
         });
         assert_eq!(reg.sellers.len(), 1);
-        assert_eq!(reg.version, 1);
+        assert_eq!(reg.version, 2);
+        assert_eq!(reg.sellers[0].catalog_key, "ck1_updated");
 
-        // Different seller — should be added
+        // Different seller: should be added
         reg.add_seller(SellerEntry {
             seller_pubkey: "pk2".to_string(),
             catalog_key: "ck2".to_string(),
@@ -712,7 +723,7 @@ mod tests {
             signing_pubkey: String::new(),
         });
         assert_eq!(reg.sellers.len(), 2);
-        assert_eq!(reg.version, 2);
+        assert_eq!(reg.version, 3);
     }
 
     #[test]
@@ -727,7 +738,7 @@ mod tests {
         assert_eq!(catalog.listings.len(), 1);
         assert_eq!(catalog.version, 1);
 
-        // Duplicate — should be ignored
+        // Duplicate: should be ignored
         catalog.add_listing(CatalogEntry {
             listing_key: "lk1".to_string(),
             title: "Item 1".to_string(),
@@ -783,7 +794,7 @@ mod tests {
         assert_eq!(reg.sellers.len(), 200);
         assert_eq!(reg.version, 200);
 
-        // Try to add 201st seller — should be ignored
+        // Try to add 201st seller: should be ignored
         reg.add_seller(SellerEntry {
             seller_pubkey: "pk200".to_string(),
             catalog_key: "ck200".to_string(),
@@ -817,7 +828,7 @@ mod tests {
         assert_eq!(catalog.listings.len(), 200);
         assert_eq!(catalog.version, 200);
 
-        // Try to add 201st listing — should be ignored
+        // Try to add 201st listing: should be ignored
         catalog.add_listing(CatalogEntry {
             listing_key: "lk200".to_string(),
             title: "Item 200".to_string(),
@@ -1017,14 +1028,14 @@ mod tests {
         });
         assert_eq!(reg.version, 2);
 
-        // Duplicate — version should not increment
+        // Same pubkey: replaces entry, version increments
         reg.add_seller(SellerEntry {
             seller_pubkey: "pk1".to_string(),
-            catalog_key: "ck1".to_string(),
+            catalog_key: "ck1_new".to_string(),
             registered_at: 3000,
             signing_pubkey: String::new(),
         });
-        assert_eq!(reg.version, 2);
+        assert_eq!(reg.version, 3);
     }
 
     #[test]
@@ -1048,7 +1059,7 @@ mod tests {
         });
         assert_eq!(catalog.version, 2);
 
-        // Duplicate — version should not increment
+        // Duplicate: version should not increment
         catalog.add_listing(CatalogEntry {
             listing_key: "lk1".to_string(),
             title: "Item1".to_string(),
@@ -1122,7 +1133,7 @@ mod tests {
         assert_eq!(reg.routes.len(), 1);
         assert_eq!(reg.version, 1);
 
-        // Update existing — should replace blob, not add second entry
+        // Update existing: should replace blob, not add second entry
         reg.add_route(RouteEntry {
             node_id: "node1".to_string(),
             route_blob: vec![4, 5, 6],
@@ -1132,7 +1143,7 @@ mod tests {
         assert_eq!(reg.routes[0].route_blob, vec![4, 5, 6]);
         assert_eq!(reg.version, 2);
 
-        // Different node — should add
+        // Different node: should add
         reg.add_route(RouteEntry {
             node_id: "node2".to_string(),
             route_blob: vec![7, 8, 9],
