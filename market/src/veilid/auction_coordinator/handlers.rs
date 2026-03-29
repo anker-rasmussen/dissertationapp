@@ -368,7 +368,7 @@ impl AuctionCoordinator {
                 state.verified = Some(verified);
             } else {
                 warn!(
-                    "No pending verification entry for listing {} — result dropped",
+                    "No pending verification entry for listing {} - result dropped",
                     listing_key
                 );
             }
@@ -376,7 +376,7 @@ impl AuctionCoordinator {
 
         if verified {
             info!(
-                "Winner bid VERIFIED for listing {} — sending decryption key immediately",
+                "Winner bid VERIFIED for listing {} - sending decryption key immediately",
                 listing_key
             );
 
@@ -408,7 +408,7 @@ impl AuctionCoordinator {
             }
         } else {
             warn!(
-                "Winner bid verification FAILED for listing {} — withholding decryption key",
+                "Winner bid verification FAILED for listing {} - withholding decryption key",
                 listing_key
             );
         }

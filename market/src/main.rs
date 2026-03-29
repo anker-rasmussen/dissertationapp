@@ -1,4 +1,4 @@
-//! SMPC Auction Marketplace - Main entry point.
+//! SMPC Auction Marketplace. Main entry point.
 // Dioxus rsx! macro generates deeply nested types requiring higher recursion limit
 #![recursion_limit = "512"]
 
@@ -325,7 +325,7 @@ fn main() -> MarketResult<()> {
                 shutdown_bg.cancelled().await;
             }
 
-            // Graceful coordinator shutdown — release routes and DHT records.
+            // Graceful coordinator shutdown: release routes and DHT records.
             {
                 let coord = coordinator_holder.read().clone();
                 if let Some(c) = coord {

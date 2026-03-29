@@ -99,7 +99,7 @@ impl HeadlessParticipant {
         let stdin = BufWriter::new(child_stdin);
         let mut stdout = BufReader::new(child_stdout).lines();
 
-        // Drain stderr in a background task — capture lines AND forward to our stderr.
+        // Drain stderr in a background task; capture lines AND forward to our stderr.
         // CRITICAL: must be spawned BEFORE waiting for Ready, otherwise the child's
         // stderr buffer fills and blocks stdout writes.
         let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -463,7 +463,7 @@ fn find_veilid_binary(name: &str, hint: &str) -> PathBuf {
     let home_dir = dirs::home_dir()
         .map(|h| h.join("Repos/veilid"))
         .unwrap_or_default();
-    // Check ~/Repos/veilid first — it may have patches not in the submodule
+    // Check ~/Repos/veilid first since it may have patches not in the submodule
     let candidates: Vec<PathBuf> = [&home_dir, &submodule_dir]
         .iter()
         .flat_map(|dir| {
@@ -514,7 +514,7 @@ const PLAYGROUND_DATA_DIR: &str = "/tmp/veilid-playground-bench";
 const PLAYGROUND_BASE_PORT: u16 = 5150;
 
 /// Start playground devnet with the given number of nodes.
-/// Returns the child process handle — caller must kill it when done.
+/// Returns the child process handle. The caller must kill it when done.
 fn playground_restart(desired_nodes: u32, warmup_secs: u64) -> anyhow::Result<std::process::Child> {
     let playground = playground_binary_path();
     let veilid_server = playground_veilid_server_path();

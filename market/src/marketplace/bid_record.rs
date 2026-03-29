@@ -100,11 +100,11 @@ impl BidIndex {
             result.extend(non_seller_bids.into_iter().map(|b| b.bidder.clone()));
             result
         } else {
-            // No seller bid found — this violates the invariant that the seller's
+            // No seller bid found. This violates the invariant that the seller's
             // auto-bid is always present.  Party 0 will not be the seller, which
             // breaks the MPC protocol assumption.  Log a warning for diagnostics.
             tracing::warn!(
-                "sorted_bidders: seller {} has no bid in index — party 0 may be misassigned",
+                "sorted_bidders: seller {} has no bid in index - party 0 may be misassigned",
                 seller
             );
             let mut all_bids: Vec<_> = self.bids.iter().collect();

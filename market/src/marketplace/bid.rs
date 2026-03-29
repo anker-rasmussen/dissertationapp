@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(original.amount, restored.amount);
         assert_eq!(original.timestamp, restored.timestamp);
         assert_eq!(original.commitment, restored.commitment);
-        // reveal_nonce is skip_serializing — must be None after round-trip
+        // reveal_nonce is skip_serializing, so it must be None after a round-trip
         assert_eq!(restored.reveal_nonce, None);
     }
 

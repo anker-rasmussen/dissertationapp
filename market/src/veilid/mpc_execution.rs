@@ -19,7 +19,7 @@ fn resolve_protocol(_: usize) -> String {
 
 /// Compile the MPC program for the given number of parties using MP-SPDZ's `compile.py`.
 ///
-/// Uses a filesystem lock to prevent concurrent compilation — multiple market nodes
+/// Uses a filesystem lock to prevent concurrent compilation because multiple market nodes
 /// on the same machine share the MP-SPDZ directory and would otherwise race on
 /// `Programs/Schedules/auction_n-N.sch`, causing
 /// `Fatal error: Error reading Programs/Schedules/auction_n-N.sch`.
@@ -56,7 +56,7 @@ pub(crate) async fn compile_mpc_program(mp_spdz_dir: &str, num_parties: usize) -
         )));
     }
 
-    // Re-check after acquiring lock — another process may have compiled while we waited
+    // Re-check after acquiring lock since another process may have compiled while we waited
     if std::path::Path::new(&schedule_path).exists() {
         info!(
             "MPC schedule compiled by another process for {} parties, skipping",

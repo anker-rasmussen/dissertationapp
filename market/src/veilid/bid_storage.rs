@@ -18,7 +18,7 @@ struct BidEntry {
 type BidMap = Arc<RwLock<HashMap<RecordKey, BidEntry>>>;
 
 /// Stores bid values locally so we can reveal them during MPC
-/// This is kept in memory - in production should be encrypted on disk
+/// This is kept in memory; in production it should be encrypted on disk
 #[derive(Clone)]
 pub struct BidStorage {
     bids: BidMap,

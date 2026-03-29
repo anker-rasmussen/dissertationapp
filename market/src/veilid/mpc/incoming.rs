@@ -252,7 +252,7 @@ impl MpcTunnelProxy {
                 let mut sessions = self.inner.sessions.lock().await;
                 if sessions.contains_key(&session_key) {
                     warn!(
-                        "Open: race detected — session ({}, {}) already inserted by concurrent Open, dropping duplicate TCP connection",
+                        "Open: race detected - session ({}, {}) already inserted by concurrent Open, dropping duplicate TCP connection",
                         source_party_id, stream_id
                     );
                     return Ok(());
@@ -330,7 +330,7 @@ impl MpcTunnelProxy {
                         }
                         Err(e) => {
                             error!(
-                                "Response relay: TCP read error for ({}, {}): {} — \
+                                "Response relay: TCP read error for ({}, {}): {} - \
                                  sending Close to remote peer",
                                 target_pid, stream_id, e
                             );
@@ -383,7 +383,7 @@ impl MpcTunnelProxy {
                     let c = cancel.clone();
                     tokio::spawn(async move {
                         if p.send_reliable(target_pid, &data, &label).await.is_err() {
-                            error!("{label}: delivery failed — cancelling tunnel proxy");
+                            error!("{label}: delivery failed - cancelling tunnel proxy");
                             c.cancel();
                         }
                         drop(permit);
@@ -410,7 +410,7 @@ impl MpcTunnelProxy {
         let session_exists = self.inner.sessions.lock().await.contains_key(&session_key);
 
         if !session_exists {
-            // Session not yet open — buffer with seq for reorder on flush
+            // Session not yet open; buffer with seq for reorder on flush
             debug!(
                 "Data: buffering seq {} ({} bytes) for pending session ({}, {})",
                 seq,
@@ -501,7 +501,7 @@ impl MpcTunnelProxy {
     #[tracing::instrument(skip_all)]
     pub async fn process_call(&self, message: Vec<u8>, signer: [u8; 32]) -> MarketResult<Vec<u8>> {
         let call_start = std::time::Instant::now();
-        // Peek at message type — Open still needs async spawn (30s+ TCP connect).
+        // Peek at message type. Open still needs async spawn (30s+ TCP connect).
         let is_open = {
             let peek: MpcMessage = bincode_deserialize_limited(&message)?;
             matches!(peek, MpcMessage::Open { .. })

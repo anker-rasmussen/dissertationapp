@@ -1,4 +1,4 @@
-//! Application state — re-exports `SharedAppState` from the library crate
+//! Application state: re-exports `SharedAppState` from the library crate
 //! and provides the `SHARED_STATE` static for main-to-Dioxus handoff.
 
 pub use market::shared_state::SharedAppState;

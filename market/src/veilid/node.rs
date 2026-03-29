@@ -203,7 +203,7 @@ impl VeilidNode {
                     },
                     ws: VeilidConfigWS {
                         connect: true,
-                        listen: false, // Disabled in devnet — conflicts with TCP on same port
+                        listen: false, // Disabled in devnet to avoid conflicting with TCP on same port
                         max_connections: 16,
                         listen_address: listen_addr,
                         path: "ws".to_string(),

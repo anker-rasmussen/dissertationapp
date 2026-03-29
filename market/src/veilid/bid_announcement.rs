@@ -166,7 +166,7 @@ impl BidAnnouncementRegistry {
 
     /// Merge another registry into this one (G-Set union).
     ///
-    /// Commutative, associative, and idempotent — suitable for
+    /// Commutative, associative, and idempotent, making it suitable for
     /// state-based CRDT convergence.
     pub fn merge(&mut self, other: &Self) {
         for (bidder, bid_key, ts) in &other.announcements {

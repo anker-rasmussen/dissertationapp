@@ -58,7 +58,7 @@ impl AuctionPhase {
             Self::CollectingRoutes => "Collecting routes...",
             Self::ReadinessBarrier => "Readiness barrier...",
             Self::MpcExecuting => "MPC executing...",
-            Self::Verifying => "MPC complete — verifying...",
+            Self::Verifying => "MPC complete - verifying...",
             Self::Completed => "Completed",
         }
     }
@@ -108,7 +108,7 @@ pub struct MpcOrchestrator {
     /// Ed25519 signing key for authenticating outgoing messages.
     pub(crate) signing_key: SigningKey,
     /// Active MPC tunnel proxies keyed by session ID (listing key string).
-    /// Supports concurrent auctions — each auction gets its own tunnel.
+    /// Supports concurrent auctions; each auction gets its own tunnel.
     pub(crate) active_tunnel_proxies: Arc<Mutex<HashMap<String, MpcTunnelProxy>>>,
     /// MPC route managers per auction: Map<listing_key, MpcRouteManager>
     pub(crate) route_managers: RouteManagerMap,
@@ -126,7 +126,7 @@ pub struct MpcOrchestrator {
     /// Set when MPC execution begins so the monitoring loop refreshes
     /// broadcast routes afterwards.  Routes go stale during MPC (keepalive
     /// suppressed), and refreshing prevents relay nodes from correlating
-    /// traffic across sessions.  NOT set on route-exchange failure — MPC
+    /// traffic across sessions.  NOT set on route-exchange failure because MPC
     /// never ran, so the route is still clean and other parties may have
     /// it cached for retry convergence.
     needs_route_refresh: Arc<std::sync::atomic::AtomicBool>,
@@ -372,9 +372,9 @@ impl MpcOrchestrator {
         if bid_index.bids.is_empty() {
             // We only reach here when we know we bid on this listing
             // (checked by handle_auction_end_wrapper), so an empty index
-            // means the DHT hasn't propagated yet — retry.
+            // means the DHT hasn't propagated yet; retry.
             warn!(
-                "No bids discovered for listing '{}' — DHT may not have propagated",
+                "No bids discovered for listing '{}' - DHT may not have propagated",
                 listing_title
             );
             return Err(MarketError::NotFound(
@@ -391,11 +391,11 @@ impl MpcOrchestrator {
         let sorted_bidders = bid_index.sorted_bidders(seller_pubkey);
 
         // MPC requires at least 2 parties.
-        // Return Err so the monitoring loop retries — DHT propagation may
+        // Return Err so the monitoring loop retries since DHT propagation may
         // not have completed yet, and more bids may appear on the next tick.
         if validate_auction_parties(sorted_bidders.len()).is_err() {
             warn!(
-                "Auction for '{}' has only {} parties, but MPC requires at least 2 — will retry.",
+                "Auction for '{}' has only {} parties, but MPC requires at least 2 - will retry.",
                 listing_title,
                 sorted_bidders.len()
             );
@@ -475,8 +475,8 @@ impl MpcOrchestrator {
                 }
                 // On failure (barrier timeout, route collection timeout),
                 // reset stale route state so the next retry starts fresh.
-                // Ready signals are preserved — see Phase 2 race comment.
-                // Do NOT refresh the broadcast route on failure — it's still
+                // Ready signals are preserved (see Phase 2 race comment).
+                // Do NOT refresh the broadcast route on failure since it's still
                 // valid and other parties may have cached it.  Refreshing it
                 // invalidates their cached copy, preventing route convergence
                 // in concurrent auction scenarios.
@@ -579,7 +579,7 @@ impl MpcOrchestrator {
         self.write_own_route_to_dht(&route_manager, listing_key, bid_record_keys)
             .await;
 
-        // Phase 1 — Route collection
+        // Phase 1: Route collection
         self.collect_party_routes(
             &route_manager,
             listing_key,
@@ -590,7 +590,7 @@ impl MpcOrchestrator {
         )
         .await?;
 
-        // Phase 2 — Readiness barrier
+        // Phase 2: Readiness barrier
         self.set_auction_phase(listing_key, AuctionPhase::ReadinessBarrier)
             .await;
         self.run_readiness_barrier(
@@ -603,7 +603,7 @@ impl MpcOrchestrator {
         )
         .await?;
 
-        // Phase 3 — Post-barrier route refresh
+        // Phase 3: Post-barrier route refresh
         self.refresh_routes_post_barrier(
             &route_manager,
             listing_key,
@@ -883,7 +883,7 @@ impl MpcOrchestrator {
         found
     }
 
-    /// Phase 1 — Wait for all parties' route announcements.
+    /// Phase 1: Wait for all parties' route announcements.
     async fn collect_party_routes(
         &self,
         route_manager: &Arc<Mutex<MpcRouteManager>>,
@@ -961,7 +961,7 @@ impl MpcOrchestrator {
     /// Barrier rebroadcast tick: send `MpcReady` via MPC routes + broadcast routes.
     ///
     /// MPC-route sends use `app_call` whose response carries the responder's
-    /// own `MpcReady` data back — a single round-trip registers **both** parties
+    /// own `MpcReady` data back; a single round-trip registers **both** parties
     /// as ready.  Broadcast routes are a fallback for peers still in Phase 1
     /// (they haven't imported our MPC route yet).
     ///
@@ -1037,7 +1037,7 @@ impl MpcOrchestrator {
         }
     }
 
-    /// Phase 2 — Readiness barrier: wait for all parties to signal `MpcReady`.
+    /// Phase 2: Readiness barrier: wait for all parties to signal `MpcReady`.
     ///
     /// Ready signals are accumulated (not cleared) to avoid a race where a
     /// party re-entering the barrier clears another party's signal.
@@ -1103,7 +1103,7 @@ impl MpcOrchestrator {
                 mgr.clear_ready().await;
                 drop(mgr);
                 return Err(MarketError::Network(format!(
-                    "Party count mismatch: we expect {num_parties} but a peer reports {their_count} — \
+                    "Party count mismatch: we expect {num_parties} but a peer reports {their_count} - \
                      bid set not yet converged, retrying"
                 )));
             }
@@ -1131,7 +1131,7 @@ impl MpcOrchestrator {
             }
 
             // Re-broadcast every 3 ticks (~3s). MPC-route sends carry acks
-            // that register the responder as ready — end-to-end confirmation.
+            // that register the responder as ready, giving end-to-end confirmation.
             barrier_tick = barrier_tick.wrapping_add(1);
             if barrier_tick.is_multiple_of(3) {
                 self.barrier_rebroadcast(
@@ -1155,7 +1155,7 @@ impl MpcOrchestrator {
         Ok(())
     }
 
-    /// Phase 3 — Create fresh routes after the readiness barrier and reassemble.
+    /// Phase 3: Create fresh routes after the readiness barrier and reassemble.
     ///
     /// MPC routes created in Phase 1 likely died during the 30-120s barrier
     /// (Veilid routes expire every 60-90s in devnets).
@@ -1565,7 +1565,7 @@ impl MpcOrchestrator {
         // monitoring loop retries after DHT propagation catches up.
         if fetched < announced {
             return Err(MarketError::NotFound(format!(
-                "Only fetched {fetched}/{announced} bid records from DHT — retrying"
+                "Only fetched {fetched}/{announced} bid records from DHT - retrying"
             )));
         }
 

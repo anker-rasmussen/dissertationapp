@@ -25,11 +25,11 @@ pub struct MpcRouteManager {
     my_route_id: Option<RouteId>,
     my_route_blob: Option<RouteBlob>, // Route blob for sharing with other parties
     /// When true, `my_route_id` is the broadcast route borrowed from the
-    /// coordinator.  Must NOT be released by this manager — the coordinator
+    /// coordinator.  Must NOT be released by this manager; the coordinator
     /// owns its lifecycle.
     borrowed_route: bool,
     pub(crate) received_routes: Arc<Mutex<HashMap<PublicKey, RouteId>>>,
-    /// Raw route blobs keyed by party pubkey — kept for re-import to refresh
+    /// Raw route blobs keyed by party pubkey, kept for re-import to refresh
     /// the 5-minute expiry timer before tunnel proxy use.
     received_blobs: Arc<Mutex<HashMap<PublicKey, Vec<u8>>>>,
     /// Maps party pubkey → (num_parties, timestamp) for recency filtering.
@@ -76,7 +76,7 @@ impl MpcRouteManager {
 
         // Self-import the route blob so Veilid marks it as deliverable.
         // Without this, only one of N created routes actually works.
-        // See: https://gitlab.com/nicator/veilid — confirmed by Veilid core team.
+        // See: https://gitlab.com/nicator/veilid (confirmed by Veilid core team).
         let _ = self
             .api
             .import_remote_private_route(blob_bytes)
@@ -219,7 +219,7 @@ impl MpcRouteManager {
     /// Register a route announcement received from another party.
     ///
     /// Always re-imports the route blob so Veilid refreshes its internal
-    /// relay state — this recovers from transient `dead_remote_routes` events
+    /// relay state, which recovers from transient `dead_remote_routes` events
     /// that would otherwise leave a stale handle in `received_routes`.
     /// Returns `true` if this is a new or changed route, `false` if the same
     /// route was already registered (re-import only refreshed Veilid state).
@@ -422,7 +422,7 @@ impl MpcRouteManager {
     ///
     /// Unlike `broadcast_mpc_ready` which imports broadcast route blobs
     /// (potentially stale), this sends through the MPC routes collected
-    /// during Phase 1 — these are known-good since route collection
+    /// during Phase 1 and are known-good since route collection
     /// succeeded.
     #[allow(clippy::significant_drop_tightening)]
     pub async fn send_ready_via_mpc_routes(
@@ -536,7 +536,7 @@ impl MpcRouteManager {
     /// IMPORTANT: Does NOT call `release_private_route` before re-import.
     /// Releasing would invalidate the RouteId globally in Veilid's store,
     /// breaking any concurrent senders (e.g. the tunnel proxy) using the
-    /// same RouteId.  Re-import is safe and idempotent — it refreshes
+    /// same RouteId.  Re-import is safe and idempotent since it refreshes
     /// the LRU cache entry without disrupting active senders.
     #[allow(clippy::significant_drop_tightening)]
     pub async fn handle_dead_remote_routes(&self, dead: &[RouteId]) {
@@ -558,7 +558,7 @@ impl MpcRouteManager {
                 continue;
             };
 
-            // Re-import without releasing — idempotent for remote routes
+            // Re-import without releasing (idempotent for remote routes)
             if let Some(blob) = blobs.get(&pubkey) {
                 match self.api.import_remote_private_route(blob.clone()) {
                     Ok(new_route) => {
@@ -652,7 +652,7 @@ impl MpcRouteManager {
 
     /// Handle dead own routes reported by `VeilidUpdate::RouteChange`.
     ///
-    /// Checks both `dead_routes` and `dead_remote_routes` — Veilid sometimes
+    /// Checks both `dead_routes` and `dead_remote_routes` because Veilid sometimes
     /// reports a node's own allocated route in `dead_remote_routes` rather
     /// than `dead_routes` (confirmed by core team on Discord).
     ///
@@ -670,7 +670,7 @@ impl MpcRouteManager {
         }
 
         info!(
-            "Own MPC route {} died — recreating for party {}",
+            "Own MPC route {} died - recreating for party {}",
             my_route, self.party_id
         );
 

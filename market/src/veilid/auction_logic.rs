@@ -534,7 +534,7 @@ mod tests {
             )
             .await;
 
-        // Discover bids - should find from local announcements
+        // Discover bids (should find from local announcements)
         // (but won't find actual bid records since they're not in DHT)
         let bid_index = logic.discover_bids(&listing_key).await.unwrap();
 

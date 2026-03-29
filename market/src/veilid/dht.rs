@@ -11,7 +11,7 @@ const MAX_DHT_VALUE_SIZE: usize = 32 * 1024;
 
 /// DHT operations wrapper for Veilid.
 ///
-/// Always uses Veilid's default safe routing — both in devnet and production.
+/// Always uses Veilid's default safe routing, in both devnet and production.
 #[derive(Clone)]
 pub struct DHTOperations {
     api: VeilidAPI,
@@ -48,7 +48,7 @@ impl DHTOperations {
         let schema = DHTSchema::dflt(DHT_SUBKEY_COUNT)
             .map_err(|e| MarketError::Dht(format!("Failed to create DHT schema: {e}")))?;
 
-        // Create the record - this generates a new key and allocates storage
+        // Create the record (generates a new key and allocates storage)
         // kind: CRYPTO_KIND_VLD0, schema: dflt(2), owner: None (random keypair)
         let record_descriptor = routing_context
             .create_dht_record(CRYPTO_KIND_VLD0, schema, None)
@@ -88,7 +88,7 @@ impl DHTOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for writing: {e}")))?;
 
-        // Set the value at specified subkey — capture result so we always close
+        // Set the value at specified subkey; capture result so we always close
         let write_result = routing_context
             .set_dht_value(record.key.clone(), subkey, value.clone(), None)
             .await
@@ -109,7 +109,7 @@ impl DHTOperations {
     }
 
     /// Atomic read-modify-write: opens the record once with the owner keypair,
-    /// reads the current value (local cache, no network refresh — we are the
+    /// reads the current value (local cache, no network refresh, since we are the
     /// writer so our local copy is authoritative), applies a user-supplied
     /// transform, and writes the result back before closing.
     #[tracing::instrument(skip_all, fields(key = %record.key, subkey))]
@@ -196,7 +196,7 @@ impl DHTOperations {
             .await
             .map_err(|e| MarketError::Dht(format!("Failed to open DHT record for reading: {e}")))?;
 
-        // Get the value at specified subkey — capture result so we always close
+        // Get the value at specified subkey; capture result so we always close
         let read_result = routing_context
             .get_dht_value(key.clone(), subkey, force_refresh)
             .await

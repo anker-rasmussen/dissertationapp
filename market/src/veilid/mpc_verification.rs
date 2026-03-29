@@ -48,7 +48,7 @@ impl MpcOrchestrator {
 
         if winner_pid == 0 {
             // Winner is the seller (reserve price was highest) = no sale
-            info!("No bidder exceeded the reserve price — no sale");
+            info!("No bidder exceeded the reserve price - no sale");
             self.cleanup_route_manager(listing_key).await;
         } else if winner_pid < all_parties.len() {
             let winner_pubkey = all_parties[winner_pid].clone();
@@ -94,10 +94,10 @@ impl MpcOrchestrator {
         let i_won = result.i_won.unwrap_or(false);
 
         if i_won {
-            info!("I won — waiting for seller's challenge (WinnerDecryptionRequest)");
+            info!("I won - waiting for seller's challenge (WinnerDecryptionRequest)");
             self.mark_expected_winner(listing_key).await;
         } else {
-            info!("I lost — cleaning up route manager");
+            info!("I lost - cleaning up route manager");
             self.clear_expected_winner(listing_key).await;
             self.cleanup_route_manager(listing_key).await;
             self.set_auction_phase(listing_key, AuctionPhase::Completed)
@@ -211,7 +211,7 @@ impl MpcOrchestrator {
 
     /// Send decryption hash to auction winner via their MPC route.
     ///
-    /// Uses the same retry loop as `send_winner_challenge` — if the route
+    /// Uses the same retry loop as `send_winner_challenge` since if the route
     /// dies between challenge and key delivery the winner would prove they
     /// won but never receive the decryption key.
     pub async fn send_decryption_hash(

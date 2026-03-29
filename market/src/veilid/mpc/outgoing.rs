@@ -96,7 +96,7 @@ impl MpcTunnelProxy {
         let label = format!("Open to Party {target_pid} stream {stream_id}");
         if let Err(e) = self.send_reliable(target_pid, &data, &label).await {
             warn!(
-                "Initial Open send to Party {} stream {} failed: {} — re-sender will retry",
+                "Initial Open send to Party {} stream {} failed: {} - re-sender will retry",
                 target_pid, stream_id, e
             );
         }
@@ -161,7 +161,7 @@ impl MpcTunnelProxy {
 
             // Acquire pipeline slot, then send concurrently
             let Ok(permit) = Arc::clone(&send_sem).acquire_owned().await else {
-                break; // semaphore closed — shutting down
+                break; // semaphore closed, shutting down
             };
             let proxy = self.clone();
             let cancel_on_fail = cancel.clone();
@@ -171,7 +171,7 @@ impl MpcTunnelProxy {
                     .await
                     .is_err()
                 {
-                    error!("{label}: delivery failed — cancelling tunnel proxy");
+                    error!("{label}: delivery failed - cancelling tunnel proxy");
                     cancel_on_fail.cancel();
                 }
                 drop(permit);
@@ -203,7 +203,7 @@ impl MpcTunnelProxy {
             }
         }
 
-        // On cancellation, skip the pipeline drain and Close send — we're
+        // On cancellation, skip the pipeline drain and Close send since we're
         // shutting down and need to release the socket promptly so that a
         // retry can re-bind the same port.
         if !cancelled {

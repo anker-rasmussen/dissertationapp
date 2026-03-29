@@ -412,7 +412,7 @@ pub fn ListingBrowser(
                     }
                 }
 
-                // Countdown timer — decrement every tick
+                // Countdown timer: decrement every tick
                 {
                     let mut cur = current_listing.write();
                     if let Some(info) = cur.as_mut() {
@@ -790,11 +790,11 @@ fn ListingDisplay(
                     class: if listing.has_decryption_key || listing.is_seller { "mpc-banner completed" } else { "mpc-banner lost" },
                     span { class: "mpc-label",
                         if listing.is_seller {
-                            "MPC complete — seller"
+                            "MPC complete - seller"
                         } else if listing.has_decryption_key {
-                            "MPC complete — you won!"
+                            "MPC complete - you won!"
                         } else {
-                            "MPC complete — lost"
+                            "MPC complete - lost"
                         }
                     }
                     span {

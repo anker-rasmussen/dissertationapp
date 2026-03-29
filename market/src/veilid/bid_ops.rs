@@ -215,7 +215,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Fetch bid index — should build from announcements + individual records
+        // Fetch bid index (should build from announcements + individual records)
         let index = ops.fetch_bid_index(&listing_key).await.unwrap();
         assert_eq!(index.bids.len(), 2);
         assert!(index.bids.iter().any(|b| b.bidder == bid1.bidder));

@@ -1,9 +1,9 @@
 //! Devnet control utility for E2E testing
 //!
 //! Commands:
-//!   start  - Start the devnet and wait for health
-//!   stop   - Stop the devnet
-//!   status - Check devnet status
+//!   start:  start the devnet and wait for health
+//!   stop:   stop the devnet
+//!   status: check devnet status
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

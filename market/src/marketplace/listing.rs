@@ -483,7 +483,7 @@ mod tests {
         assert_eq!(original.title, restored.title);
         assert_eq!(original.encrypted_content, restored.encrypted_content);
         assert_eq!(original.content_nonce, restored.content_nonce);
-        // decryption_key is #[serde(skip)] — not serialized to prevent DHT leakage
+        // decryption_key is #[serde(skip)] and therefore not serialized, preventing DHT leakage
         assert!(
             restored.decryption_key.is_empty(),
             "decryption_key must not survive serialization round-trip"

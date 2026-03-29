@@ -69,7 +69,7 @@ pub(super) const fn party_port(base_port: u16, party_id: usize) -> u16 {
 /// identifier so concurrent auctions can be routed to the correct
 /// tunnel proxy.
 ///
-/// `session_id` is the listing key string — deterministic and known to
+/// `session_id` is the listing key string, which is deterministic and known to
 /// all parties in the same auction without extra coordination.
 ///
 /// The coordinator peek-deserializes this to extract `session_id` for
@@ -153,7 +153,7 @@ pub(super) struct MpcTunnelProxyInner {
     pub(super) session_id: String,
     /// Imported remote private route handles per party.
     pub(super) party_routes: Mutex<HashMap<usize, RouteId>>,
-    /// Raw route blobs per party — for re-import when a route expires.
+    /// Raw route blobs per party, kept for re-import when a route expires.
     pub(super) party_blobs: Arc<Mutex<HashMap<usize, Vec<u8>>>>,
     /// Reverse mapping: signer pubkey bytes → party id.
     pub(super) signer_to_party: HashMap<[u8; 32], usize>,
@@ -198,7 +198,7 @@ pub(super) struct MpcTunnelProxyInner {
 pub struct MpcTunnelConfig {
     pub api: VeilidAPI,
     pub party_id: usize,
-    /// Session identifier (listing key string) — tags every outgoing
+    /// Session identifier (listing key string) that tags every outgoing
     /// [`MpcEnvelope`] so the receiver can route to the correct tunnel.
     pub session_id: String,
     pub party_routes: HashMap<usize, RouteId>,
@@ -374,7 +374,7 @@ impl MpcTunnelProxy {
                 }
             }
 
-            // Round failed — restore routes for non-responsive peers.
+            // Round failed; restore routes for non-responsive peers.
             let still_missing: Vec<usize> = {
                 let received = self.inner.syn_ack_received.lock().await;
                 peers
@@ -384,7 +384,7 @@ impl MpcTunnelProxy {
                     .collect()
             };
             warn!(
-                "Party {my_pid}: SYN/ACK round {round} failed, missing {still_missing:?} — restoring routes",
+                "Party {my_pid}: SYN/ACK round {round} failed, missing {still_missing:?} - restoring routes",
             );
             for &pid in &still_missing {
                 let blob = self.inner.party_blobs.lock().await.get(&pid).cloned();
@@ -450,7 +450,7 @@ impl MpcTunnelProxy {
                 peers.iter().all(|p| received.contains(p))
             };
             if all_received {
-                info!("Party {my_pid}: all peers confirmed SynAckComplete — launching MPC");
+                info!("Party {my_pid}: all peers confirmed SynAckComplete - launching MPC");
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -614,13 +614,13 @@ impl MpcTunnelProxy {
                         );
                         return Ok(());
                     }
-                    // NACK — peer's tunnel proxy not ready yet; retry
-                    debug!("{label} attempt {attempt}: NACK from Party {target_pid} — retrying");
+                    // NACK: peer's tunnel proxy not ready yet; retry
+                    debug!("{label} attempt {attempt}: NACK from Party {target_pid} - retrying");
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     backoff_ms = (backoff_ms * 2).min(1000);
                 }
                 Err(e) => {
-                    debug!("{label} attempt {attempt}: app_call failed: {e} — reimporting route");
+                    debug!("{label} attempt {attempt}: app_call failed: {e} - reimporting route");
                     self.reimport_party_route(target_pid).await;
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     backoff_ms = (backoff_ms * 2).min(1000);
@@ -653,7 +653,7 @@ impl MpcTunnelProxy {
 
         let result = match seq.cmp(&buf.next_seq) {
             std::cmp::Ordering::Equal => {
-                // In order — deliver immediately plus any consecutive buffered
+                // In order: deliver immediately plus any consecutive buffered
                 let mut result = vec![payload];
                 buf.next_seq += 1;
                 while let Some(p) = buf.buffer.remove(&buf.next_seq) {
@@ -663,7 +663,7 @@ impl MpcTunnelProxy {
                 result
             }
             std::cmp::Ordering::Greater => {
-                // Out of order — buffer
+                // Out of order: buffer
                 debug!(
                     "Reorder: buffering seq {} for ({}, {}), expecting {}",
                     seq, session_key.0, session_key.1, buf.next_seq
@@ -699,7 +699,7 @@ impl MpcTunnelProxy {
                 }
             }
             std::cmp::Ordering::Less => {
-                // Duplicate (seq < next_seq) — discard
+                // Duplicate (seq < next_seq): discard
                 warn!(
                     "Reorder: discarding duplicate seq {} for ({}, {})",
                     seq, session_key.0, session_key.1

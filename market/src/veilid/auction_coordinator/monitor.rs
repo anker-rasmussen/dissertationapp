@@ -11,7 +11,7 @@ use crate::error::{MarketError, MarketResult};
 use crate::marketplace::PublicListing;
 
 impl AuctionCoordinator {
-    /// Handle `VeilidUpdate::RouteChange` — re-import dead remote routes and
+    /// Handle `VeilidUpdate::RouteChange`: re-import dead remote routes and
     /// recreate dead own routes for all active MPC route managers.
     pub async fn handle_route_change(
         &self,
@@ -93,7 +93,7 @@ impl AuctionCoordinator {
 
         // Self-import the route blob so Veilid marks it as deliverable.
         // Without this, only one of N created routes actually works.
-        // See: https://gitlab.com/nicator/veilid — confirmed by Veilid core team.
+        // See: https://gitlab.com/nicator/veilid (confirmed by Veilid core team).
         let _ = self
             .api
             .import_remote_private_route(blob_bytes.clone())
@@ -170,7 +170,7 @@ impl AuctionCoordinator {
                         );
                     } else {
                         if mpc_just_finished {
-                            info!("MPC finished — forcing immediate broadcast route refresh");
+                            info!("MPC finished - forcing immediate broadcast route refresh");
                         }
                         match monitor_self.create_and_register_broadcast_route().await {
                             Ok(()) => {
@@ -288,7 +288,7 @@ impl AuctionCoordinator {
         // existed when the bid was placed).
         self.retry_pending_bid_announcements().await;
 
-        // Discover bids with stabilization — keep polling for a few seconds
+        // Discover bids with stabilization, keeping polling for a few seconds
         // so that late-arriving bid announcements are picked up.
         let bid_index = {
             let stabilization_secs = config::BID_DISCOVERY_STABILIZATION_SECS;

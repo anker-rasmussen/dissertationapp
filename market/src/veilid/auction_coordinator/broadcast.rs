@@ -118,7 +118,7 @@ impl AuctionCoordinator {
     }
 
     /// Broadcast a message to all known peers via private routes stored in the
-    /// master registry.  Uses `app_call` for confirmed delivery — `app_message`
+    /// master registry.  Uses `app_call` for confirmed delivery because `app_message`
     /// is fire-and-forget and silently drops data on stale routes.
     async fn broadcast_message(&self, data: &[u8]) -> MarketResult<usize> {
         let route_blobs = {

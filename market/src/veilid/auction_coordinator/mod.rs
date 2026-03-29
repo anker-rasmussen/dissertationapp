@@ -84,7 +84,7 @@ pub struct AuctionCoordinator {
     pub(super) my_node_id: PublicKey,
     /// Ed25519 signing key for authenticating outgoing messages.
     pub(super) signing_key: SigningKey,
-    /// Core auction state machine — the tested generic layer.
+    /// Core auction state machine (the tested generic layer).
     pub(super) logic: CoordinatorLogic,
     /// Per-seller registry operations (shared via `Arc<Mutex>`).
     pub(super) registry_ops: Arc<Mutex<RegistryOperations>>,
@@ -218,7 +218,7 @@ impl AuctionCoordinator {
         if let Some(proxy) = proxy {
             proxy.process_message(envelope.message, signer).await?;
         } else {
-            // Tunnel proxy not ready yet — buffer per-session so it's
+            // Tunnel proxy not ready yet; buffer per-session so it's
             // delivered once the corresponding proxy is activated.
             debug!(
                 "MPC message buffered for session {} (tunnel proxy not ready)",
@@ -235,7 +235,7 @@ impl AuctionCoordinator {
     ///
     /// `signer` is the Ed25519 verifying key bytes from the [`SignedEnvelope`].
     /// Identity binding to Veilid pubkey happens via `BidRecord.signing_pubkey`
-    /// or `SellerEntry.signing_pubkey` stored in the DHT — the signed envelope
+    /// or `SellerEntry.signing_pubkey` stored in the DHT; the signed envelope
     /// itself proves the sender owns the signing key.
     async fn handle_auction_message(
         &self,
@@ -510,7 +510,7 @@ impl AuctionCoordinator {
     ///
     /// Used by the headless IPC (`WaitForRoutes`) so E2E tests can wait
     /// until the monitoring loop has established a route before placing
-    /// bids — otherwise bid announcements silently fail because there
+    /// bids, otherwise bid announcements silently fail because there
     /// are no peer routes to deliver them to.
     pub async fn has_broadcast_route(&self) -> bool {
         self.broadcast_route_id.lock().await.is_some()
@@ -622,7 +622,7 @@ impl AuctionCoordinator {
 
     /// Release owned DHT records and broadcast routes on shutdown.
     pub async fn shutdown(&self) {
-        info!("AuctionCoordinator shutting down — releasing resources");
+        info!("AuctionCoordinator shutting down - releasing resources");
 
         // Release broadcast route
         let route_id = self.broadcast_route_id.lock().await.take();
@@ -662,8 +662,8 @@ impl AuctionCoordinator {
     ///
     /// Both MPC messages and AuctionMessages share the `SignedEnvelope` wire
     /// format.  We first try the MPC tunnel proxy (if active).  If the tunnel
-    /// can't handle it — either because the payload isn't an `MpcMessage` or
-    /// because the tunnel was already shut down — we try parsing as an
+    /// can't handle it (either because the payload isn't an `MpcMessage` or
+    /// because the tunnel was already shut down), we try parsing as an
     /// `AuctionMessage` (covers `WinnerDecryptionRequest`, etc.).
     /// Returns NACK `[0x00]` only for genuine MPC messages when no tunnel
     /// exists (sender should retry).
@@ -676,7 +676,7 @@ impl AuctionCoordinator {
             // Try AuctionMessage first (WinnerDecryptionRequest, etc.)
             if let Ok(auction_msg) = AuctionMessage::from_bytes(&payload) {
                 // For MpcReady, the ack carries our own readiness data back
-                // to the sender — a single round-trip registers BOTH parties.
+                // to the sender; a single round-trip registers BOTH parties.
                 let ack = if let AuctionMessage::MpcReady {
                     ref listing_key,
                     num_parties,
@@ -698,7 +698,7 @@ impl AuctionCoordinator {
                 return Ok(ack);
             }
 
-            // Not an AuctionMessage — peek-deserialize MpcEnvelope for routing.
+            // Not an AuctionMessage; peek-deserialize MpcEnvelope for routing.
             let envelope: MpcEnvelope = match bincode_deserialize_limited(&payload) {
                 Ok(env) => env,
                 Err(e) => {
@@ -722,15 +722,15 @@ impl AuctionCoordinator {
                 return tunnel.process_call(envelope.message, signer).await;
             }
 
-            // MPC message but tunnel not ready — NACK so sender retries.
+            // MPC message but tunnel not ready; NACK so sender retries.
             debug!(
-                "MPC message for session {} but tunnel proxy not ready — sending NACK",
+                "MPC message for session {} but tunnel proxy not ready - sending NACK",
                 envelope.session_id
             );
             return Ok(vec![0x00]);
         }
 
-        // Not a signed envelope — fall back to normal processing.
+        // Not a signed envelope; fall back to normal processing.
         self.process_app_message(message).await?;
         Ok(vec![0x01])
     }
