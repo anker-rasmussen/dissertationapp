@@ -22,6 +22,7 @@ use veilid_core::{
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeState {
     pub is_attached: bool,
+    pub attachment_state: String,
     pub peer_count: usize,
     pub node_ids: Vec<String>,
 }
@@ -297,7 +298,10 @@ impl VeilidNode {
                     );
                 }
                 VeilidUpdate::Attachment(attachment) => {
-                    state.write().is_attached = attachment.state.is_attached();
+                    let mut s = state.write();
+                    s.is_attached = attachment.state.is_attached();
+                    s.attachment_state = format!("{:?}", attachment.state);
+                    drop(s);
                     info!("Attachment state: {:?}", attachment.state);
                 }
                 VeilidUpdate::AppMessage(msg) => {

@@ -7,9 +7,8 @@
 //! Run full subset with: `cargo integration`
 //!
 //! Prerequisites:
-//! - Docker installed and running
-//! - veilid repo at expected path (for libipspoof.so and docker-compose)
-//! - LD_PRELOAD set to libipspoof.so path
+//! - veilid repo at expected path with ipspoof built (`cargo build -p ipspoof --release`)
+//! - Preload env var set (LD_PRELOAD on Linux, DYLD_INSERT_LIBRARIES on macOS)
 //!
 //! All E2E tests run serially to avoid devnet conflicts.
 
@@ -206,22 +205,28 @@ async fn test_e2e_smoke_single_node_diagnostic() {
     eprintln!("\n=== DIAGNOSTIC TEST: Single Node Startup ===\n");
 
     let libipspoof = libipspoof_path();
-    eprintln!("1. Checking libipspoof.so: {}", libipspoof.display());
+    let preload_var = if cfg!(target_os = "macos") {
+        "DYLD_INSERT_LIBRARIES"
+    } else {
+        "LD_PRELOAD"
+    };
+    eprintln!("1. Checking ipspoof lib: {}", libipspoof.display());
     if !libipspoof.exists() {
-        panic!("libipspoof.so not found at {}", libipspoof.display());
+        panic!("ipspoof lib not found at {}", libipspoof.display());
     }
-    eprintln!("   [OK] Found libipspoof.so");
+    eprintln!("   [OK] Found ipspoof lib");
 
-    let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
-    eprintln!("2. Checking LD_PRELOAD: {}", preload);
+    let preload = std::env::var(preload_var).unwrap_or_default();
+    eprintln!("2. Checking {}: {}", preload_var, preload);
     if !preload.contains(libipspoof.to_str().unwrap()) {
         panic!(
-            "LD_PRELOAD not set correctly.\n   Expected to contain: {}\n   Actual: {}",
+            "{} not set correctly.\n   Expected to contain: {}\n   Actual: {}",
+            preload_var,
             libipspoof.display(),
             preload
         );
     }
-    eprintln!("   [OK] LD_PRELOAD is set");
+    eprintln!("   [OK] {} is set", preload_var);
 
     eprintln!("3. Starting devnet...");
     let _devnet = match setup_e2e_environment() {

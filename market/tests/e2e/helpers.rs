@@ -31,14 +31,27 @@ pub fn veilid_repo_path() -> PathBuf {
         .join("veilid")
 }
 
-/// Path to libipspoof.so for IP translation in devnet.
-/// Prefers cargo-built `libveilid_ipspoof.so`, falls back to legacy location.
-pub fn libipspoof_path() -> PathBuf {
-    let cargo_built = veilid_repo_path().join("target/release/libveilid_ipspoof.so");
-    if cargo_built.exists() {
-        return cargo_built;
+/// Platform-specific ipspoof library name.
+fn ipspoof_lib_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "libveilid_ipspoof.dylib"
+    } else {
+        "libveilid_ipspoof.so"
     }
-    veilid_repo_path().join(".devcontainer/scripts/libipspoof.so")
+}
+
+/// Platform-specific preload env var.
+fn preload_env_var() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "DYLD_INSERT_LIBRARIES"
+    } else {
+        "LD_PRELOAD"
+    }
+}
+
+/// Path to libipspoof for IP translation in devnet.
+pub fn libipspoof_path() -> PathBuf {
+    veilid_repo_path().join(format!("target/release/{}", ipspoof_lib_name()))
 }
 
 /// Find the `veilid-playground` binary.
@@ -295,8 +308,10 @@ impl TestNode {
         self.node.start().await.map_err(|e| {
             MarketError::Network(format!(
                 "Failed to start Veilid node (offset {}): {}. \
-                 Ensure LD_PRELOAD is set and devnet is running.",
-                self.offset, e
+                 Ensure {} is set and devnet is running.",
+                self.offset,
+                e,
+                preload_env_var()
             ))
         })?;
         self.node.attach().await.map_err(|e| {
@@ -569,7 +584,7 @@ pub fn check_mp_spdz_available() -> bool {
     binary.exists()
 }
 
-/// Setup helper — starts devnet and validates LD_PRELOAD/libipspoof prerequisites.
+/// Setup helper — starts devnet and validates ipspoof preload prerequisites.
 pub fn setup_e2e_environment() -> MarketResult<DevnetManager> {
     // Kill any orphaned processes from previous runs.
     // When a test process is killed (e.g. timeout, Ctrl-C), child
@@ -592,22 +607,23 @@ pub fn setup_e2e_environment() -> MarketResult<DevnetManager> {
         .arg("shamir-party.x")
         .status();
 
-    let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
+    let preload_var = preload_env_var();
+    let preload = std::env::var(preload_var).unwrap_or_default();
     let expected_preload = libipspoof_path();
 
     if !expected_preload.exists() {
         return Err(MarketError::Config(format!(
-            "libipspoof.so not found at {}.\n\
-             Please build it with: {}/build-ipspoof.sh",
+            "{} not found at {}.\n\
+             Please build it with: cargo build -p ipspoof --release",
+            ipspoof_lib_name(),
             expected_preload.display(),
-            expected_preload.parent().unwrap().display()
         )));
     }
 
     if !preload.contains(expected_preload.to_str().unwrap()) {
         return Err(MarketError::Config(format!(
-            "LD_PRELOAD not set. E2E tests require IP spoofing.\n\
-             Run with: LD_PRELOAD={} cargo nextest run --profile e2e --ignored",
+            "{preload_var} not set. E2E tests require IP spoofing.\n\
+             Run with: {preload_var}={} cargo nextest run --profile e2e --ignored",
             expected_preload.display()
         )));
     }

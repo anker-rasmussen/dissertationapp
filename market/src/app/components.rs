@@ -900,6 +900,11 @@ pub fn app() -> Element {
         }
     });
 
+    // Launch lattice canvas animation (JS retries until canvas exists)
+    use_effect(move || {
+        document::eval(include_str!("../../assets/lattice.js"));
+    });
+
     let state = node_state.read();
 
     rsx! {
@@ -908,7 +913,26 @@ pub fn app() -> Element {
         div {
             class: "container",
 
-            h1 { "SMPC Sealed-Bid Auction" }
+            div {
+                class: "lattice-header",
+                div {
+                    class: {
+                        let color_class = match state.attachment_state.as_str() {
+                            s if s.contains("Good") || s.contains("Strong") || s.contains("Fully") || s.contains("Over") => "lattice-attached",
+                            s if s.contains("Attaching") || s.contains("Weak") => "lattice-attaching",
+                            s if s.contains("Detaching") => "lattice-detaching",
+                            _ => "lattice-idle",
+                        };
+                        format!("lattice-scene {color_class}")
+                    },
+                    canvas {
+                        id: "lattice-canvas",
+                        width: "80",
+                        height: "80",
+                    }
+                }
+                h1 { "Lattice" }
+            }
 
             NetworkStatus { state: state.clone() }
 

@@ -2,9 +2,9 @@
 //! Integration tests for multi-party sealed-bid auctions.
 //!
 //! These tests use the DI-based test harness to simulate multi-party
-//! auction scenarios without requiring Docker or real network infrastructure.
+//! auction scenarios without requiring a real Veilid devnet.
 //!
-//! E2E tests (in `e2e` module) require Docker and real Veilid devnet.
+//! E2E tests (in `e2e` module) require veilid-playground and ipspoof.
 //! Run smoke subset: `cargo test --test integration_tests -- --ignored e2e_smoke_`
 //! Run full subset: `cargo test --test integration_tests -- --ignored e2e_full_`
 

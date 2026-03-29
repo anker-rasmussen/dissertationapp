@@ -58,6 +58,44 @@ body {
     margin: 0 auto;
 }
 
+/* ── Lattice Header ──────────────────────────────────────────── */
+
+.lattice-header {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-dim);
+}
+
+.lattice-header h1 {
+    margin: 0;
+    padding: 0;
+    border: none;
+}
+
+/* ── 3D Lattice (canvas-driven) ──────────────────────────────── */
+
+.lattice-scene {
+    width: 80px;
+    height: 80px;
+    flex-shrink: 0;
+    transition: color 0.8s ease;
+}
+
+.lattice-scene canvas {
+    display: block;
+    width: 80px;
+    height: 80px;
+}
+
+/* Color states — canvas JS reads currentColor via getComputedStyle */
+.lattice-idle       { color: var(--text-muted); }
+.lattice-attaching  { color: var(--amber); }
+.lattice-attached   { color: var(--green); }
+.lattice-detaching  { color: var(--red); }
+
 /* ── Typography ───────────────────────────────────────────────── */
 
 h1 {
