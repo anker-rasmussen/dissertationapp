@@ -376,6 +376,11 @@ fn main() -> MarketResult<()> {
                 }
             }
             signal_shutdown.cancel();
+            // Give background tasks a moment to clean up, then force exit
+            // since dioxus::launch() blocks the main thread and won't respond
+            // to the cancellation token.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::process::exit(0);
         });
     });
 

@@ -749,7 +749,9 @@ fn ListingDisplay(
                 span { class: "label", "Your Bid:" }
                 span {
                     class: if listing.your_bid.is_some() { "your-bid active" } else { "your-bid" },
-                    if let Some(amount) = listing.your_bid {
+                    if listing.is_seller {
+                        "N/A (Seller)"
+                    } else if let Some(amount) = listing.your_bid {
                         "{amount} units"
                     } else {
                         "None"
