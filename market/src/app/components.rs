@@ -360,6 +360,9 @@ pub fn ListingBrowser(
     let mut bid_result = use_signal(String::new);
 
     // Auto-discover listings from registry every 5s.
+    // Auto-selecting the first listing is demo-only behaviour; in interactive
+    // mode (`make run`) the user picks a listing manually.
+    let is_demo = std::env::args().any(|a| a == "--demo-role");
     let registry_state = app_state.clone();
     let _registry_poller = use_resource(move || {
         let state = registry_state.clone();
@@ -373,8 +376,8 @@ pub fn ListingBrowser(
                             current.push((key.clone(), title.clone()));
                         }
                     }
-                    // Auto-select first listing if none selected yet
-                    if browse_key.read().is_empty() {
+                    // Auto-select first listing if none selected yet (demo only).
+                    if is_demo && browse_key.read().is_empty() {
                         if let Some((key, _)) = listings.first() {
                             drop(current);
                             browse_key.set(key.clone());
