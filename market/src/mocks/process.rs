@@ -61,12 +61,12 @@ impl SharedBidRegistry {
         for (&party_id, &(bid, timestamp)) in bids.iter() {
             match winner {
                 None => winner = Some((party_id, bid, timestamp)),
-                Some((best_pid, best_bid, best_ts)) => {
+                Some((best_party, best_bid, best_ts)) => {
                     // Higher bid wins, earlier timestamp breaks ties,
                     // lowest party_id as final deterministic tiebreak.
                     if bid > best_bid
                         || (bid == best_bid && timestamp < best_ts)
-                        || (bid == best_bid && timestamp == best_ts && party_id < best_pid)
+                        || (bid == best_bid && timestamp == best_ts && party_id < best_party)
                     {
                         winner = Some((party_id, bid, timestamp));
                     }

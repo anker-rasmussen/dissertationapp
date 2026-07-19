@@ -291,8 +291,10 @@ impl TestNode {
         let _ = std::fs::remove_dir_all(&data_dir);
         std::fs::create_dir_all(&data_dir).expect("Failed to create test data dir");
 
-        let mut market_config = market::config::MarketConfig::default();
-        market_config.insecure_storage = true;
+        let market_config = market::config::MarketConfig {
+            insecure_storage: true,
+            ..Default::default()
+        };
         let mut devnet_config = DevNetConfig::from_market_config(&market_config);
         devnet_config.port_offset = offset;
         let node = VeilidNode::new(data_dir.clone(), &market_config).with_devnet(devnet_config);

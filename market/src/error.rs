@@ -63,14 +63,14 @@ mod tests {
     #[test]
     fn test_display_dht_error() {
         let err = MarketError::Dht("Failed to write record".to_string());
-        let display = format!("{}", err);
+        let display = format!("{err}");
         assert_eq!(display, "DHT operation failed: Failed to write record");
     }
 
     #[test]
     fn test_display_validation_error() {
         let err = MarketError::Validation("Invalid bid amount".to_string());
-        let display = format!("{}", err);
+        let display = format!("{err}");
         assert_eq!(display, "Validation failed: Invalid bid amount");
     }
 

@@ -440,36 +440,36 @@ mod tests {
 
     #[test]
     fn test_parse_seller_output_valid() {
-        let output = r#"
+        let output = r"
 MP-SPDZ starting...
 Loading program...
 MPC_ATTESTATION: 36893488147419103274
 Winning bid: 42
 Winner: Party 2
 MPC execution completed
-"#;
+";
         let result = parse_seller_mpc_output(output);
         assert_eq!(result, Some((2, 42)));
     }
 
     #[test]
     fn test_parse_seller_output_no_winner() {
-        let output = r#"
+        let output = r"
 MP-SPDZ starting...
 Winning bid: 100
 MPC execution completed
-"#;
+";
         let result = parse_seller_mpc_output(output);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_parse_seller_output_no_bid() {
-        let output = r#"
+        let output = r"
 MP-SPDZ starting...
 Winner: Party 1
 MPC execution completed
-"#;
+";
         let result = parse_seller_mpc_output(output);
         assert_eq!(result, None);
     }
@@ -483,39 +483,39 @@ MPC execution completed
 
     #[test]
     fn test_parse_seller_output_party_zero() {
-        let output = r#"
+        let output = r"
 MP-SPDZ starting...
 MPC_ATTESTATION: 999
 Winning bid: 999
 Winner: Party 0
 MPC execution completed
-"#;
+";
         let result = parse_seller_mpc_output(output);
         assert_eq!(result, Some((0, 999)));
     }
 
     #[test]
     fn test_parse_bidder_output_won() {
-        let output = r#"
+        let output = r"
 MP-SPDZ starting...
 Loading program...
 MPC_ATTESTATION: 123456789
 You won: 1
 MPC execution completed
-"#;
+";
         let result = parse_bidder_mpc_output(output);
         assert_eq!(result, Some(true));
     }
 
     #[test]
     fn test_parse_bidder_output_lost() {
-        let output = r#"
+        let output = r"
 MP-SPDZ starting...
 Loading program...
 MPC_ATTESTATION: 123456789
 You won: 0
 MPC execution completed
-"#;
+";
         let result = parse_bidder_mpc_output(output);
         assert_eq!(result, Some(false));
     }
@@ -529,11 +529,11 @@ MPC execution completed
 
     #[test]
     fn test_parse_bidder_output_no_result_line() {
-        let output = r#"
+        let output = r"
 MP-SPDZ starting...
 Loading program...
 MPC execution completed
-"#;
+";
         let result = parse_bidder_mpc_output(output);
         assert_eq!(result, None);
     }

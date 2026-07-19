@@ -599,18 +599,18 @@ mod tests {
         let counter: u64 = 99;
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&counter.to_le_bytes());
-        for i in 8..32 {
-            bytes[i] = ((counter >> ((i % 8) * 8)) & 0xFF) as u8;
+        for (i, byte) in bytes.iter_mut().enumerate().skip(8) {
+            *byte = ((counter >> ((i % 8) * 8)) & 0xFF) as u8;
         }
 
         let encoded = data_encoding::BASE64URL_NOPAD.encode(&bytes);
-        let key_str = format!("VLD0:{}", encoded);
+        let key_str = format!("VLD0:{encoded}");
         let route_id =
             veilid_core::RouteId::try_from(key_str.as_str()).expect("Should create valid RouteId");
 
         RouteBlob {
             route_id,
-            blob: format!("test_route_blob_{}", counter).into_bytes(),
+            blob: format!("test_route_blob_{counter}").into_bytes(),
         }
     }
 
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(registry.announcements.len(), 1);
 
         // Adding same bidder again should be deduplicated
-        registry.add(bidder.clone(), bid_key.clone(), 2000);
+        registry.add(bidder, bid_key.clone(), 2000);
         assert_eq!(registry.announcements.len(), 1);
 
         // Adding different bidder should work
@@ -822,10 +822,10 @@ mod tests {
         let key2 = crate::mocks::dht::make_test_record_key(20);
 
         let mut a = BidAnnouncementRegistry::new();
-        a.add(bidder1.clone(), key1.clone(), 100);
+        a.add(bidder1.clone(), key1, 100);
 
         let mut b = BidAnnouncementRegistry::new();
-        b.add(bidder2.clone(), key2.clone(), 200);
+        b.add(bidder2.clone(), key2, 200);
 
         let mut ab = a.clone();
         ab.merge(&b);
@@ -937,7 +937,7 @@ mod tests {
         // Actually, simplest: use bincode_deserialize_limited directly
         let huge_len: u64 = 128 * 1024; // 128 KB
         bad.extend_from_slice(&huge_len.to_le_bytes());
-        bad.extend_from_slice(&vec![0u8; 64]); // partial data
+        bad.extend_from_slice(&[0u8; 64]); // partial data
 
         let result = bincode_deserialize_limited::<AuctionMessage>(&bad);
         assert!(result.is_err());

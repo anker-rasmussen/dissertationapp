@@ -151,7 +151,7 @@ mod tests {
             bidder: make_bidder(bidder_id),
             commitment: [bidder_id; 32],
             timestamp: 1000,
-            bid_key: make_test_record_key(bidder_id as u64),
+            bid_key: make_test_record_key(u64::from(bidder_id)),
             signing_pubkey: [bidder_id; 32],
         }
     }
@@ -186,8 +186,8 @@ mod tests {
         let listing_key = make_test_key();
         let mut index = BidIndex::new(listing_key.clone());
 
-        let bid = make_bid_record(listing_key.clone(), 1);
-        index.add_bid_with_time(bid.clone(), &time);
+        let bid = make_bid_record(listing_key, 1);
+        index.add_bid_with_time(bid, &time);
 
         assert_eq!(index.bids.len(), 1);
         assert_eq!(index.last_updated, 2000);
@@ -199,9 +199,9 @@ mod tests {
         let listing_key = make_test_key();
         let mut index = BidIndex::new(listing_key.clone());
 
-        let bid = make_bid_record(listing_key.clone(), 1);
+        let bid = make_bid_record(listing_key, 1);
         index.add_bid_with_time(bid.clone(), &time);
-        index.add_bid_with_time(bid.clone(), &time);
+        index.add_bid_with_time(bid, &time);
 
         assert_eq!(index.bids.len(), 1);
     }
@@ -215,7 +215,7 @@ mod tests {
         // Add bids (seller is bidder 1)
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
-        index.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+        index.add_bid_with_time(make_bid_record(listing_key, 2), &time);
 
         let seller = make_bidder(1);
         let sorted = index.sorted_bidders(&seller);
@@ -241,7 +241,7 @@ mod tests {
         bid3.timestamp = 3000; // Latest timestamp (ignored)
         let mut bid1 = make_bid_record(listing_key.clone(), 1);
         bid1.timestamp = 1000; // Earliest timestamp (ignored)
-        let mut bid2 = make_bid_record(listing_key.clone(), 2);
+        let mut bid2 = make_bid_record(listing_key, 2);
         bid2.timestamp = 2000; // Middle timestamp (ignored)
 
         index.add_bid_with_time(bid3, &time);
@@ -269,7 +269,7 @@ mod tests {
 
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
         index.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
-        index.add_bid_with_time(make_bid_record(listing_key.clone(), 3), &time);
+        index.add_bid_with_time(make_bid_record(listing_key, 3), &time);
 
         let seller = make_bidder(1);
 
@@ -314,7 +314,7 @@ mod tests {
 
         let mut index2 = BidIndex::new(listing_key.clone());
         index2.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
-        index2.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
+        index2.add_bid_with_time(make_bid_record(listing_key, 1), &time);
 
         // Party IDs should be the same regardless of insertion order
         let seller = make_bidder(1);
@@ -347,7 +347,7 @@ mod tests {
         index1.add_bid_with_time(bid1.clone(), &time);
         index1.add_bid_with_time(bid2.clone(), &time);
 
-        let mut index2 = BidIndex::new(listing_key.clone());
+        let mut index2 = BidIndex::new(listing_key);
         index2.add_bid_with_time(bid2, &time);
         index2.add_bid_with_time(bid1, &time);
 
@@ -375,7 +375,7 @@ mod tests {
         let listing_key = make_test_key();
         let mut original = BidIndex::new(listing_key.clone());
         original.add_bid_with_time(make_bid_record(listing_key.clone(), 1), &time);
-        original.add_bid_with_time(make_bid_record(listing_key.clone(), 2), &time);
+        original.add_bid_with_time(make_bid_record(listing_key, 2), &time);
 
         let cbor = original.to_cbor().unwrap();
         let restored = BidIndex::from_cbor(&cbor).unwrap();

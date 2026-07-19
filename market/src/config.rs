@@ -415,13 +415,13 @@ mod tests {
         for value in ["true", "TRUE", "True", "TrUe"] {
             std::env::set_var("VEILID_INSECURE_STORAGE", value);
             let config = MarketConfig::from_env();
-            assert!(config.insecure_storage, "Failed for value: {}", value);
+            assert!(config.insecure_storage, "Failed for value: {value}");
         }
 
         for value in ["false", "FALSE", "0", "no", ""] {
             std::env::set_var("VEILID_INSECURE_STORAGE", value);
             let config = MarketConfig::from_env();
-            assert!(!config.insecure_storage, "Failed for value: {}", value);
+            assert!(!config.insecure_storage, "Failed for value: {value}");
         }
 
         std::env::remove_var("VEILID_INSECURE_STORAGE");

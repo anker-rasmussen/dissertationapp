@@ -258,8 +258,10 @@ async fn test_e2e_smoke_single_node_diagnostic() {
     eprintln!("   Bootstrap: {:?}", config.bootstrap_nodes);
     eprintln!("   Port offset: {} (port 5195)", config.port_offset);
 
-    let mut market_config = market::config::MarketConfig::default();
-    market_config.insecure_storage = true;
+    let market_config = market::config::MarketConfig {
+        insecure_storage: true,
+        ..Default::default()
+    };
     let mut node = VeilidNode::new(data_dir.clone(), &market_config).with_devnet(config);
 
     eprintln!("5. Starting Veilid node...");
@@ -826,10 +828,10 @@ async fn test_e2e_3_happy_path() {
             winner_key.is_some()
         );
 
-        let loser_key = match bidder2.get_decryption_key(&listing_key).await {
-            Ok(k) => k,
-            Err(_) => None,
-        };
+        let loser_key = bidder2
+            .get_decryption_key(&listing_key)
+            .await
+            .expect("loser key query must not fail (IPC error != absent key)");
 
         assert_eq!(
             winner_key.as_deref(),
@@ -900,10 +902,10 @@ async fn test_e2e_1_sequential_auctions() {
         let a1_winner_key = poll_decryption_key(&mut node_b, &listing1_key, 600).await;
         assert!(a1_winner_key.is_some(), "Auction 1: winner should have key");
 
-        let a1_loser_key = match node_c.get_decryption_key(&listing1_key).await {
-            Ok(k) => k,
-            Err(_) => None,
-        };
+        let a1_loser_key = node_c
+            .get_decryption_key(&listing1_key)
+            .await
+            .expect("loser key query must not fail (IPC error != absent key)");
         assert!(
             a1_loser_key.is_none(),
             "Auction 1: loser should NOT have key"
@@ -926,10 +928,10 @@ async fn test_e2e_1_sequential_auctions() {
         let a2_winner_key = poll_decryption_key(&mut node_a, &listing2_key, 600).await;
         assert!(a2_winner_key.is_some(), "Auction 2: winner should have key");
 
-        let a2_loser_key = match node_c.get_decryption_key(&listing2_key).await {
-            Ok(k) => k,
-            Err(_) => None,
-        };
+        let a2_loser_key = node_c
+            .get_decryption_key(&listing2_key)
+            .await
+            .expect("loser key query must not fail (IPC error != absent key)");
         assert!(
             a2_loser_key.is_none(),
             "Auction 2: loser should NOT have key"
@@ -1098,10 +1100,10 @@ async fn run_n_party_headless_test(
         if i == winner_idx {
             continue;
         }
-        let key = match bidder.get_decryption_key(&listing_key).await {
-            Ok(k) => k,
-            Err(_) => None,
-        };
+        let key = bidder
+            .get_decryption_key(&listing_key)
+            .await
+            .expect("loser key query must not fail (IPC error != absent key)");
         eprintln!("[E2E] Bidder{} decryption key: {}", i + 1, key.is_some());
         assert!(
             key.is_none(),

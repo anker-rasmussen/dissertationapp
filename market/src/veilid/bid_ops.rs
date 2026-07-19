@@ -119,7 +119,7 @@ mod tests {
             bidder: make_test_public_key(bidder_id),
             commitment: [bidder_id; 32],
             timestamp: 1000,
-            bid_key: make_test_record_key(bidder_id as u64),
+            bid_key: make_test_record_key(u64::from(bidder_id)),
             signing_pubkey: [bidder_id; 32],
         }
     }

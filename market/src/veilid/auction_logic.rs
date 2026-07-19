@@ -320,7 +320,7 @@ mod tests {
 
         for i in 1..=3 {
             let bidder = make_test_public_key(i);
-            let bid_key = make_test_record_key(i as u64 * 10);
+            let bid_key = make_test_record_key(u64::from(i) * 10);
             logic
                 .register_bid_announcement(&listing_key, bidder, bid_key)
                 .await;
@@ -395,7 +395,7 @@ mod tests {
             signing_pubkey: [1u8; 32],
         };
         let other_bid = BidRecord {
-            listing_key: listing_key.clone(),
+            listing_key,
             bidder: make_test_public_key(2),
             commitment: [2u8; 32],
             timestamp: 1000,
@@ -422,7 +422,7 @@ mod tests {
 
         // Only other bidders, not us
         let other_bid = BidRecord {
-            listing_key: listing_key.clone(),
+            listing_key,
             bidder: make_test_public_key(99),
             commitment: [99u8; 32],
             timestamp: 1000,

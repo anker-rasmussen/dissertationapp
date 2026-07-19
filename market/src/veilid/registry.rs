@@ -783,11 +783,11 @@ mod tests {
         let mut reg = MarketRegistry::default();
 
         // Add 200 sellers (the cap)
-        for i in 0..200 {
+        for i in 0..200u64 {
             reg.add_seller(SellerEntry {
-                seller_pubkey: format!("pk{}", i),
-                catalog_key: format!("ck{}", i),
-                registered_at: i as u64 * 1000,
+                seller_pubkey: format!("pk{i}"),
+                catalog_key: format!("ck{i}"),
+                registered_at: i * 1000,
                 signing_pubkey: String::new(),
             });
         }
@@ -817,12 +817,12 @@ mod tests {
         };
 
         // Add 200 listings (the cap)
-        for i in 0..200 {
+        for i in 0..200u64 {
             catalog.add_listing(CatalogEntry {
-                listing_key: format!("lk{}", i),
-                title: format!("Item {}", i),
-                reserve_price: i as u64 * 10,
-                auction_end: 99_999 + i as u64,
+                listing_key: format!("lk{i}"),
+                title: format!("Item {i}"),
+                reserve_price: i * 10,
+                auction_end: 99_999 + i,
             });
         }
         assert_eq!(catalog.listings.len(), 200);
@@ -913,11 +913,11 @@ mod tests {
     fn test_market_registry_add_multiple_unique_sellers() {
         let mut reg = MarketRegistry::default();
 
-        for i in 1..=10 {
+        for i in 1..=10u64 {
             reg.add_seller(SellerEntry {
-                seller_pubkey: format!("seller_{}", i),
-                catalog_key: format!("catalog_{}", i),
-                registered_at: i as u64 * 100,
+                seller_pubkey: format!("seller_{i}"),
+                catalog_key: format!("catalog_{i}"),
+                registered_at: i * 100,
                 signing_pubkey: String::new(),
             });
         }
@@ -926,10 +926,10 @@ mod tests {
         assert_eq!(reg.version, 10);
 
         // Verify each seller is distinct
-        for (idx, i) in (1..=10).enumerate() {
-            assert_eq!(reg.sellers[idx].seller_pubkey, format!("seller_{}", i));
-            assert_eq!(reg.sellers[idx].catalog_key, format!("catalog_{}", i));
-            assert_eq!(reg.sellers[idx].registered_at, i as u64 * 100);
+        for (idx, i) in (1..=10u64).enumerate() {
+            assert_eq!(reg.sellers[idx].seller_pubkey, format!("seller_{i}"));
+            assert_eq!(reg.sellers[idx].catalog_key, format!("catalog_{i}"));
+            assert_eq!(reg.sellers[idx].registered_at, i * 100);
         }
     }
 
@@ -1198,11 +1198,11 @@ mod tests {
     #[test]
     fn test_route_entry_max_cap() {
         let mut reg = MarketRegistry::default();
-        for i in 0..200 {
+        for i in 0..200u64 {
             reg.add_route(RouteEntry {
-                node_id: format!("node{}", i),
-                route_blob: vec![i as u8],
-                registered_at: i as u64,
+                node_id: format!("node{i}"),
+                route_blob: vec![u8::try_from(i % 256).unwrap()],
+                registered_at: i,
             });
         }
         assert_eq!(reg.routes.len(), 200);
