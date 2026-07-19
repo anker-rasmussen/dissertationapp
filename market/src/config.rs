@@ -259,9 +259,8 @@ impl MarketConfig {
             Err(_) => DEFAULT_NODE_OFFSET,
         };
 
-        let insecure_storage = std::env::var("VEILID_INSECURE_STORAGE")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let insecure_storage =
+            std::env::var("VEILID_INSECURE_STORAGE").is_ok_and(|v| v.eq_ignore_ascii_case("true"));
 
         let bootstrap_nodes = std::env::var(VEILID_BOOTSTRAP_ENV)
             .ok()
