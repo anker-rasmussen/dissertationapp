@@ -1172,7 +1172,8 @@ impl MpcOrchestrator {
         {
             let mut mgr = route_manager.lock().await;
             let my_pk = bidders[my_party_id].clone();
-            mgr.refresh_own_route(&my_pk).await?;
+            // Fresh blob is retained by the manager; the announcement below re-reads it.
+            let _route_blob = mgr.refresh_own_route(&my_pk).await?;
 
             // Broadcast fresh route to peers via their broadcast routes
             // (the broadcast route registry is maintained by the coordinator's

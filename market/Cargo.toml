@@ -56,7 +56,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Cryptography
 sha2 = "0.10"  # SHA256 hashing for content verification
 subtle = "2"  # Constant-time comparison for commitment verification
-ed25519-dalek = { version = "2", default-features = false }  # Shared keypair derivation
+ed25519-dalek = { version = "2", default-features = false, features = [
+    "rand_core",
+] } # Shared keypair derivation + key generation
 aes-gcm = "0.10"  # AES-256-GCM encryption for content
 blake3 = "1"  # BLAKE3 hashing for deterministic DHT key derivation
 rand = "0.8"  # Random number generation

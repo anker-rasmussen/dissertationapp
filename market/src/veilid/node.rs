@@ -12,10 +12,10 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use veilid_core::{
-    api_startup, VeilidAPI, VeilidConfig, VeilidConfigCapabilities, VeilidConfigDHT,
-    VeilidConfigNetwork, VeilidConfigProtectedStore, VeilidConfigProtocol, VeilidConfigRPC,
-    VeilidConfigRoutingTable, VeilidConfigTCP, VeilidConfigTableStore, VeilidConfigUDP,
-    VeilidConfigWS, VeilidUpdate, VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
+    api_startup, VeilidAPI, VeilidConfig, VeilidConfigCapabilities, VeilidConfigNetwork,
+    VeilidConfigProtectedStore, VeilidConfigProtocol, VeilidConfigRoutingTable, VeilidConfigTCP,
+    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate,
+    VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
 /// Snapshot of Veilid node connectivity: attachment status, peer count, and node IDs.
@@ -37,8 +37,6 @@ pub struct DevNetConfig {
     pub bootstrap_nodes: Vec<String>,
     /// Port offset from base port 5150 (0=bootstrap, 1-19=devnet nodes, 20+=market instances)
     pub port_offset: u16,
-    /// Routing table limit for over-attached peers.
-    pub limit_over_attached: u32,
     /// Override listen address (e.g., "0.0.0.0" for tailnet). Default: "127.0.0.1".
     pub listen_addr: Option<String>,
     /// Override public address advertised to peers (e.g., "100.64.0.1:5180").
@@ -54,7 +52,6 @@ impl DevNetConfig {
             network_key: config.network_key.clone(),
             bootstrap_nodes: config.bootstrap_nodes.clone(),
             port_offset: config.node_offset,
-            limit_over_attached: config.limit_over_attached,
             listen_addr: config.listen_addr.clone(),
             public_addr: config.public_addr.clone(),
         }
@@ -73,8 +70,6 @@ pub struct VeilidNode {
     /// Whether to use insecure (unencrypted) protected storage.
     /// Defaults to `false` for production safety; set to `true` for devnet/test.
     insecure_storage: bool,
-    /// Veilid RPC timeout in milliseconds (default: 10_000).
-    rpc_timeout_ms: u32,
     update_tx: mpsc::Sender<VeilidUpdate>,
     update_rx: Option<mpsc::Receiver<VeilidUpdate>>,
 }
@@ -89,7 +84,6 @@ impl VeilidNode {
             data_dir,
             devnet_config: None,
             insecure_storage: config.insecure_storage,
-            rpc_timeout_ms: config.rpc_timeout_ms,
             update_tx,
             update_rx: Some(update_rx),
         }
@@ -166,46 +160,26 @@ impl VeilidNode {
             VeilidConfigNetwork {
                 network_key_password: Some(devnet.network_key.clone()),
                 detect_address_changes: Some(false), // Static addresses for devnet
-                rpc: VeilidConfigRPC {
-                    timeout_ms: self.rpc_timeout_ms,
-                    ..Default::default()
-                },
-                dht: VeilidConfigDHT {
-                    get_value_timeout_ms: self.rpc_timeout_ms * 2,
-                    set_value_timeout_ms: self.rpc_timeout_ms * 2,
-                    resolve_node_timeout_ms: self.rpc_timeout_ms * 2,
-                    ..Default::default()
-                },
                 routing_table: VeilidConfigRoutingTable {
                     bootstrap: devnet.bootstrap_nodes.clone(),
                     bootstrap_keys: vec![], // No signature verification for devnet
-                    // High over-attached limit so nodes accept all peers in large devnets.
-                    // Lower tiers kept small so nodes reach "attached" quickly.
-                    limit_over_attached: 200,
-                    limit_fully_attached: 64,
-                    limit_attached_strong: 32,
-                    limit_attached_good: 16,
-                    limit_attached_weak: 2,
                     ..Default::default()
                 },
                 protocol: VeilidConfigProtocol {
                     udp: VeilidConfigUDP {
                         enabled: true,
-                        socket_pool_size: 0,
                         listen_address: listen_addr.clone(),
                         public_address: Some(public_addr.clone()),
                     },
                     tcp: VeilidConfigTCP {
                         connect: true,
                         listen: true,
-                        max_connections: 32,
                         listen_address: listen_addr.clone(),
                         public_address: Some(public_addr),
                     },
                     ws: VeilidConfigWS {
                         connect: true,
                         listen: false, // Disabled in devnet to avoid conflicting with TCP on same port
-                        max_connections: 16,
                         listen_address: listen_addr,
                         path: "ws".to_string(),
                         url: None,
@@ -215,19 +189,7 @@ impl VeilidNode {
             }
         } else {
             info!("Configuring for public Veilid network");
-            VeilidConfigNetwork {
-                rpc: VeilidConfigRPC {
-                    timeout_ms: self.rpc_timeout_ms,
-                    ..Default::default()
-                },
-                dht: VeilidConfigDHT {
-                    get_value_timeout_ms: self.rpc_timeout_ms * 2,
-                    set_value_timeout_ms: self.rpc_timeout_ms * 2,
-                    resolve_node_timeout_ms: self.rpc_timeout_ms * 2,
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
+            VeilidConfigNetwork::default()
         };
 
         // For devnet, disable capabilities not needed by market nodes.

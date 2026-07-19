@@ -79,14 +79,6 @@ pub const DEFAULT_UPDATE_CHANNEL_CAPACITY: usize = 4096;
 /// Default timeout for MPC execution.
 pub const DEFAULT_MPC_EXECUTION_TIMEOUT_SECS: u64 = 3600;
 
-/// Default Veilid RPC timeout in milliseconds.
-///
-/// Controls how long `app_call` waits internally for a response.
-/// Lower values detect dead routes faster during MPC data transfer
-/// (reducing per-retry overhead from 10s to 5s).  DHT operations
-/// typically complete in 1-3s so 5s is sufficient for bootstrapping.
-pub const DEFAULT_RPC_TIMEOUT_MS: u32 = 5_000;
-
 /// Default MPC protocol binary name.
 ///
 /// MASCOT: dishonest majority, malicious security, N >= 2 parties.
@@ -201,13 +193,8 @@ pub struct MarketConfig {
     pub mpc_execution_timeout_secs: u64,
     /// Capacity for Veilid update channel.
     pub update_channel_capacity: usize,
-    /// Routing table limit for over-attached peers.
-    pub limit_over_attached: u32,
     /// Maximum seconds to wait for network attachment.
     pub max_attachment_wait_secs: u64,
-    /// Veilid RPC timeout in milliseconds (default: 5_000).
-    /// Controls how long app_call waits for a response before timing out.
-    pub rpc_timeout_ms: u32,
     /// Override listen address for Veilid protocol sockets (e.g., "0.0.0.0" for tailnet).
     /// When `None`, devnet defaults to `127.0.0.1`.
     pub listen_addr: Option<String>,
@@ -291,9 +278,7 @@ impl MarketConfig {
             node_offset,
             mpc_execution_timeout_secs: DEFAULT_MPC_EXECUTION_TIMEOUT_SECS,
             update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
-            limit_over_attached: 16,
             max_attachment_wait_secs: 180,
-            rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
             listen_addr,
             public_addr,
         }
@@ -314,9 +299,7 @@ impl Default for MarketConfig {
             node_offset: DEFAULT_NODE_OFFSET,
             mpc_execution_timeout_secs: DEFAULT_MPC_EXECUTION_TIMEOUT_SECS,
             update_channel_capacity: DEFAULT_UPDATE_CHANNEL_CAPACITY,
-            limit_over_attached: 16,
             max_attachment_wait_secs: 180,
-            rpc_timeout_ms: DEFAULT_RPC_TIMEOUT_MS,
             listen_addr: None,
             public_addr: None,
         }
