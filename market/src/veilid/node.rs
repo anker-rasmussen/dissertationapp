@@ -178,7 +178,7 @@ impl VeilidNode {
                         public_address: Some(public_addr),
                     },
                     ws: VeilidConfigWS {
-                        connect: true,
+                        connect: false, // No WS anywhere in devnet; outbound WS would demand an unsatisfiable relay
                         listen: false, // Disabled in devnet to avoid conflicting with TCP on same port
                         listen_address: listen_addr,
                         path: "ws".to_string(),
