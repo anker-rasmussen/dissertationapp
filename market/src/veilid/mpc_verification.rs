@@ -4,12 +4,12 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 use veilid_core::{PublicKey, RecordKey};
 
-use super::bid_announcement::{AuctionMessage, BidAnnouncementRegistry};
-use super::bid_ops::BidOperations;
+use super::bid_announcement::AuctionMessage;
 use super::mpc_execution::MpcResultContract;
 use super::mpc_orchestrator::{AuctionPhase, MpcOrchestrator};
-use crate::config::{now_unix, subkeys};
+use crate::config::now_unix;
 use crate::error::MarketResult;
+use crate::marketplace::BidIndex;
 
 /// Verify a bid commitment against the revealed bid value and nonce.
 ///
@@ -30,6 +30,11 @@ pub fn verify_commitment(bid_value: u64, nonce: &[u8; 32], stored_commitment: &[
 pub(crate) struct VerificationState {
     pub winner_pubkey: PublicKey,
     pub mpc_winning_bid: u64,
+    /// The winner's commitment as it was consumed by the MPC (BidIndex snapshot).
+    /// The reveal must match the commitment that was fixed *before* the MPC ran;
+    /// refetching from the DHT at verification time would let a bidder rewrite
+    /// their record post-MPC and would fail spuriously when the fetch misses.
+    pub winner_commitment: Option<[u8; 32]>,
     pub verified: Option<bool>,
 }
 
@@ -40,6 +45,7 @@ impl MpcOrchestrator {
         result: &MpcResultContract,
         listing_key: &RecordKey,
         all_parties: &[PublicKey],
+        bid_index: &BidIndex,
     ) {
         let (Some(winner_pid), Some(bid)) = (result.winner_party_id, result.winning_bid) else {
             warn!("Invalid seller MPC result contract: missing winner_party_id or winning_bid");
@@ -54,12 +60,25 @@ impl MpcOrchestrator {
             let winner_pubkey = all_parties[winner_pid].clone();
             let key = listing_key.clone();
 
+            let winner_commitment = bid_index
+                .bids
+                .iter()
+                .find(|b| b.bidder == winner_pubkey)
+                .map(|b| b.commitment);
+            if winner_commitment.is_none() {
+                warn!(
+                    "MPC winner {} has no bid in the MPC-input BidIndex; verification will fail",
+                    winner_pubkey
+                );
+            }
+
             // Store pending verification entry
             self.pending_verifications.lock().await.insert(
                 key,
                 VerificationState {
                     winner_pubkey: winner_pubkey.clone(),
                     mpc_winning_bid: bid,
+                    winner_commitment,
                     verified: None,
                 },
             );
@@ -107,8 +126,9 @@ impl MpcOrchestrator {
 
     /// Verify winner's revealed bid against stored commitment (Danish Sugar Beet style).
     ///
-    /// Steps 1-2 look up local MPC data and compare the bid value. Steps 3-4
-    /// fetch the BidRecord from DHT and verify the SHA256 commitment.
+    /// The commitment is the BidIndex snapshot captured when the MPC ran — the
+    /// reveal must open the commitment that was fixed before the computation,
+    /// so no DHT fetch belongs in this path (see [`VerificationState`]).
     /// Early returns are not a remote timing side-channel: Veilid `app_call`
     /// round-trip variance (~50-2000ms) dominates local verification time (~µs).
     pub async fn verify_winner_reveal(
@@ -118,8 +138,8 @@ impl MpcOrchestrator {
         bid_value: u64,
         nonce: &[u8; 32],
     ) -> bool {
-        // 1. Get pending verification to check expected winning bid
-        let expected_bid = {
+        // 1. Get pending verification: expected winner, bid, and commitment snapshot
+        let (expected_bid, expected_commitment) = {
             let verifications = self.pending_verifications.lock().await;
             if let Some(state) = verifications.get(listing_key) {
                 if &state.winner_pubkey != winner {
@@ -129,7 +149,7 @@ impl MpcOrchestrator {
                     );
                     return false;
                 }
-                state.mpc_winning_bid
+                (state.mpc_winning_bid, state.winner_commitment)
             } else {
                 warn!("No pending verification found for listing {}", listing_key);
                 return false;
@@ -139,47 +159,24 @@ impl MpcOrchestrator {
         // 2. Check bid value matches MPC output (store result, don't return early)
         let bid_matches = bid_value == expected_bid;
 
-        // 3. Fetch winner's BidRecord from DHT to get stored commitment
+        // 3. Verify commitment: SHA256(bid_value || nonce) == MPC-input snapshot
         // Always perform this step regardless of bid_matches to prevent timing leaks
-        let bid_ops = BidOperations::new(self.dht.clone());
-
-        let registry_data = match self
-            .dht
-            .get_value_at_subkey(listing_key, subkeys::BID_ANNOUNCEMENTS, true)
-            .await
-        {
-            Ok(Some(data)) => Some(data),
-            Ok(None) | Err(_) => None,
-        };
-
-        let registry =
-            registry_data.and_then(|data| BidAnnouncementRegistry::from_bytes(&data).ok());
-
-        let winner_bid_record_key = registry.as_ref().and_then(|reg| {
-            reg.announcements
-                .iter()
-                .find(|(b, _, _)| b == winner)
-                .map(|(_, key, _)| key.clone())
-        });
-
-        let bid_record = match winner_bid_record_key {
-            Some(key) => bid_ops.fetch_bid(&key).await.ok().flatten(),
-            None => None,
-        };
-
-        // 4. Verify commitment: SHA256(bid_value || nonce) == stored
-        // Always perform this step regardless of previous failures to prevent timing leaks
-        let commitment_valid = bid_record
+        let commitment_valid = expected_commitment
             .as_ref()
-            .is_some_and(|record| verify_commitment(bid_value, nonce, &record.commitment));
+            .is_some_and(|commitment| verify_commitment(bid_value, nonce, commitment));
 
-        // 5. Combine results and return
+        // 4. Combine results and return
         let result = bid_matches && commitment_valid;
 
         if result {
             info!("Commitment verified for winner {}", winner);
         } else {
-            warn!("Verification failed for winner {}", winner);
+            warn!(
+                "Verification failed for winner {} (bid_matches={}, commitment_present={})",
+                winner,
+                bid_matches,
+                expected_commitment.is_some()
+            );
         }
 
         result

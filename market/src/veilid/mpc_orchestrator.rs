@@ -808,8 +808,14 @@ impl MpcOrchestrator {
              \"tunnel_bytes_sent\":{bytes_sent},\"tunnel_bytes_recv\":{bytes_recv}}}"
         );
 
-        self.process_mpc_result(party_id, &process_output, listing_key, all_parties)
-            .await?;
+        self.process_mpc_result(
+            party_id,
+            &process_output,
+            listing_key,
+            all_parties,
+            bid_index,
+        )
+        .await?;
 
         // Remove this session's tunnel proxy before guard drops
         self.active_tunnel_proxies.lock().await.remove(&session_id);
@@ -1325,6 +1331,7 @@ impl MpcOrchestrator {
         process_output: &std::process::Output,
         listing_key: &RecordKey,
         all_parties: &[PublicKey],
+        bid_index: &BidIndex,
     ) -> MarketResult<()> {
         let stdout = String::from_utf8_lossy(&process_output.stdout);
         let stderr = String::from_utf8_lossy(&process_output.stderr);
@@ -1347,7 +1354,7 @@ impl MpcOrchestrator {
         };
 
         if party_id == 0 {
-            self.handle_seller_mpc_result(&result_contract, listing_key, all_parties)
+            self.handle_seller_mpc_result(&result_contract, listing_key, all_parties, bid_index)
                 .await;
         } else {
             self.handle_bidder_mpc_result(&result_contract, listing_key)
