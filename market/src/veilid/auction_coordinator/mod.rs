@@ -740,8 +740,17 @@ impl AuctionCoordinator {
     /// Handles the full lifecycle including `app_call_reply` for AppCall.
     /// Both `main.rs` and `market-headless` call this to avoid duplicating
     /// the dispatch switch.
+    ///
+    /// AppCall processing is spawned onto its own task: handlers may perform
+    /// nested `app_call`s (challenge → reveal → key transfer), and the answer
+    /// to each of those can only be produced once the *peer's* dispatcher
+    /// processes its update. Handling calls inline serialized the two nodes
+    /// against each other (mutual head-of-line blocking) until every retry
+    /// budget expired. Out-of-order and duplicate delivery are already part
+    /// of the handler contract (MPC tunnel reorders by seq; auction handlers
+    /// are idempotent).
     #[tracing::instrument(skip_all)]
-    pub async fn dispatch_veilid_update(&self, update: veilid_core::VeilidUpdate) {
+    pub async fn dispatch_veilid_update(self: &Arc<Self>, update: veilid_core::VeilidUpdate) {
         match update {
             veilid_core::VeilidUpdate::AppMessage(msg) => {
                 if let Err(e) = self.process_app_message(msg.message().to_vec()).await {
@@ -749,20 +758,25 @@ impl AuctionCoordinator {
                 }
             }
             veilid_core::VeilidUpdate::AppCall(call) => {
-                let call_id = call.id();
-                match self.process_app_call(call.message().to_vec()).await {
-                    Ok(response) => {
-                        if let Err(e) = self.api.app_call_reply(call_id, response).await {
-                            tracing::error!("app_call_reply error: {}", e);
+                let this = Arc::clone(self);
+                tokio::spawn(async move {
+                    let call_id = call.id();
+                    match this.process_app_call(call.message().to_vec()).await {
+                        Ok(response) => {
+                            if let Err(e) = this.api.app_call_reply(call_id, response).await {
+                                tracing::error!("app_call_reply error: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("AppCall error: {}", e);
+                            if let Err(reply_err) =
+                                this.api.app_call_reply(call_id, vec![0x00]).await
+                            {
+                                warn!("app_call_reply (NACK) failed: {}", reply_err);
+                            }
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("AppCall error: {}", e);
-                        if let Err(reply_err) = self.api.app_call_reply(call_id, vec![0x00]).await {
-                            warn!("app_call_reply (NACK) failed: {}", reply_err);
-                        }
-                    }
-                }
+                });
             }
             veilid_core::VeilidUpdate::RouteChange(change) => {
                 self.handle_route_change(
