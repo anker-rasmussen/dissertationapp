@@ -12,10 +12,10 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use veilid_core::{
-    api_startup, VeilidAPI, VeilidConfig, VeilidConfigCapabilities, VeilidConfigNetwork,
-    VeilidConfigProtectedStore, VeilidConfigProtocol, VeilidConfigRoutingTable, VeilidConfigTCP,
-    VeilidConfigTableStore, VeilidConfigUDP, VeilidConfigWS, VeilidUpdate,
-    VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
+    api_startup, VeilidAPI, VeilidConfig, VeilidConfigAddressType, VeilidConfigCapabilities,
+    VeilidConfigNetwork, VeilidConfigProtectedStore, VeilidConfigProtocol,
+    VeilidConfigRoutingTable, VeilidConfigTCP, VeilidConfigTableStore, VeilidConfigUDP,
+    VeilidConfigWS, VeilidUpdate, VEILID_CAPABILITY_SIGNAL, VEILID_CAPABILITY_VALIDATE_DIAL_INFO,
 };
 
 /// Snapshot of Veilid node connectivity: attachment status, peer count, and node IDs.
@@ -160,6 +160,11 @@ impl VeilidNode {
             VeilidConfigNetwork {
                 network_key_password: Some(devnet.network_key.clone()),
                 detect_address_changes: Some(false), // Static addresses for devnet
+                // IPv4 only: devnet addresses are all spoofed 1.2.3.x. Allowing IPv6 lets
+                // connections use the host's real global address, bypassing ipspoof; all
+                // nodes then share one IPv6-prefix address-filter bucket and connection
+                // storms trip its rate limit, stalling replies for tens of seconds.
+                address_types: vec![VeilidConfigAddressType::Ipv4],
                 routing_table: VeilidConfigRoutingTable {
                     bootstrap: devnet.bootstrap_nodes.clone(),
                     bootstrap_keys: vec![], // No signature verification for devnet
