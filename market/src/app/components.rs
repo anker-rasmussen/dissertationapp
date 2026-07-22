@@ -172,6 +172,14 @@ pub fn NetworkStatus(state: NodeState) -> Element {
         state.node_ids.first().cloned().unwrap_or_default()
     };
 
+    // Veilid's smoothed network-size estimate + median reliable-peer latency.
+    let network_display = {
+        let latency = state
+            .median_latency_ms
+            .map_or_else(String::new, |ms| format!(", ~{ms}ms"));
+        format!("~{} nodes{latency}", state.estimated_network_size)
+    };
+
     rsx! {
         div {
             class: "status-card",
@@ -188,7 +196,10 @@ pub fn NetworkStatus(state: NodeState) -> Element {
                 }
 
                 span { class: "label", "Peers:" }
-                span { "{state.peer_count}" }
+                span { "{state.peer_count} ({state.reliable_peer_count} reliable)" }
+
+                span { class: "label", "Network:" }
+                span { "{network_display}" }
 
                 span { class: "label", "Node ID:" }
                 span {

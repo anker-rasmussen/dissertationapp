@@ -25,6 +25,12 @@ pub struct NodeState {
     pub attachment_state: String,
     pub peer_count: usize,
     pub node_ids: Vec<String>,
+    /// Reliable peers in the routing table (from Attachment updates).
+    pub reliable_peer_count: u64,
+    /// Veilid's smoothed estimate of total reachable network size.
+    pub estimated_network_size: u64,
+    /// Median p75 latency across reliable peers, in milliseconds.
+    pub median_latency_ms: Option<u64>,
 }
 
 /// Configuration for connecting to the local Docker devnet.
@@ -265,11 +271,21 @@ impl VeilidNode {
                     );
                 }
                 VeilidUpdate::Attachment(attachment) => {
+                    let median_latency_ms = attachment.median_latency.map(|d| d.as_u64() / 1000);
                     let mut s = state.write();
                     s.is_attached = attachment.state.is_attached();
                     s.attachment_state = format!("{:?}", attachment.state);
+                    s.reliable_peer_count = attachment.reliable_peer_count.as_u64();
+                    s.estimated_network_size = attachment.estimated_network_size.as_u64();
+                    s.median_latency_ms = median_latency_ms;
                     drop(s);
-                    info!("Attachment state: {:?}", attachment.state);
+                    info!(
+                        "Attachment state: {:?} (reliable peers: {}, est. network size: {}, median latency: {})",
+                        attachment.state,
+                        attachment.reliable_peer_count,
+                        attachment.estimated_network_size,
+                        median_latency_ms.map_or_else(|| "n/a".to_string(), |ms| format!("{ms}ms")),
+                    );
                 }
                 VeilidUpdate::AppMessage(msg) => {
                     debug!("Received app message: {} bytes", msg.message().len());
