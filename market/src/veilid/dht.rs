@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use veilid_core::{DHTSchema, KeyPair, RecordKey, VeilidAPI, CRYPTO_KIND_VLD0};
 
 use crate::config::DHT_SUBKEY_COUNT;
@@ -8,6 +8,9 @@ use crate::traits::DhtStore;
 
 /// Veilid DHT value size limit (32 KB).
 const MAX_DHT_VALUE_SIZE: usize = 32 * 1024;
+
+/// Bound on waiting for offline subkey writes to reach the network after a set.
+const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// DHT operations wrapper for Veilid.
 ///
@@ -103,6 +106,23 @@ impl DHTOperations {
             .map_err(|e| MarketError::Dht(format!("Failed to close DHT record: {e}")))?;
 
         write_result?;
+
+        // Peers fetch records as soon as we announce their keys, but set_dht_value
+        // may queue the write offline (flushed by a background task). Wait for the
+        // network flush so announce-then-fetch can't race it; instant when nothing
+        // is pending. Not flushing in time is non-fatal: the write is locally
+        // durable, the background task keeps retrying, and readers have retry loops.
+        match routing_context
+            .flush_dht_record(record.key.clone(), Some(FLUSH_TIMEOUT))
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(key = %record.key, subkey, "DHT write not fully flushed within timeout");
+            }
+            Err(e) => warn!(key = %record.key, subkey, "DHT flush failed: {e}"),
+        }
+
         info!(key = %record.key, bytes = value.len(), subkey, "Set DHT value");
 
         Ok(())
@@ -176,6 +196,19 @@ impl DHTOperations {
             .map_err(|e| MarketError::Dht(format!("Failed to close DHT record after RMW: {e}")))?;
 
         write_result?;
+
+        // Same announce-then-fetch race as set_value_at_subkey; see comment there.
+        match routing_context
+            .flush_dht_record(record.key.clone(), Some(FLUSH_TIMEOUT))
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(key = %record.key, subkey, "DHT RMW write not fully flushed within timeout");
+            }
+            Err(e) => warn!(key = %record.key, subkey, "DHT RMW flush failed: {e}"),
+        }
+
         Ok(())
     }
 
