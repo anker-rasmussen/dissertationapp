@@ -603,16 +603,19 @@ impl MpcOrchestrator {
         )
         .await?;
 
-        // Phase 3: Post-barrier route refresh
-        self.refresh_routes_post_barrier(
-            &route_manager,
-            listing_key,
-            my_party_id,
-            bidders,
-            peer_route_blobs,
-            bid_record_keys,
-        )
-        .await
+        // Phase 3: Reassemble the routes collected in Phase 1.
+        //
+        // 5e trial: the post-barrier full refresh (fresh route + broadcast +
+        // DHT rewrite + propagation wait + DHT poll) dated from when the
+        // barrier took 30-120s and Phase 1 routes died during it. The barrier
+        // now completes in seconds, so re-import + assemble is sufficient.
+        let routes = {
+            let mgr = route_manager.lock().await;
+            mgr.refresh_routes().await;
+            mgr.assemble_party_routes(bidders).await?
+        };
+        info!("Assembled {} party routes post-barrier", routes.len());
+        Ok(routes)
     }
 
     /// Write own MPC route blob to bid record subkey 1 (DHT fallback for route exchange).
@@ -1159,95 +1162,6 @@ impl MpcOrchestrator {
         }
 
         Ok(())
-    }
-
-    /// Phase 3: Create fresh routes after the readiness barrier and reassemble.
-    ///
-    /// MPC routes created in Phase 1 likely died during the 30-120s barrier
-    /// (Veilid routes expire every 60-90s in devnets).
-    async fn refresh_routes_post_barrier(
-        &self,
-        route_manager: &Arc<Mutex<MpcRouteManager>>,
-        listing_key: &RecordKey,
-        my_party_id: usize,
-        bidders: &[PublicKey],
-        peer_route_blobs: &[(String, Vec<u8>)],
-        bid_record_keys: &HashMap<PublicKey, RecordKey>,
-    ) -> MarketResult<HashMap<usize, RouteId>> {
-        info!("Post-barrier route refresh: creating fresh route");
-        {
-            let mut mgr = route_manager.lock().await;
-            let my_pk = bidders[my_party_id].clone();
-            // Fresh blob is retained by the manager; the announcement below re-reads it.
-            let _route_blob = mgr.refresh_own_route(&my_pk).await?;
-
-            // Broadcast fresh route to peers via their broadcast routes
-            // (the broadcast route registry is maintained by the coordinator's
-            // keepalive task and stays reachable longer than MPC routes).
-            if !peer_route_blobs.is_empty() {
-                let _ = mgr
-                    .broadcast_route_announcement(
-                        listing_key,
-                        &my_pk,
-                        peer_route_blobs,
-                        &self.signing_key,
-                    )
-                    .await;
-            }
-
-            // Update DHT with the fresh post-barrier route blob so peers
-            // using the DHT fallback get the current route, not the stale one.
-            if let Some(bid_key) = bid_record_keys.get(&self.my_node_id) {
-                if let Some(bid_owner) = self.bid_storage.get_bid_owner(listing_key).await {
-                    if let Some(blob) = mgr.get_my_route_blob().map(|rb| rb.blob.clone()) {
-                        if let Err(e) = MpcRouteManager::write_route_to_dht(
-                            &self.dht, bid_key, &bid_owner, &blob,
-                        )
-                        .await
-                        {
-                            warn!(
-                                "Failed to update DHT with post-barrier route (non-fatal): {}",
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-
-            drop(mgr);
-        }
-
-        // Wait for peers to also refresh and for their announcements to arrive.
-        tokio::time::sleep(std::time::Duration::from_secs(
-            config::MPC_ROUTE_PROPAGATION_WAIT_SECS,
-        ))
-        .await;
-
-        // Poll DHT for peers' freshly published route blobs.  Broadcast
-        // route announcements above may have failed (stale broadcast routes),
-        // so DHT is the reliable fallback for picking up fresh post-barrier
-        // routes from every peer.
-        let dht_updated = self
-            .poll_dht_for_peer_routes(route_manager, bidders, bid_record_keys, false)
-            .await;
-        if dht_updated > 0 {
-            info!("Post-barrier DHT poll: picked up {dht_updated} refreshed peer routes");
-        }
-
-        // Re-import all received blobs to refresh Veilid's route cache,
-        // then reassemble routes with any updates received during the wait.
-        let routes = {
-            let mgr = route_manager.lock().await;
-            mgr.refresh_routes().await;
-            mgr.assemble_party_routes(bidders).await?
-        };
-
-        info!(
-            "Post-barrier route refresh complete: {} routes assembled",
-            routes.len()
-        );
-
-        Ok(routes)
     }
 
     /// Build party maps (signers, blobs, live routes, pubkeys) for MPC execution.
